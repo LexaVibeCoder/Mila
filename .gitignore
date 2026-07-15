@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.env
+
+# API keys
+.env*
+
+# Databases
+*.db
+*.sqlite
+
+# AI models
+models/
+*.bin
+*.safetensors
+
+# Logs
+logs/
+
+# IDE
+.vscode/
+
+#Telegram
+.session

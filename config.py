@@ -1,0 +1,97 @@
+import os
+from urllib.parse import urlparse, urlunparse
+from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def normalize_api_base(url: str) -> str:
+    """Ensure the API base URL ends with /v1.
+    
+    LM Studio expects /v1/chat/completions, but if user provides
+    http://127.0.0.1:1234 (without /v1), the openai client will
+    POST to /chat/completions which fails.
+    OpenRouter already has /v1 in the path, so it stays unchanged.
+    """
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1"):
+        # Add /v1 to the path
+        new_path = path + "/v1" if path else "/v1"
+        parsed = parsed._replace(path=new_path)
+    return urlunparse(parsed)
+
+class Settings(BaseSettings):
+    # Telegram
+    API_ID: int
+    API_HASH: str
+    DEVICE_MODEL: str = "PC 64bit"
+    SYSTEM_VERSION: str = "Windows 11"
+    APP_VERSION: str = "5.0.1"
+
+    # LLM Models
+    LLM_API_BASE: str
+    LLM_API_KEY: str
+    
+    # Main LLM (Brain - daytime)
+    MAIN_LLM_MODEL: str
+    MAIN_LLM_MAX_TOKENS: int = 2048
+    MAIN_LLM_TEMPERATURE: float = 0.7
+
+    # Night LLM (Memory worker - offline)
+    NIGHT_LLM_MODEL: str = ""
+    NIGHT_LLM_API_BASE: str = ""
+    NIGHT_LLM_API_KEY: str = ""
+    NIGHT_LLM_MAX_TOKENS: int = 4096
+    NIGHT_LLM_TEMPERATURE: float = 0.3
+
+    # Embeddings
+    EMBED_API_BASE: str
+    EMBED_API_KEY: str
+    EMBED_MODEL: str
+
+    # CLIP & Moondream локальные
+    CLIP_MODEL_PATH: str = "models/clip-vit-base-patch32"
+    MOONDREAM_MODEL_PATH: str = "models/moondream-2b"
+
+    # FAISS & Reranker
+    FAISS_TEXT_PATH: str = "data/faiss_text.index"
+    FAISS_IMAGE_PATH: str = "data/faiss_image.index"
+    FAISS_SAVE_INTERVAL_MIN: int = 10
+    RERANKER_MODEL_PATH: str = "models/rerankers/BGE-Reranker-v2-m3"
+    RERANKER_THRESHOLD: float = 0.6
+
+    # Memory Decay
+    DECAY_LAMBDA: float = 0.01
+    FORGET_THRESHOLD: float = 0.3
+
+    # Data
+    SQLITE_PATH: str = "data/mila.db"
+    PHOTOS_DIR: str = "data/photos"
+
+    # Pipeline
+    MAX_CONTEXT_TOKENS: int = 10000
+    MAX_STM_MESSAGES: int = 30
+    SIMILARITY_THRESHOLD_IMAGE: float = 0.85
+    MAIN_LLM_THOUGHT_SENTENCES: int = 3
+    LOG_DIR: str = "logs"
+
+    # Sleep schedule
+    SLEEP_START_HOUR: int = 23  # 11 PM
+    SLEEP_END_HOUR: int = 7     # 7 AM
+
+    # Context buffer
+    CONTEXT_DB_PATH: str = "data/context_buffer.db"
+    CONTEXT_MAX_TOKENS: int = 30000  # Max tokens in context before summarization (messages only, excludes system prompt)
+    CONTEXT_SUMMARIZE_CHUNK_TOKENS: int = 5000  # How many tokens worth of oldest messages to compress at once
+    CONTEXT_MAX_MESSAGES: int = 40  # Legacy — kept for backward compat, but token limit takes precedence
+    CONTEXT_SUMMARIZE_CHUNK: int = 20  # Legacy
+
+    # Offline processor
+    OFFLINE_CHUNK_SIZE: int = 100  # Messages per chunk for night pipeline
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()

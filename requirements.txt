@@ -1,0 +1,13 @@
+pyrogram==2.0.106
+openai>=1.30.0
+faiss-cpu>=1.8.0
+sentence-transformers>=2.7.0
+transformers>=4.40.0
+torch>=2.3.0
+python-dotenv>=1.0.0
+pydantic-settings>=2.2.0
+Pillow>=10.3.0
+aiofiles>=23.2.0
+huggingface-hub>=0.21.0
+nest-asyncio>=1.5.0
+tiktoken>=0.13.0

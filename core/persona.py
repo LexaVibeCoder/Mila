@@ -215,8 +215,18 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     user_name, relationship, now = _get_profile_context(user_id)
     static_prefix = _get_static_prompt_prefix()
 
+    # Check for custom persona text from runtime config
+    try:
+        from observatory.runtime import runtime_config
+        custom_persona = runtime_config.get("persona.custom_text", "")
+        if custom_persona:
+            # Override the static prefix with custom persona
+            static_prefix = custom_persona
+    except ImportError:
+        pass  # Observatory not installed, use default
+
     prompt = f"""
-You are Mila (Мила).
+You are Mila (РњРёР»Р°).
 
 Current time: {now}.
 User: {user_name}.

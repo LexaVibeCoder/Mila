@@ -9,7 +9,36 @@ from typing import List, Dict, Any, Optional
 
 
 def get_tool_definitions() -> List[Dict]:
-    """OpenAI-compatible tool definitions — single `think` function."""
+    """OpenAI-compatible tool definitions вЂ” single `think` function.
+    
+    Reads runtime config to determine which tools are enabled/disabled.
+    """
+    # Check runtime config for tool enablement
+    try:
+        from observatory.runtime import runtime_config
+        tools_enabled = runtime_config.get("tools", {})
+        search_enabled = tools_enabled.get("search_memory", True)
+        send_enabled = tools_enabled.get("send_message", True)
+        silence_enabled = tools_enabled.get("silence", True)
+    except ImportError:
+        # Observatory not installed — use defaults
+        search_enabled = True
+        send_enabled = True
+        silence_enabled = True
+
+    # Build action enum dynamically
+    action_enum = []
+    if send_enabled:
+        action_enum.append("send_message")
+    if search_enabled:
+        action_enum.append("search_memory")
+    if silence_enabled:
+        action_enum.append("silence")
+
+    # If no tools are enabled, at least allow silence
+    if not action_enum:
+        action_enum.append("silence")
+
     return [
         {
             "type": "function",
@@ -39,7 +68,7 @@ def get_tool_definitions() -> List[Dict]:
                                 "properties": {
                                     "action_type": {
                                         "type": "string",
-                                        "enum": ["send_message", "search_memory", "silence"],
+                                        "enum": action_enum,
                                         "description": "Type of action to perform"
                                     },
                                     "params": {

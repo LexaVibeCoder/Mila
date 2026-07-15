@@ -21,6 +21,34 @@ class LLMClient:
         self.default_max_tokens = max_tokens or settings.MAIN_LLM_MAX_TOKENS
         self.default_temperature = temperature or settings.MAIN_LLM_TEMPERATURE
 
+    def reconfigure(self, model: str = None, api_base: str = None, api_key: str = None,
+                    max_tokens: int = None, temperature: float = None,
+                    top_p: float = None, frequency_penalty: float = None,
+                    presence_penalty: float = None):
+        """Reconfigure client parameters without re-creating the client.
+        
+        All parameters are optional — only provided ones are updated.
+        This allows changing LLM model/settings on the fly without restarting the bot.
+        """
+        if model is not None:
+            self.model = model
+        if api_base is not None:
+            self.client = openai.AsyncOpenAI(
+                base_url=normalize_api_base(api_base),
+                api_key=api_key or settings.LLM_API_KEY
+            )
+        if api_key is not None:
+            self.client = openai.AsyncOpenAI(
+                base_url=normalize_api_base(api_base or settings.LLM_API_BASE),
+                api_key=api_key
+            )
+        if max_tokens is not None:
+            self.default_max_tokens = max_tokens
+        if temperature is not None:
+            self.default_temperature = temperature
+        # Note: top_p, frequency_penalty, presence_penalty are passed per-request in generate()
+        print(f"[LLMClient] Reconfigured: model={self.model}, temp={self.default_temperature}")
+
     async def generate(
         self,
         messages: List[Dict[str, Any]],

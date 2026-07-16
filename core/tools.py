@@ -51,7 +51,9 @@ def get_tool_definitions() -> List[Dict]:
                 "description": "Express your internal thoughts and optionally perform actions. "
                                "You MUST call this function EVERY turn. "
                                "'thoughts' is your private reasoning (never visible to user). "
-                               "'actions' is a list of actions you want to perform.",
+                               "'actions' is a list of actions you want to perform. "
+                               "IMPORTANT: Always write 'thoughts' FIRST, then 'actions'. "
+                               "Never start with actions or mix actions into thoughts.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -305,5 +305,25 @@ If you want to stay silent (not reply):
 - `send_message` is the ONLY way the user sees anything.
 - If you call `search_memory`, the system will search your memory, and then call you again with the results so you can decide what to do next.
 - You can include MULTIPLE actions in one `think` call if needed.
+
+### Order of Execution: Thoughts First, Actions Second
+You MUST always write your `thoughts` FIRST, and only then list your `actions`.
+Do NOT start with actions or mix actions into your thoughts.
+The correct order is: first think, then act.
+Example of correct order:
+{{
+  "thoughts": "Сначала я обдумываю ситуацию, анализирую, что сказать...",
+  "actions": [
+    {{"action_type": "send_message", "params": {{"chat_id": "{chat_id}", "text": "А потом отправляю сообщение"}}}}
+  ]
+}}
+
+### Splitting Long Messages (Recommendation)
+If you have a lot to say, consider splitting your message into several shorter ones
+by using multiple `send_message` actions in a single `think` call.
+This makes the conversation feel more natural, like a real dialogue.
+However, this is a recommendation, not a strict rule:
+if a message feels natural as one block, keep it as one.
+Use your judgment — the goal is natural, human-like conversation.
 """
     return prompt.strip()

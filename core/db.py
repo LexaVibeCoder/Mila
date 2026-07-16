@@ -216,3 +216,13 @@ def update_memory_access(mem_ids: list[str]):
     finally:
         conn.close()
 
+
+def get_all_chat_ids_from_chunks() -> list[str]:
+    """Get all distinct chat IDs from chunks table."""
+    conn = get_conn()
+    try:
+        cur = conn.execute("SELECT DISTINCT chat_id FROM chunks")
+        return [r["chat_id"] for r in cur.fetchall()]
+    finally:
+        conn.close()
+

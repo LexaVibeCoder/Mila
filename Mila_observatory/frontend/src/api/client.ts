@@ -183,3 +183,43 @@ export const updateConfig = (updates: Record<string, unknown>) =>
 export const reloadConfig = () =>
   request<{ success: boolean; message: string }>('/config/reload', { method: 'POST' });
 export const getRuntimeState = () => request<{ config: Record<string, unknown> }>('/runtime-state');
+
+// ─── Sleep ────────────────────────────────────────────────────
+
+export interface SleepStatus {
+  state: string;
+  session_id: string | null;
+  current_stage: string;
+  progress_pct: number;
+  started_at: string | null;
+  scheduled_end_at: string | null;
+  completed_at: string | null;
+  triggered_by: string;
+  error_message: string | null;
+  queue_count: number;
+  elapsed_seconds: number | null;
+  remaining_seconds: number | null;
+  in_progress: boolean;
+}
+
+export interface SleepResponse {
+  success: boolean;
+  message: string;
+  session_id: string | null;
+  duration_minutes: number | null;
+}
+
+export const getSleepStatus = () => request<SleepStatus>('/sleep/status');
+export const startSleep = (duration_minutes?: number) =>
+  request<SleepResponse>('/sleep/start', {
+    method: 'POST',
+    body: JSON.stringify({ duration_minutes, triggered_by: 'manual' }),
+  });
+export const wakeUp = () =>
+  request<SleepResponse>('/sleep/wake', { method: 'POST' });
+export const getQueueCount = () => request<{ count: number }>('/sleep/queue-count');
+export const updateSleepConfig = (data: Record<string, unknown>) =>
+  request<{ success: boolean; message: string }>('/sleep/config', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });

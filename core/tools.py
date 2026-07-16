@@ -20,11 +20,13 @@ def get_tool_definitions() -> List[Dict]:
         search_enabled = tools_enabled.get("search_memory", True)
         send_enabled = tools_enabled.get("send_message", True)
         silence_enabled = tools_enabled.get("silence", True)
+        diary_enabled = tools_enabled.get("write_diary", True)
     except ImportError:
         # Observatory not installed — use defaults
         search_enabled = True
         send_enabled = True
         silence_enabled = True
+        diary_enabled = True
 
     # Build action enum dynamically
     action_enum = []
@@ -34,6 +36,8 @@ def get_tool_definitions() -> List[Dict]:
         action_enum.append("search_memory")
     if silence_enabled:
         action_enum.append("silence")
+    if diary_enabled:
+        action_enum.append("write_diary")
 
     # If no tools are enabled, at least allow silence
     if not action_enum:
@@ -62,7 +66,8 @@ def get_tool_definitions() -> List[Dict]:
                             "description": "List of actions to perform. "
                                            "If you want to reply to the user, include a send_message action. "
                                            "If you need more information from memory, include search_memory. "
-                                           "If you want to stay silent (not reply), include a silence action.",
+                                           "If you want to stay silent (not reply), include a silence action. "
+                                           "If you want to write a diary entry about this moment, include write_diary.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -93,6 +98,12 @@ def get_tool_definitions() -> List[Dict]:
                                                 "type": "string",
                                                 "description": "Reason for silence (for silence action only). "
                                                                "Explain why you chose not to respond."
+                                            },
+                                            "entry": {
+                                                "type": "string",
+                                                "description": "Diary entry content (for write_diary only). "
+                                                               "Write what happened or what you're feeling. "
+                                                               "This is a personal diary entry, not a message to anyone."
                                             }
                                         }
                                     }
@@ -142,6 +153,8 @@ class ToolExecutor:
             return await self._handle_search_memory(params)
         elif action_type == "silence":
             return await self._handle_silence(params)
+        elif action_type == "write_diary":
+            return await self._handle_write_diary(params)
         else:
             return {
                 "type": action_type,
@@ -225,4 +238,23 @@ class ToolExecutor:
             "type": "silence",
             "reason": reason,
             "status": "silent"
+        }
+
+    async def _handle_write_diary(self, params: Dict) -> Dict:
+        """Handle write_diary action — LLM writes a conscious diary entry."""
+        entry = params.get("entry", "")
+        if not entry.strip():
+            return {
+                "type": "write_diary",
+                "status": "error",
+                "error": "Empty diary entry"
+            }
+        
+        from core.diary import add_diary_entry
+        entry_num = add_diary_entry(entry.strip())
+        print(f"[ToolExecutor] Diary entry #{entry_num} written")
+        return {
+            "type": "write_diary",
+            "entry_number": entry_num,
+            "status": "written"
         }

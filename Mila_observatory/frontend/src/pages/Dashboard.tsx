@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getDashboard, DashboardData } from '../api/client';
+import { getDashboard, DashboardData, getSleepStatus, SleepStatus } from '../api/client';
 
 const styles: Record<string, React.CSSProperties> = {
   page: { maxWidth: '1200px' },
@@ -21,13 +21,18 @@ const styles: Record<string, React.CSSProperties> = {
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [sleepStatus, setSleepStatus] = useState<SleepStatus | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const d = await getDashboard();
+        const [d, s] = await Promise.all([
+          getDashboard(),
+          getSleepStatus().catch(() => null),
+        ]);
         setData(d);
+        setSleepStatus(s);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : 'Failed to load');
       }
@@ -44,6 +49,11 @@ export default function Dashboard() {
   const uptimeStr = status.uptime
     ? `${Math.floor(status.uptime / 3600)}h ${Math.floor((status.uptime % 3600) / 60)}m`
     : 'N/A';
+
+  const isSleeping = sleepStatus?.state === 'sleeping';
+  const isCommitting = sleepStatus?.state === 'committing';
+  const sleepStageLabel = sleepStatus?.current_stage || 'idle';
+  const sleepProgress = sleepStatus?.progress_pct || 0;
 
   return (
     <div style={styles.page}>
@@ -73,9 +83,19 @@ export default function Dashboard() {
         </div>
 
         <div style={styles.card}>
-          <div style={styles.cardTitle}>Memories</div>
-          <div style={styles.cardValue}>{status.memories_total}</div>
-          <div style={styles.cardSub}>Long-term facts</div>
+          <div style={styles.cardTitle}>Sleep</div>
+          <div>
+            <span style={{
+              ...styles.badge,
+              background: isSleeping ? 'rgba(116, 185, 255, 0.2)' : isCommitting ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
+              color: isSleeping ? '#74b9ff' : isCommitting ? '#fdcb6e' : 'var(--success)',
+            }}>
+              {isSleeping ? '💤 Sleeping' : isCommitting ? '💾 Committing' : '✨ Awake'}
+            </span>
+          </div>
+          <div style={styles.cardSub}>
+            {isSleeping ? `Stage: ${sleepStageLabel} (${sleepProgress.toFixed(0)}%)` : 'Mila is awake'}
+          </div>
         </div>
       </div>
 

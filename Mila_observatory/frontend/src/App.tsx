@@ -8,6 +8,7 @@ import PersonalityEditor from './pages/PersonalityEditor';
 import ToolsControl from './pages/ToolsControl';
 import PipelineViewer from './pages/PipelineViewer';
 import ConfigPage from './pages/ConfigPage';
+import SleepControl from './pages/SleepControl';
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/tools" element={<ToolsControl />} />
         <Route path="/pipeline" element={<PipelineViewer />} />
         <Route path="/config" element={<ConfigPage />} />
+        <Route path="/sleep" element={<SleepControl />} />
       </Routes>
     </Layout>
   );

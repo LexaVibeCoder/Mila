@@ -79,5 +79,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "allow"  # Allow extra fields from .env (night_llm, sleep, etc.) to be used by runtime_config
 
 settings = Settings()

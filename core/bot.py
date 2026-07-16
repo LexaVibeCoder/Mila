@@ -19,6 +19,10 @@ from core.embedding_client import EmbeddingClient
 from core.memory import VectorMemory
 from core.pipeline import ThinkPipeline
 from core.llm_client import LLMClient
+from core.sleep_manager import (
+    recover_from_crash, is_sleeping, is_committing, queue_incoming_message,
+    start_auto_sleep_scheduler, get_sleep_status
+)
 
 
 class MilaUserbot:
@@ -40,6 +44,9 @@ class MilaUserbot:
         self.summarizer_llm = None  # lazy init
 
     async def start(self):
+        # Crash recovery: check if previous sleep was interrupted
+        await recover_from_crash()
+        
         await self.app.start()
         self.me = await self.app.get_me()
         print(f"Bot started as {self.me.first_name} (@{self.me.username})")
@@ -61,6 +68,9 @@ class MilaUserbot:
         )
 
         asyncio.create_task(self.periodic_save())
+        
+        # Start auto-sleep scheduler
+        start_auto_sleep_scheduler()
 
     async def periodic_save(self):
         while True:
@@ -221,6 +231,12 @@ class MilaUserbot:
         ensure_chat_exists(chat_id, message.chat.first_name or "Личный чат")
         chunk_id = add_chunk(chat_id, user_id, message.text, token_count=0, type='raw')
 
+        # Check if Mila is sleeping — queue messages and don't process
+        if is_sleeping():
+            queue_incoming_message(chat_id, user_id, message.text)
+            print(f"[Sleep] Message queued from {user_id[:8]}... in {chat_id[:8]}...")
+            return
+
         # Also push to context buffer (daytime working memory)
         push_message(chat_id, message.text, source_chunk_id=chunk_id)
 
@@ -311,6 +327,10 @@ class MilaUserbot:
                                 token_count=0,
                                 type='raw'
                             )
+                    
+                    elif action.get("type") == "write_diary":
+                        entry_num = action.get("entry_number", "?")
+                        print(f"\n[Diary] Entry #{entry_num} written")
             
             if not has_send_action and full_response and not has_silence_action:
                 # LLM wrote thoughts but didn't call send_message or silence.

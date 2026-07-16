@@ -74,6 +74,14 @@ async def get_status():
     if not model:
         model = llm_manager.get_main_params().get("model", "")
 
+    # Check sleep state
+    try:
+        from core.sleep_state import get_state
+        sleep_state = get_state().value
+        is_sleeping = sleep_state == "sleeping" or sleep_state == "committing"
+    except Exception:
+        is_sleeping = False
+
     return StatusResponse(
         status="online",
         uptime=uptime,
@@ -81,7 +89,7 @@ async def get_status():
         messages_total=messages_total,
         memories_total=memories_total,
         last_activity=last_activity,
-        sleep_mode=False,
+        sleep_mode=is_sleeping,
         runtime_config_version=1,
     )
 

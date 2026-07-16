@@ -71,6 +71,11 @@ class RuntimeConfig:
                 "search_memory": True,
                 "send_message": True,
                 "silence": True,
+                "write_diary": True,
+            },
+            # Diary
+            "diary": {
+                "save_processed": False,
             },
             # Persona
             "persona": {

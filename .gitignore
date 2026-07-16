@@ -26,4 +26,5 @@ logs/
 .vscode/
 
 #Telegram
-.session
+*.session
+*.session-journal

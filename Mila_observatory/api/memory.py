@@ -9,10 +9,10 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import APIRouter, HTTPException, Query
-from observatory.models import (
+from Mila_observatory.models import (
     MemoryItem, MemoryListResponse, MemoryCreateRequest, MemoryUpdateRequest
 )
-from observatory.api.dashboard import add_event
+from Mila_observatory.api.dashboard import add_event
 from core.db import (
     get_conn as get_mila_conn,
     search_memories_by_ids as db_search_memories_by_ids,

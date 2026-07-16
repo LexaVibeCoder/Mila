@@ -15,7 +15,6 @@ from core.context_buffer import (
     get_total_entries, get_total_message_tokens, get_raw_content_for_llm
 )
 from core.token_counter import count_tokens
-from core.model_sleeper import is_sleeping
 from core.embedding_client import EmbeddingClient
 from core.memory import VectorMemory
 from core.pipeline import ThinkPipeline
@@ -224,11 +223,6 @@ class MilaUserbot:
 
         # Also push to context buffer (daytime working memory)
         push_message(chat_id, message.text, source_chunk_id=chunk_id)
-
-        # Check if bot is sleeping
-        if is_sleeping():
-            print(f"[Sleep Mode] Message from {user_id} saved but not processed (bot sleeping).")
-            return
 
         # Compress context if needed (before processing)
         await self._compress_context(chat_id)

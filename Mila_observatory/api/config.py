@@ -8,9 +8,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import APIRouter, HTTPException
-from observatory.models import ConfigResponse, ConfigUpdateRequest, ReloadResponse
-from observatory.runtime import runtime_config, RUNTIME_CONFIG_PATH
-from observatory.api.dashboard import add_event
+from Mila_observatory.models import ConfigResponse, ConfigUpdateRequest, ReloadResponse
+from Mila_observatory.runtime import runtime_config, RUNTIME_CONFIG_PATH
+from Mila_observatory.api.dashboard import add_event
 
 router = APIRouter(tags=["config"])
 

@@ -45,7 +45,6 @@ class ModelParams(BaseModel):
 
 class ModelResponse(BaseModel):
     main: Dict[str, Any]
-    night: Dict[str, Any]
 
 
 class TestQueryRequest(BaseModel):

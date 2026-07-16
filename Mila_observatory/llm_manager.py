@@ -3,7 +3,6 @@ LLMManager — manages LLM client instances for Mila.
 
 Provides:
 - Dynamic reconfiguration of LLM parameters (model, temperature, etc.)
-- Separate instances for main LLM and night LLM
 - Test query capability for Model Playground
 - Thread-safe singleton pattern
 
@@ -20,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.llm_client import LLMClient
 from config import settings, normalize_api_base
-from observatory.runtime import runtime_config
+from Mila_observatory.runtime import runtime_config
 
 
 class LLMManager:
@@ -39,25 +38,13 @@ class LLMManager:
             return
         self._initialized = True
 
-        # Main LLM client (daytime, creative)
+        # Main LLM client
         self._main_client = LLMClient(
             model=settings.MAIN_LLM_MODEL,
             api_base=settings.LLM_API_BASE,
             api_key=settings.LLM_API_KEY,
             max_tokens=settings.MAIN_LLM_MAX_TOKENS,
             temperature=settings.MAIN_LLM_TEMPERATURE,
-        )
-
-        # Night LLM client (memory worker)
-        night_model = settings.NIGHT_LLM_MODEL or settings.MAIN_LLM_MODEL
-        night_api_base = settings.NIGHT_LLM_API_BASE or settings.LLM_API_BASE
-        night_api_key = settings.NIGHT_LLM_API_KEY or settings.LLM_API_KEY
-        self._night_client = LLMClient(
-            model=night_model,
-            api_base=night_api_base,
-            api_key=night_api_key,
-            max_tokens=settings.NIGHT_LLM_MAX_TOKENS,
-            temperature=settings.NIGHT_LLM_TEMPERATURE,
         )
 
         # Track current parameters for display
@@ -70,13 +57,6 @@ class LLMManager:
             "top_p": None,
             "frequency_penalty": None,
             "presence_penalty": None,
-        }
-        self._night_params = {
-            "model": night_model,
-            "api_base": night_api_base,
-            "api_key": night_api_key[:8] + "..." if night_api_key else "",
-            "temperature": settings.NIGHT_LLM_TEMPERATURE,
-            "max_tokens": settings.NIGHT_LLM_MAX_TOKENS,
         }
 
     # ─── Main LLM ────────────────────────────────────────────
@@ -106,30 +86,6 @@ class LLMManager:
         self._update_params_from_runtime("llm", self._main_params)
         self._main_client.reconfigure(**params)
 
-    # ─── Night LLM ───────────────────────────────────────────
-
-    def get_night_client(self) -> LLMClient:
-        """Get the night LLM client, applying runtime config overrides."""
-        self._apply_runtime_overrides(self._night_client, "night_llm")
-        return self._night_client
-
-    def get_night_params(self) -> Dict[str, Any]:
-        """Get current night LLM parameters."""
-        self._update_params_from_runtime("night_llm", self._night_params)
-        return dict(self._night_params)
-
-    def configure_night(self, params: Dict[str, Any]) -> None:
-        """Reconfigure night LLM client with new parameters."""
-        valid_fields = {"model", "api_base", "api_key", "temperature", "max_tokens"}
-
-        for key, value in params.items():
-            if key in valid_fields:
-                runtime_config.set(f"night_llm.{key}", value)
-
-        self._apply_runtime_overrides(self._night_client, "night_llm")
-        self._update_params_from_runtime("night_llm", self._night_params)
-        self._night_client.reconfigure(**params)
-
     # ─── Test Query ──────────────────────────────────────────
 
     async def test_query(self, prompt: str, client_type: str = "main",
@@ -139,7 +95,7 @@ class LLMManager:
 
         Args:
             prompt: The test prompt to send
-            client_type: "main" or "night"
+            client_type: "main" (night is deprecated and falls back to main)
             params: Optional override parameters for this test only
 
         Returns:
@@ -147,7 +103,7 @@ class LLMManager:
         """
         import time
 
-        client = self.get_main_client() if client_type == "main" else self.get_night_client()
+        client = self.get_main_client()
 
         temp = None
         max_tokens = None

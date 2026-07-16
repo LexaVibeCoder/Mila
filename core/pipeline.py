@@ -31,8 +31,8 @@ from core.memory import VectorMemory
 
 # Try to import Observatory modules for dynamic config
 try:
-    from observatory.llm_manager import llm_manager
-    from observatory.runtime import runtime_config
+    from Mila_observatory.llm_manager import llm_manager
+    from Mila_observatory.runtime import runtime_config
     HAS_OBSERVATORY = True
 except ImportError:
     HAS_OBSERVATORY = False

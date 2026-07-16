@@ -39,13 +39,6 @@ class Settings(BaseSettings):
     MAIN_LLM_MAX_TOKENS: int = 2048
     MAIN_LLM_TEMPERATURE: float = 0.7
 
-    # Night LLM (Memory worker - offline)
-    NIGHT_LLM_MODEL: str = ""
-    NIGHT_LLM_API_BASE: str = ""
-    NIGHT_LLM_API_KEY: str = ""
-    NIGHT_LLM_MAX_TOKENS: int = 4096
-    NIGHT_LLM_TEMPERATURE: float = 0.3
-
     # Embeddings
     EMBED_API_BASE: str
     EMBED_API_KEY: str
@@ -77,19 +70,12 @@ class Settings(BaseSettings):
     MAIN_LLM_THOUGHT_SENTENCES: int = 3
     LOG_DIR: str = "logs"
 
-    # Sleep schedule
-    SLEEP_START_HOUR: int = 23  # 11 PM
-    SLEEP_END_HOUR: int = 7     # 7 AM
-
     # Context buffer
     CONTEXT_DB_PATH: str = "data/context_buffer.db"
     CONTEXT_MAX_TOKENS: int = 30000  # Max tokens in context before summarization (messages only, excludes system prompt)
     CONTEXT_SUMMARIZE_CHUNK_TOKENS: int = 5000  # How many tokens worth of oldest messages to compress at once
     CONTEXT_MAX_MESSAGES: int = 40  # Legacy — kept for backward compat, but token limit takes precedence
     CONTEXT_SUMMARIZE_CHUNK: int = 20  # Legacy
-
-    # Offline processor
-    OFFLINE_CHUNK_SIZE: int = 100  # Messages per chunk for night pipeline
 
     class Config:
         env_file = ".env"

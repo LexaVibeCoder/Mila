@@ -12,7 +12,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import APIRouter, Query, HTTPException
-from observatory.models import (
+from Mila_observatory.models import (
     PipelineLogItem, PipelineLogListResponse, PipelineLogDetailResponse
 )
 from config import settings

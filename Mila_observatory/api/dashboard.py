@@ -9,9 +9,9 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import APIRouter
-from observatory.models import StatusResponse, DashboardResponse, EventItem
-from observatory.runtime import runtime_config
-from observatory.llm_manager import llm_manager
+from Mila_observatory.models import StatusResponse, DashboardResponse, EventItem
+from Mila_observatory.runtime import runtime_config
+from Mila_observatory.llm_manager import llm_manager
 from core.db import get_conn as get_mila_conn, get_all_chat_ids_from_chunks
 
 router = APIRouter(tags=["dashboard"])

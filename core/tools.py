@@ -15,7 +15,7 @@ def get_tool_definitions() -> List[Dict]:
     """
     # Check runtime config for tool enablement
     try:
-        from observatory.runtime import runtime_config
+        from Mila_observatory.runtime import runtime_config
         tools_enabled = runtime_config.get("tools", {})
         search_enabled = tools_enabled.get("search_memory", True)
         send_enabled = tools_enabled.get("send_message", True)

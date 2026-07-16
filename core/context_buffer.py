@@ -295,25 +295,6 @@ def pop_oldest_messages(chat_id: str, count: int) -> List[Dict]:
         conn.close()
 
 
-def replace_all_with_summary(chat_id: str, summary_text: str):
-    """
-    Replace ALL entries for a chat with a single summary entry.
-    Used by the night pipeline to reset the context buffer for the new day.
-    """
-    ensure_chat_table(chat_id)
-    table = _table_name(chat_id)
-    conn = _get_conn()
-    try:
-        conn.execute(f"DELETE FROM [{table}]")
-        conn.execute(
-            f"INSERT INTO [{table}] (content, type) VALUES (?, 'summary')",
-            (summary_text,)
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def get_all_chat_ids() -> List[str]:
     """
     Get all chat IDs that have context tables.

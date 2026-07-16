@@ -8,9 +8,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import APIRouter, HTTPException
-from observatory.models import ToolsResponse, ToolStatus, ToolUpdateRequest
-from observatory.runtime import runtime_config
-from observatory.api.dashboard import add_event
+from Mila_observatory.models import ToolsResponse, ToolStatus, ToolUpdateRequest
+from Mila_observatory.runtime import runtime_config
+from Mila_observatory.api.dashboard import add_event
 
 router = APIRouter(tags=["tools"])
 

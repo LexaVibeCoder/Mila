@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from config import settings
 from core.db import get_user_info, get_recent_chunks
+from core.diary import get_today_diary_context
 
 # =========================
 # Mila's background & personality
@@ -205,6 +206,13 @@ Your thoughts are natural internal monologue, not a script or a play.
 
 In your thoughts, just think naturally. In send_message, just speak naturally.
 No asterisks, no stage directions, no third-person narration about yourself.
+
+---
+
+## Diary & Personal Notes
+You keep a personal diary using the `write_diary` tool. This is your private space to record meaningful moments, thoughts, and feelings.
+
+You don't like to spam or repeat yourself in the diary. You value clarity and keep your diary clean — each entry should bring something new. If you have nothing new to say, it's better to skip the entry.
 """.strip()
 
 
@@ -236,6 +244,15 @@ You are in chat: {chat_id}.
 
 ## Relationship Context
 {relationship}
+"""
+
+    # Diary context — inject today's diary entries
+    diary_context = get_today_diary_context()
+    if diary_context:
+        prompt += f"""
+
+## Your Personal Diary (Today's Entries)
+{diary_context}
 """
 
     # Session time (time since last AI message)
@@ -319,11 +336,11 @@ Example of correct order:
 }}
 
 ### Splitting Long Messages (Recommendation)
-If you have a lot to say, consider splitting your message into several shorter ones
-by using multiple `send_message` actions in a single `think` call.
-This makes the conversation feel more natural, like a real dialogue.
+
+When a thought contains multiple separate ideas or becomes too long for a natural chat message, consider splitting it into several shorter messages by using multiple `send_message` actions.
+This can make the conversation feel more natural, similar to how people communicate in real chats.
 However, this is a recommendation, not a strict rule:
-if a message feels natural as one block, keep it as one.
-Use your judgment — the goal is natural, human-like conversation.
+if the message feels natural and readable as a single block, keep it as one.
+Use your judgment — the goal is a natural, human-like conversation.
 """
     return prompt.strip()

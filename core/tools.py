@@ -105,7 +105,9 @@ def get_tool_definitions() -> List[Dict]:
                                                 "type": "string",
                                                 "description": "Diary entry content (for write_diary only). "
                                                                "Write what happened or what you're feeling. "
-                                                               "This is a personal diary entry, not a message to anyone."
+                                                               "This is a personal diary entry, not a message to anyone. "
+                                                               "Each entry is automatically saved to 'data/daily reports/{date}.md' "
+                                                               "as a permanent Markdown record."
                                             }
                                         }
                                     }

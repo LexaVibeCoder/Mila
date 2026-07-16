@@ -29,6 +29,7 @@ from Mila_observatory.api.personality import router as personality_router
 from Mila_observatory.api.pipeline import router as pipeline_router
 from Mila_observatory.api.config import router as config_router
 from Mila_observatory.api.sleep import router as sleep_router
+from Mila_observatory.api.diary import router as diary_router
 
 
 @asynccontextmanager
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(pipeline_router)
     app.include_router(config_router)
     app.include_router(sleep_router)
+    app.include_router(diary_router)
 
     # Health check
     @app.get("/api/health")

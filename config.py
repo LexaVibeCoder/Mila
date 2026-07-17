@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     # Data
     SQLITE_PATH: str = "data/mila.db"
     PHOTOS_DIR: str = "data/photos"
+    DAILY_REPORTS: str = "data/daily reports"
 
     # Pipeline
     MAX_CONTEXT_TOKENS: int = 10000

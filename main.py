@@ -8,7 +8,7 @@ from core.bot import MilaUserbot
 async def main():
     # Создаем необходимые директории
     os.makedirs(settings.PHOTOS_DIR, exist_ok=True)
-    os.makedirs("data/daily reports", exist_ok=True)
+    os.makedirs(settings.DAILY_REPORTS, exist_ok=True)
     os.makedirs(settings.LOG_DIR, exist_ok=True)
     
     init_db()

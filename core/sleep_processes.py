@@ -491,12 +491,15 @@ Your task is to analyze today's diary entries and decide what should be added to
     
     set_stage(SleepStage.VERIFICATION, progress_pct=50.0)
     
+    # Save generation tool_calls before verification loop overwrites the variable
+    gen_tool_calls = tool_calls
+    
     verify_prompt = f"""You are the verification system for Mila's diary analysis.
 
 Check the following changes that were made to Mila's eternal memory:
 
 ## Changes Made
-{json.dumps([{"tool": tc.function.name, "args": json.loads(tc.function.arguments)} for tc in tool_calls] if hasattr(tool_calls[0], 'function') else [], ensure_ascii=False, indent=2)}
+{json.dumps([{"tool": tc.function.name, "args": json.loads(tc.function.arguments)} for tc in gen_tool_calls] if gen_tool_calls and hasattr(gen_tool_calls[0], 'function') else [], ensure_ascii=False, indent=2)}
 
 ## Verification Criteria
 1. Are the changes relevant to Mila's own life experience?
@@ -892,12 +895,78 @@ Your task is to extract long-term facts about users from dialog messages.
         facts_added = len(executor.staged_ids)
         total_facts += facts_added
         
-        # ─── Verification (simplified) ─────────────────────
-        # In a full implementation, this would run a verifier too
-        # For now, we trust the generation for individual facts
-        # since the verifier runs at the session level
+        # ─── Verification ─────────────────────────────────
+        verified_facts = 0
+        for verify_iter in range(MAX_VERIFICATION_RETRIES):
+            verify_prompt = f"""Verify the user facts extracted from chat {chat_id}.
+
+Check:
+1. Are the facts genuinely long-term (not just conversational trivia)?
+2. Are they correctly attributed to the right user?
+3. Are they specific and factual (not vague)?
+4. Is the importance level appropriate?
+
+Call approve_changes if good, reject_changes if issues found.
+"""
+            try:
+                response = await verifier.generate(
+                    messages=[{"role": "user", "content": f"Verify facts extracted from dialog {chat_id[:12]}..."}],
+                    system_prompt=verify_prompt,
+                    tools=get_verification_tools(),
+                    tool_choice="required",
+                    max_tokens=1024,
+                    temperature=0.1
+                )
+            except Exception as e:
+                print(f"  [Verify] Error: {e}")
+                continue
+            
+            tool_calls = response.get("tool_calls")
+            if not tool_calls:
+                continue
+            
+            for tc in tool_calls:
+                result = await executor.execute_tool_call(tc)
+                if result.get("_approved"):
+                    verified_facts = facts_added
+                    print(f"  ✅ {facts_added} facts verified for {chat_id[:12]}...")
+                    break
+                elif result.get("_rejected"):
+                    print(f"  ❌ Facts rejected for {chat_id[:12]}...: {result.get('_reason', '')}")
+                    # Re-generate with hint
+                    if verify_iter < MAX_VERIFICATION_RETRIES - 1:
+                        gen_messages.append({
+                            "role": "system",
+                            "content": f"Verification rejected. Reason: {result.get('_reason', '')}. "
+                                       f"Hint: {result.get('_hint', '')}. Please re-extract facts."
+                        })
+                        # Re-run generation
+                        for gen_iter in range(MAX_GENERATION_ITERATIONS):
+                            try:
+                                response = await llm.generate(
+                                    messages=gen_messages,
+                                    system_prompt=system_prompt,
+                                    tools=tools,
+                                    tool_choice="required",
+                                    max_tokens=4096,
+                                    temperature=0.3
+                                )
+                            except Exception:
+                                continue
+                            tc2 = response.get("tool_calls")
+                            if not tc2:
+                                continue
+                            for t in tc2:
+                                await executor.execute_tool_call(t)
+                            facts_added = len(executor.staged_ids)
+                            break
+                    break
+            else:
+                continue
+            break
         
-        print(f"  → {facts_added} facts extracted")
+        total_facts += verified_facts
+        print(f"  → {verified_facts}/{facts_added} facts verified")
     
     print(f"\n  Total: {total_facts} facts extracted across {len(active_dialogs)} dialogs")
     

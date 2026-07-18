@@ -223,3 +223,29 @@ export const updateSleepConfig = (data: Record<string, unknown>) =>
     method: 'POST',
     body: JSON.stringify(data),
   });
+
+// ─── Sleep Estimate ─────────────────────────────────────────
+
+export interface SleepEstimate {
+  diary_entries: number;
+  active_dialogs: number;
+  total_messages: number;
+  estimated_minutes: number;
+  breakdown: {
+    diary_analysis_sec: number;
+    dialog_summarization_sec: number;
+    fact_extraction_sec: number;
+    overhead_sec: number;
+    total_sec: number;
+  };
+}
+
+export interface SleepConfigData {
+  start_hour: number | null;
+  end_hour: number | null;
+  forced_awake: boolean;
+  save_processed: boolean;
+}
+
+export const getSleepEstimate = () => request<SleepEstimate>('/sleep/estimate');
+export const getSleepConfig = () => request<SleepConfigData>('/sleep/config');

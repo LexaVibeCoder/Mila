@@ -319,6 +319,20 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
             "session_id": None
         }
     
+    # Check forced_awake flag
+    try:
+        from Mila_observatory.runtime import runtime_config
+        forced_awake = runtime_config.get("sleep.forced_awake", False)
+    except ImportError:
+        forced_awake = False
+    
+    if forced_awake:
+        return {
+            "success": False,
+            "message": "Sleep is disabled (forced_awake is ON). Turn it off in Observatory to allow sleep.",
+            "session_id": None
+        }
+    
     # Check if manually triggered but auto-sleep is in progress
     if triggered_by == "manual" and _auto_sleep_task and not _auto_sleep_task.done():
         # Cancel any pending auto-sleep

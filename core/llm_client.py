@@ -11,7 +11,9 @@ class LLMClient:
     """
     
     def __init__(self, model: str = None, api_base: str = None, api_key: str = None,
-                 max_tokens: int = None, temperature: float = None):
+                 max_tokens: int = None, temperature: float = None,
+                 top_p: float = None, frequency_penalty: float = None,
+                 presence_penalty: float = None):
         base = api_base or settings.LLM_API_BASE
         self.client = openai.AsyncOpenAI(
             base_url=normalize_api_base(base),
@@ -20,6 +22,9 @@ class LLMClient:
         self.model = model or settings.MAIN_LLM_MODEL
         self.default_max_tokens = max_tokens or settings.MAIN_LLM_MAX_TOKENS
         self.default_temperature = temperature or settings.MAIN_LLM_TEMPERATURE
+        self.default_top_p = top_p
+        self.default_frequency_penalty = frequency_penalty
+        self.default_presence_penalty = presence_penalty
 
     def reconfigure(self, model: str = None, api_base: str = None, api_key: str = None,
                     max_tokens: int = None, temperature: float = None,
@@ -46,7 +51,12 @@ class LLMClient:
             self.default_max_tokens = max_tokens
         if temperature is not None:
             self.default_temperature = temperature
-        # Note: top_p, frequency_penalty, presence_penalty are passed per-request in generate()
+        if top_p is not None:
+            self.default_top_p = top_p
+        if frequency_penalty is not None:
+            self.default_frequency_penalty = frequency_penalty
+        if presence_penalty is not None:
+            self.default_presence_penalty = presence_penalty
         print(f"[LLMClient] Reconfigured: model={self.model}, temp={self.default_temperature}")
 
     async def generate(
@@ -94,6 +104,14 @@ class LLMClient:
             max_tokens=max_tokens,
             temperature=temperature
         )
+        
+        # Pass optional sampling parameters if configured
+        if self.default_top_p is not None:
+            kwargs["top_p"] = self.default_top_p
+        if self.default_frequency_penalty is not None:
+            kwargs["frequency_penalty"] = self.default_frequency_penalty
+        if self.default_presence_penalty is not None:
+            kwargs["presence_penalty"] = self.default_presence_penalty
         
         if tools:
             kwargs["tools"] = tools

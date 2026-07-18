@@ -18,6 +18,8 @@ from core.sleep_manager import (
     start_sleep, wake_up, get_sleep_status, is_sleeping, 
     recover_from_crash, get_pending_messages_count
 )
+from core.diary import get_diary_entry_count
+from core.sleep_state import get_active_dialogs_detail
 
 router = APIRouter(tags=["sleep"])
 
@@ -50,6 +52,22 @@ class SleepStatusResponse(BaseModel):
     elapsed_seconds: Optional[float] = None
     remaining_seconds: Optional[float] = None
     in_progress: bool = False
+
+
+class SleepEstimateResponse(BaseModel):
+    """Estimated sleep duration based on current data volume."""
+    diary_entries: int = 0
+    active_dialogs: int = 0
+    total_messages: int = 0
+    estimated_minutes: int = 0
+    breakdown: dict = Field(default_factory=dict)
+
+
+class SleepConfigResponse(BaseModel):
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+    forced_awake: bool = False
+    save_processed: bool = False
 
 
 # ─── Endpoints ─────────────────────────────────────────────────
@@ -112,6 +130,68 @@ async def api_sleep_status():
     )
 
 
+@router.get("/api/sleep/estimate", response_model=SleepEstimateResponse)
+async def api_sleep_estimate():
+    """
+    Estimate how long sleep/reflection will take based on current data volume.
+    
+    Calculation:
+    - Diary analysis: ~15s per entry (LLM read + think + verify)
+    - Dialog summarization: ~20s per active dialog
+    - User fact extraction: ~25s per active dialog
+    - Overhead: 30s for commit + orchestration
+    
+    Returns estimated minutes rounded up to nearest minute.
+    """
+    diary_count = get_diary_entry_count()
+    dialogs = get_active_dialogs_detail()
+    dialog_count = len(dialogs)
+    total_messages = sum(d.get("message_count", 0) for d in dialogs)
+    
+    # Time estimates in seconds per unit
+    DIARY_SEC_PER_ENTRY = 15
+    DIALOG_SUMMARIZE_SEC = 20
+    FACT_EXTRACT_SEC = 25
+    OVERHEAD_SEC = 30
+    
+    # Diary analysis time
+    diary_time = diary_count * DIARY_SEC_PER_ENTRY
+    
+    # Dialog summarization time
+    dialog_time = dialog_count * DIALOG_SUMMARIZE_SEC
+    
+    # Fact extraction time
+    fact_time = dialog_count * FACT_EXTRACT_SEC
+    
+    total_seconds = diary_time + dialog_time + fact_time + OVERHEAD_SEC
+    estimated_minutes = max(1, round(total_seconds / 60))
+    
+    return SleepEstimateResponse(
+        diary_entries=diary_count,
+        active_dialogs=dialog_count,
+        total_messages=total_messages,
+        estimated_minutes=estimated_minutes,
+        breakdown={
+            "diary_analysis_sec": diary_time,
+            "dialog_summarization_sec": dialog_time,
+            "fact_extraction_sec": fact_time,
+            "overhead_sec": OVERHEAD_SEC,
+            "total_sec": total_seconds,
+        }
+    )
+
+
+@router.get("/api/sleep/config", response_model=SleepConfigResponse)
+async def api_get_sleep_config():
+    """Get current sleep configuration from runtime."""
+    return SleepConfigResponse(
+        start_hour=runtime_config.get("sleep.start_hour"),
+        end_hour=runtime_config.get("sleep.end_hour"),
+        forced_awake=runtime_config.get("sleep.forced_awake", False),
+        save_processed=runtime_config.get("diary.save_processed", False),
+    )
+
+
 @router.get("/api/sleep/queue-count")
 async def api_queue_count():
     """Get count of queued messages."""
@@ -127,6 +207,8 @@ async def api_sleep_config(data: dict):
         if key in valid_keys:
             if key == "save_processed":
                 runtime_config.set("diary.save_processed", bool(value))
+            elif key == "forced_awake":
+                runtime_config.set("sleep.forced_awake", bool(value))
             else:
                 runtime_config.set(f"sleep.{key}", value)
     

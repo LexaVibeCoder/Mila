@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 
 from Mila_observatory.runtime import runtime_config, RUNTIME_CONFIG_PATH
 from Mila_observatory.api.dashboard import router as dashboard_router
@@ -84,7 +85,28 @@ def create_app() -> FastAPI:
         "Mila_observatory", "frontend", "dist"
     )
     if os.path.exists(frontend_dir):
-        app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+        # Mount assets directory for JS/CSS/images
+        assets_dir = os.path.join(frontend_dir, "assets")
+        if os.path.exists(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        
+        # Mount icons directory
+        icons_dir = os.path.join(frontend_dir, "icons")
+        if os.path.exists(icons_dir):
+            app.mount("/icons", StaticFiles(directory=icons_dir), name="icons")
+        
+        # SPA fallback: serve index.html for all non-API routes
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # Only serve frontend for paths that are NOT API routes
+            if full_path.startswith("api/"):
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            
+            file_path = os.path.join(frontend_dir, full_path)
+            if os.path.isfile(file_path):
+                return FileResponse(file_path)
+            # SPA fallback — serve index.html for client-side routing
+            return FileResponse(os.path.join(frontend_dir, "index.html"))
 
     return app
 

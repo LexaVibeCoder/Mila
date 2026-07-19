@@ -16,6 +16,8 @@ services:
       - mila_logs:/app/logs
       # Mount local AI models (large files, downloaded once)
       - ./models:/app/models:ro
+      # Mount Pyrogram session file (created once via create_session.py)
+      - ./mila_session.session:/app/mila_session.session:Z
     command: python main.py
     networks:
       - mila_network

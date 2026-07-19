@@ -31,6 +31,7 @@ class MilaUserbot:
             "mila_session",
             api_id=settings.API_ID,
             api_hash=settings.API_HASH,
+            phone_number=settings.PHONE_NUMBER or None,
             device_model=settings.DEVICE_MODEL,
             system_version=settings.SYSTEM_VERSION,
             app_version=settings.APP_VERSION,

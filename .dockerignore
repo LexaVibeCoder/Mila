@@ -39,3 +39,7 @@ docker-compose.yml
 # Other
 *.bat
 *.md
+
+# Session files
+*.session
+*.session-journal

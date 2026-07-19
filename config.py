@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # Telegram
     API_ID: int
     API_HASH: str
+    PHONE_NUMBER: str = ""  # Номер телефона для авторизации Pyrogram (+7...)
     DEVICE_MODEL: str = "PC 64bit"
     SYSTEM_VERSION: str = "Windows 11"
     APP_VERSION: str = "5.0.1"

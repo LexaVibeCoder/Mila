@@ -33,14 +33,19 @@ class EmbeddingClient:
         self.api_base = settings.EMBED_API_BASE.rstrip("/")
         self.api_key = settings.EMBED_API_KEY
 
-        # OpenAI-compatible client (uses /v1/embeddings)
-        self._openai_client = openai.AsyncOpenAI(
-            base_url=normalize_api_base(settings.EMBED_API_BASE),
-            api_key=self.api_key,
-        )
+        # OpenAI-compatible client — created lazily so Ollama (no API key) works
+        self._openai_client = None
 
         # Decide which strategy to try first
         self._prefer_ollama = _is_ollama_url(self.api_base)
+
+    def _get_openai_client(self) -> openai.AsyncOpenAI:
+        if self._openai_client is None:
+            self._openai_client = openai.AsyncOpenAI(
+                base_url=normalize_api_base(settings.EMBED_API_BASE),
+                api_key=self.api_key or "",
+            )
+        return self._openai_client
 
     async def embed(self, texts: List[str]) -> np.ndarray:
         if self._prefer_ollama:
@@ -66,7 +71,8 @@ class EmbeddingClient:
 
     async def _embed_openai(self, texts: List[str]) -> np.ndarray:
         """OpenAI-compatible API (LM Studio, Ollama ≥0.3.0, OpenRouter, etc.)."""
-        response = await self._openai_client.embeddings.create(
+        client = self._get_openai_client()
+        response = await client.embeddings.create(
             model=self.model,
             input=texts,
         )

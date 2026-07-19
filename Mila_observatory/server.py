@@ -119,7 +119,7 @@ def main():
     port = runtime_config.get("system.observatory_port", 8080)
     uvicorn.run(
         "Mila_observatory.server:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=port,
         reload=False,
         log_level="info",

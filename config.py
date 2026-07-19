@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     EMBED_API_BASE: str
     EMBED_API_KEY: str
     EMBED_MODEL: str
+    EMBED_DIM: int = 384  # Vector dimension (nomic-embed-text=384, text-embedding-3-small=1536, etc.)
 
     # CLIP & Moondream локальные
     CLIP_MODEL_PATH: str = "models/clip-vit-base-patch32"

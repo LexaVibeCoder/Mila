@@ -37,7 +37,7 @@ class MilaUserbot:
             workdir="."
         )
         self.emb = EmbeddingClient()
-        self.text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=384)
+        self.text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
         self.pipeline = None
         self.me = None
         # Cheap summarizer for daytime context compression

@@ -182,7 +182,7 @@ async def create_memory(req: MemoryCreateRequest):
         from core.memory import VectorMemory
         from config import settings
 
-        text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=384)
+        text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
         # We need to get a unique FAISS ID
         from core.db import get_conn as get_mila_conn2
         conn2 = get_mila_conn2()
@@ -238,10 +238,10 @@ async def rebuild_faiss():
         vectors = np.array(vectors)
 
         # Create new index
-        text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=384)
+        text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
         from core.memory import VectorMemory as VM
         import faiss
-        new_index = faiss.IndexIDMap(faiss.IndexFlatL2(384))
+        new_index = faiss.IndexIDMap(faiss.IndexFlatL2(settings.EMBED_DIM))
 
         valid_ids = []
         valid_vectors = []

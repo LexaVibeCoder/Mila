@@ -1,6 +1,7 @@
 # core/llm_client.py
 import openai
-from typing import List, Dict, Any, Optional
+import json
+from typing import List, Dict, Any, Optional, AsyncGenerator
 from config import settings, normalize_api_base
 
 class LLMClient:
@@ -171,3 +172,130 @@ class LLMClient:
             }
         
         raise last_error or Exception("Empty response from LLM API")
+
+    async def generate_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict]] = None,
+        tool_choice: str = "auto",
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        system_prompt: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream response token by token.
+        
+        For tool calls (think function), yields the full response at the end.
+        For regular text responses, yields each token as it arrives.
+        
+        Yields:
+            str: Either a token chunk (for text responses) or a special
+                 "__tool_call__:<json>" marker for tool calls.
+        """
+        if max_tokens is None:
+            max_tokens = self.default_max_tokens
+        if temperature is None:
+            temperature = self.default_temperature
+
+        # Inject system prompt if provided
+        if system_prompt:
+            messages = [{"role": "system", "content": system_prompt}] + messages
+
+        kwargs = dict(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True,
+            stream_options={"include_usage": False},
+        )
+
+        # Pass optional sampling parameters
+        if self.default_top_p is not None:
+            kwargs["top_p"] = self.default_top_p
+        if self.default_frequency_penalty is not None:
+            kwargs["frequency_penalty"] = self.default_frequency_penalty
+        if self.default_presence_penalty is not None:
+            kwargs["presence_penalty"] = self.default_presence_penalty
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+
+        collected_content = ""
+        collected_tool_calls = {}
+
+        try:
+            stream = await self.client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    continue
+
+                # Text content
+                if delta.content:
+                    collected_content += delta.content
+                    yield delta.content
+
+                # Tool calls
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in collected_tool_calls:
+                            collected_tool_calls[idx] = {
+                                "id": "",
+                                "function": {"name": "", "arguments": ""}
+                            }
+                        if tc_delta.id:
+                            collected_tool_calls[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                collected_tool_calls[idx]["function"]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                collected_tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+            # If we have tool calls, yield them as a special marker
+            if collected_tool_calls:
+                tool_calls_list = []
+                for idx in sorted(collected_tool_calls.keys()):
+                    tc = collected_tool_calls[idx]
+                    tool_calls_list.append({
+                        "index": idx,
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"]
+                        }
+                    })
+                yield f"__tool_call__:{json.dumps(tool_calls_list)}"
+
+        except Exception as e:
+            print(f"  [LLM Stream Error] {e}")
+            # Fall back to non-streaming if streaming fails
+            response = await self.generate(
+                messages=messages if not system_prompt else [{"role": "system", "content": system_prompt}] + messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_prompt=None,  # Already prepended
+            )
+            thoughts = response.get("thoughts", "")
+            if thoughts:
+                yield thoughts
+            tool_calls = response.get("tool_calls")
+            if tool_calls:
+                tc_list = [
+                    {
+                        "index": i,
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for i, tc in enumerate(tool_calls)
+                ]
+                yield f"__tool_call__:{json.dumps(tc_list)}"

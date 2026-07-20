@@ -263,109 +263,150 @@ class MilaUserbot:
             # Update pipeline context
             self.pipeline.user_id = user_id
             self.pipeline.chat_id = chat_id
-            
-            # Process through think pipeline
-            result = await self.pipeline.process_message(
+
+            # ── Streaming processing ──
+            has_send_action = False
+            has_silence_action = False
+            full_response = ""
+            send_text = ""
+            sent_message = None  # Telegram message object for progressive editing
+            target_chat_id = chat_id
+
+            async for event in self.pipeline.process_message_stream(
                 user_message=message.text,
                 user_visible_history=user_visible_history,
                 agent_internal_history=agent_internal_history,
                 user_profile=get_user_info(user_id)
-            )
-            
-            # Get full monologue for DB storage
-            full_response = result.get("thoughts", "")
-            has_send_action = False
-            has_silence_action = False
-            
-            if result.get("success") and result.get("actions"):
-                for action in result["actions"]:
+            ):
+                etype = event.get("type")
+
+                if etype == "thought":
+                    thoughts = event.get("thoughts", "")
+                    thoughts_preview = thoughts[:120].replace("\n", " ")
+                    print(f"  Thoughts: {thoughts_preview}...")
+
+                elif etype == "token":
+                    token = event.get("token", "")
+                    send_text += token
+                    full_response += token
+
+                    # Progressive editing: send every N chars or at sentence boundaries
+                    if len(send_text) > 5:
+                        try:
+                            if sent_message is None:
+                                # Send first message
+                                sent_message = await client.send_message(
+                                    int(target_chat_id), send_text + "…"
+                                )
+                            elif len(send_text) % 15 == 0 or token in (".", "!", "?", "\n"):
+                                # Edit progressively
+                                await sent_message.edit_text(send_text + "…")
+                        except Exception as e:
+                            pass  # Ignore edit errors, they're non-critical
+
+                elif etype == "action":
+                    action = event.get("action", {})
                     if action.get("type") == "send_message":
                         has_send_action = True
-                        send_text = action.get("text", "")
                         target_chat_id = action.get("chat_id", chat_id)
-                        
-                        if send_text:
-                            print(f"\n[SENDING TO USER] {send_text[:100]}...")
-                            await asyncio.sleep(random.uniform(0.5, 2.0))
-                            try:
-                                # Send to the chat_id specified by the model
-                                await client.send_message(int(target_chat_id), send_text)
-                                chunk_id = add_chunk(
-                                    target_chat_id, str(self.me.id),
-                                    content=send_text,
-                                    llm_full_response=full_response or send_text,
-                                    token_count=0,
-                                    type='raw'
-                                )
-                                # Save assistant response to context buffer too
-                                push_message(target_chat_id, send_text, source_chunk_id=chunk_id)
-                                print("[✓] Message sent to Telegram")
-                            except Exception as e:
-                                print(f"[❌ ERROR] Failed to send: {e}")
-                        else:
-                            print(f"\n[Silent Mode] AI thought but chose not to respond")
-                            if full_response:
-                                chunk_id = add_chunk(
-                                    chat_id, str(self.me.id),
-                                    content="",
-                                    llm_full_response=full_response,
-                                    token_count=0,
-                                    type='raw'
-                                )
-                    
-                    elif action.get("type") == "search_memory":
-                        print(f"[Memory] Search executed: '{action.get('query', '')}'")
-                    
+                        # Copy the text from the action as initial text
+                        action_text = action.get("text", "")
+                        if action_text and not send_text:
+                            send_text = action_text
                     elif action.get("type") == "silence":
                         has_silence_action = True
                         silence_reason = action.get("reason", "")
                         print(f"\n[Silence Mode] AI chose not to respond. Reason: {silence_reason}")
-                        if full_response:
-                            chunk_id = add_chunk(
-                                chat_id, str(self.me.id),
-                                content="",
-                                llm_full_response=full_response,
-                                token_count=0,
-                                type='raw'
-                            )
-                    
+                    elif action.get("type") == "search_memory":
+                        print(f"[Memory] Search executed: '{action.get('query', '')}'")
                     elif action.get("type") == "write_diary":
                         entry_num = action.get("entry_number", "?")
                         print(f"\n[Diary] Entry #{entry_num} written")
-            
-            if not has_send_action and full_response and not has_silence_action:
-                # LLM wrote thoughts but didn't call send_message or silence.
+
+                elif etype == "search_result":
+                    print(f"  [Search results added to context]")
+
+                elif etype == "done":
+                    result = event.get("result", {})
+                    full_response = result.get("thoughts", full_response)
+
+                elif etype == "error":
+                    print(f"\n[Pipeline Error] {event.get('error')}")
+
+            # ── Finalize message ──
+            # Stop typing first
+            stop_typing.set()
+            typing_task.cancel()
+
+            # Finalize the sent message
+            if has_send_action and send_text.strip():
+                send_text = send_text.strip()
+                if sent_message:
+                    try:
+                        await sent_message.edit_text(send_text)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await asyncio.sleep(random.uniform(0.3, 1.0))
+                        await client.send_message(int(target_chat_id), send_text)
+                    except Exception as e:
+                        print(f"[❌ ERROR] Failed to send: {e}")
+
+                # Save to DB and context buffer
+                chunk_id = add_chunk(
+                    target_chat_id, str(self.me.id),
+                    content=send_text,
+                    llm_full_response=full_response or send_text,
+                    token_count=0,
+                    type='raw'
+                )
+                push_message(target_chat_id, send_text, source_chunk_id=chunk_id)
+                print(f"[✓] Streamed message sent to Telegram ({len(send_text)} chars)")
+
+            elif not has_send_action and full_response and not has_silence_action:
+                # Fallback: LLM wrote thoughts but didn't call send_message
                 thoughts_stripped = full_response.strip()
-                if len(thoughts_stripped) > 80:
+                if sent_message:
+                    try:
+                        await sent_message.edit_text(thoughts_stripped)
+                    except Exception:
+                        pass
+                elif len(thoughts_stripped) > 80:
                     print(f"\n[⚠️ FALLBACK] LLM wrote thoughts without calling send_message — auto-sending...")
                     await asyncio.sleep(random.uniform(0.5, 2.0))
                     try:
-                        await message.reply_text(thoughts_stripped)
-                        chunk_id = add_chunk(
-                            chat_id, str(self.me.id),
-                            content=thoughts_stripped,
-                            llm_full_response=thoughts_stripped,
-                            token_count=0,
-                            type='raw'
-                        )
-                        push_message(chat_id, thoughts_stripped, source_chunk_id=chunk_id)
-                        print(f"[✓] Fallback message sent to Telegram")
+                        sent_message = await client.send_message(int(chat_id), thoughts_stripped)
                     except Exception as e:
                         print(f"[❌ ERROR] Fallback send failed: {e}")
-                else:
-                    # Genuine silent mode — short internal reflection
-                    print(f"\n[Silent Mode] AI thought but chose not to respond")
-                    if full_response:
-                        add_chunk(
-                            chat_id, str(self.me.id),
-                            content="",
-                            llm_full_response=full_response,
-                            token_count=0,
-                            type='raw'
-                        )
-                
-            if result.get("error"):
-                print(f"\n[Pipeline Error] {result['error']}")
+
+                if thoughts_stripped and len(thoughts_stripped) > 80:
+                    chunk_id = add_chunk(
+                        chat_id, str(self.me.id),
+                        content=thoughts_stripped,
+                        llm_full_response=thoughts_stripped,
+                        token_count=0,
+                        type='raw'
+                    )
+                    push_message(chat_id, thoughts_stripped, source_chunk_id=chunk_id)
+                elif full_response:
+                    add_chunk(
+                        chat_id, str(self.me.id),
+                        content="",
+                        llm_full_response=full_response,
+                        token_count=0,
+                        type='raw'
+                    )
+
+            elif has_silence_action and full_response:
+                # Save silent response to DB
+                add_chunk(
+                    chat_id, str(self.me.id),
+                    content="",
+                    llm_full_response=full_response,
+                    token_count=0,
+                    type='raw'
+                )
 
         except Exception:
             import traceback

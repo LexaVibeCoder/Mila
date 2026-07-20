@@ -18,7 +18,8 @@ import json
 import os
 import time
 import uuid
-from typing import List, Dict, Any, Optional
+import asyncio
+from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 
 from config import settings
@@ -299,3 +300,213 @@ class ThinkPipeline:
             print(f"[Log] Saved to {filepath}")
         except Exception as e:
             print(f"[Log Error] Failed to save log: {e}")
+
+    async def process_message_stream(
+        self,
+        user_message: str,
+        user_visible_history: List[Dict[str, str]],
+        agent_internal_history: List[Dict[str, str]],
+        user_profile: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Streaming version of process_message.
+        
+        Phase 1 (think loop): non-streaming LLM calls to decide actions via think().
+        Phase 2 (streaming): if a send_message action exists, the reply is streamed
+        token-by-token from the LLM.
+
+        Yields:
+          {"type": "thought", "thoughts": str}
+          {"type": "action", "action": Dict}
+          {"type": "search_result", "content": str}
+          {"type": "token", "token": str}  — one token of the response
+          {"type": "done", "result": Dict}
+          {"type": "error", "error": str}
+        """
+        total_start = time.time()
+
+        try:
+            # Build system prompt and tool definitions
+            main_system_prompt = build_main_llm_system_prompt(
+                self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
+            )
+            tool_definitions = get_tool_definitions()
+
+            messages = list(agent_internal_history)
+
+            all_actions = []
+            final_thoughts = ""
+            iteration = 0
+            raw_llm_responses = []
+            send_message_action = None
+
+            # ──────────────────────────────────────────────
+            # Phase 1: Think loop (non-streaming, tool calls)
+            # ──────────────────────────────────────────────
+            while iteration < MAX_THINK_ITERATIONS:
+                iteration += 1
+                print(f"\n── Iteration {iteration}/{MAX_THINK_ITERATIONS} [stream] ──")
+
+                response = await self.main_llm.generate(
+                    messages=messages,
+                    system_prompt=main_system_prompt,
+                    tools=tool_definitions,
+                    tool_choice="required",
+                    max_tokens=2048,
+                    temperature=self.main_llm.default_temperature,
+                )
+
+                thoughts = response.get("thoughts", "")
+                tool_calls = response.get("tool_calls", None)
+
+                final_thoughts = thoughts
+                yield {"type": "thought", "thoughts": thoughts}
+
+                raw_llm_responses.append({
+                    "iteration": iteration,
+                    "thoughts": thoughts,
+                    "tool_calls": [
+                        {"name": tc.function.name, "arguments": tc.function.arguments}
+                        for tc in (tool_calls or [])
+                    ],
+                    "finish_reason": response.get("finish_reason")
+                })
+
+                # Validate think() call
+                if not tool_calls:
+                    if iteration == 1:
+                        print("  [Retry: no think() call]")
+                        messages.append({
+                            "role": "system",
+                            "content": "ОШИБКА: Ты не вызвала функцию think(). Ты ОБЯЗАНА вызвать think() в каждом ответе. "
+                                       "Пожалуйста, перегенерируй ответ и обязательно вызови think() с мыслями и действиями."
+                        })
+                        continue
+                    else:
+                        break
+
+                first_tool = tool_calls[0]
+                if not hasattr(first_tool, 'function') or first_tool.function.name != 'think':
+                    if iteration == 1:
+                        print(f"  [Retry: called {first_tool.function.name} instead of think]")
+                        messages.append({
+                            "role": "system",
+                            "content": f"ОШИБКА: Ты вызвала функцию '{first_tool.function.name}' вместо 'think'. "
+                                       "Ты ОБЯЗАНА использовать функцию think() в каждом ответе. "
+                                       "Пожалуйста, перегенерируй ответ и обязательно вызови think()."
+                        })
+                        continue
+                    else:
+                        break
+
+                actions_from_llm = await self._parse_think_call(tool_calls[0])
+                if not actions_from_llm:
+                    print("  [Parse error]")
+                    break
+
+                action_types = [a.get("action_type", "?") for a in actions_from_llm]
+                print(f"  Actions: {', '.join(action_types)}")
+
+                has_search = False
+                for action in actions_from_llm:
+                    executed = await self._execute_single_action(action)
+                    all_actions.append(executed)
+                    yield {"type": "action", "action": executed}
+
+                    if executed.get("type") == "send_message":
+                        send_message_action = executed
+                    elif executed.get("type") == "search_memory" and executed.get("status") == "searched":
+                        has_search = True
+                        context_addon = executed.get("context_addon", "[Ничего не найдено]")
+                        messages.append({"role": "system", "content": f"Результаты поиска в памяти:\n{context_addon}"})
+                        yield {"type": "search_result", "content": context_addon}
+                        print("  [Search results → re-calling]")
+
+                if not has_search:
+                    print("  [Done]")
+                    break
+
+            # ──────────────────────────────────────────────
+            # Phase 2: Stream the reply token by token
+            # ──────────────────────────────────────────────
+            has_send_action = send_message_action is not None
+
+            if has_send_action:
+                target_chat_id = send_message_action.get("chat_id", self.chat_id)
+                existing_text = send_message_action.get("text", "").strip()
+
+                if existing_text:
+                    # ── Text already exists — stream it word-by-word (virtual streaming) ──
+                    words = existing_text.split(" ")
+                    for i, word in enumerate(words):
+                        prefix = " " if i > 0 else ""
+                        yield {"type": "token", "token": f"{prefix}{word}"}
+                        # Tiny delay to simulate real streaming feel
+                        if i % 3 == 0:
+                            await asyncio.sleep(0.02)
+                    print(f"  [Streamed {len(existing_text)} chars (virtual)]")
+                else:
+                    # ── No text yet — real streaming from LLM ──
+                    print(f"  [Real streaming response from LLM...]")
+                    stream_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Ты — Мила, живая девушка. Напиши ответ пользователю от первого лица, "
+                                "используя свои мысли ниже как основу. Пиши естественно, как в разговоре."
+                            )
+                        },
+                        {
+                            "role": "assistant",
+                            "content": f"Мои мысли: {final_thoughts}\n\nМой ответ:"
+                        }
+                    ]
+
+                    collected_text = ""
+                    async for token in self.main_llm.generate_stream(
+                        messages=stream_messages,
+                        temperature=self.main_llm.default_temperature,
+                        max_tokens=1024,
+                    ):
+                        if token.startswith("__tool_call__:"):
+                            continue
+                        collected_text += token
+                        yield {"type": "token", "token": token}
+
+                    if collected_text.strip():
+                        final_thoughts = collected_text.strip()
+                        print(f"  [Streamed {len(collected_text)} chars (real)]")
+
+            s_time = time.time() - total_start
+
+            result = {
+                "success": True,
+                "actions": all_actions,
+                "thoughts": final_thoughts,
+                "system_prompt": main_system_prompt,
+                "llm_messages": messages,
+                "error": None,
+                "raw_llm_responses": raw_llm_responses,
+                "timing": {
+                    "total": f"{s_time:.2f}s",
+                    "iterations": iteration
+                }
+            }
+
+            await self._save_log(result, user_message)
+            yield {"type": "done", "result": result}
+
+        except Exception as e:
+            total_time = time.time() - total_start
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[Pipeline Error] {e}\n{tb}")
+            error_result = {
+                "success": False,
+                "actions": [],
+                "thoughts": "",
+                "error": str(e),
+                "timing": {"total": f"{total_time:.2f}s"}
+            }
+            await self._save_log({**error_result, "traceback": tb}, user_message)
+            yield {"type": "error", "error": str(e)}

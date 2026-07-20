@@ -311,22 +311,22 @@ class ThinkPipeline:
         """
         Streaming version of process_message.
         
-        Phase 1 (think loop): non-streaming LLM calls to decide actions via think().
-        Phase 2 (streaming): if a send_message action exists, the reply is streamed
-        token-by-token from the LLM.
+        Think loop: LLM generates thoughts + actions via think().
+        When a send_message action is found — it's yielded immediately
+        with the full text already generated. The consumer (bot) sends
+        it right away, while the think loop continues processing more
+        actions (e.g. search_memory, another send_message).
 
         Yields:
           {"type": "thought", "thoughts": str}
-          {"type": "action", "action": Dict}
+          {"type": "action", "action": Dict}  — full action with complete text
           {"type": "search_result", "content": str}
-          {"type": "token", "token": str}  — one token of the response
           {"type": "done", "result": Dict}
           {"type": "error", "error": str}
         """
         total_start = time.time()
 
         try:
-            # Build system prompt and tool definitions
             main_system_prompt = build_main_llm_system_prompt(
                 self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
             )
@@ -338,11 +338,7 @@ class ThinkPipeline:
             final_thoughts = ""
             iteration = 0
             raw_llm_responses = []
-            send_message_action = None
 
-            # ──────────────────────────────────────────────
-            # Phase 1: Think loop (non-streaming, tool calls)
-            # ──────────────────────────────────────────────
             while iteration < MAX_THINK_ITERATIONS:
                 iteration += 1
                 print(f"\n── Iteration {iteration}/{MAX_THINK_ITERATIONS} [stream] ──")
@@ -407,15 +403,15 @@ class ThinkPipeline:
                 action_types = [a.get("action_type", "?") for a in actions_from_llm]
                 print(f"  Actions: {', '.join(action_types)}")
 
+                # Execute each action — send_message is yielded immediately
+                # with the full text, so the bot can send it right away
                 has_search = False
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
                     all_actions.append(executed)
                     yield {"type": "action", "action": executed}
 
-                    if executed.get("type") == "send_message":
-                        send_message_action = executed
-                    elif executed.get("type") == "search_memory" and executed.get("status") == "searched":
+                    if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
                         context_addon = executed.get("context_addon", "[Ничего не найдено]")
                         messages.append({"role": "system", "content": f"Результаты поиска в памяти:\n{context_addon}"})
@@ -425,57 +421,6 @@ class ThinkPipeline:
                 if not has_search:
                     print("  [Done]")
                     break
-
-            # ──────────────────────────────────────────────
-            # Phase 2: Stream the reply token by token
-            # ──────────────────────────────────────────────
-            has_send_action = send_message_action is not None
-
-            if has_send_action:
-                target_chat_id = send_message_action.get("chat_id", self.chat_id)
-                existing_text = send_message_action.get("text", "").strip()
-
-                if existing_text:
-                    # ── Text already exists — stream it word-by-word (virtual streaming) ──
-                    words = existing_text.split(" ")
-                    for i, word in enumerate(words):
-                        prefix = " " if i > 0 else ""
-                        yield {"type": "token", "token": f"{prefix}{word}"}
-                        # Tiny delay to simulate real streaming feel
-                        if i % 3 == 0:
-                            await asyncio.sleep(0.02)
-                    print(f"  [Streamed {len(existing_text)} chars (virtual)]")
-                else:
-                    # ── No text yet — real streaming from LLM ──
-                    print(f"  [Real streaming response from LLM...]")
-                    stream_messages = [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Ты — Мила, живая девушка. Напиши ответ пользователю от первого лица, "
-                                "используя свои мысли ниже как основу. Пиши естественно, как в разговоре."
-                            )
-                        },
-                        {
-                            "role": "assistant",
-                            "content": f"Мои мысли: {final_thoughts}\n\nМой ответ:"
-                        }
-                    ]
-
-                    collected_text = ""
-                    async for token in self.main_llm.generate_stream(
-                        messages=stream_messages,
-                        temperature=self.main_llm.default_temperature,
-                        max_tokens=1024,
-                    ):
-                        if token.startswith("__tool_call__:"):
-                            continue
-                        collected_text += token
-                        yield {"type": "token", "token": token}
-
-                    if collected_text.strip():
-                        final_thoughts = collected_text.strip()
-                        print(f"  [Streamed {len(collected_text)} chars (real)]")
 
             s_time = time.time() - total_start
 

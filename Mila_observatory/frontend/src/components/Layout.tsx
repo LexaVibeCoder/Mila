@@ -10,6 +10,7 @@ const navItems = [
   { path: '/tools', label: 'Tools', icon: '⊞' },
   { path: '/pipeline', label: 'Pipeline', icon: '▷' },
   { path: '/config', label: 'Runtime State', icon: '⚡' },
+  { path: '/state-agent', label: 'State Agent', icon: '🧠' },
 ];
 
 const styles: Record<string, React.CSSProperties> = {

@@ -1,0 +1,15 @@
+
+services:
+  train:
+    build: .
+    container_name: state-agent-train
+    volumes:
+      - .:/app:Z
+    command: python train_state_agent.py
+
+  infer:
+    build: .
+    container_name: state-agent-infer
+    volumes:
+      - .:/app:Z
+    entrypoint: python infer.py

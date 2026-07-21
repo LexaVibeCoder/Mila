@@ -249,3 +249,51 @@ export interface SleepConfigData {
 
 export const getSleepEstimate = () => request<SleepEstimate>('/sleep/estimate');
 export const getSleepConfig = () => request<SleepConfigData>('/sleep/config');
+
+// ─── State Agent ────────────────────────────────────────────
+
+export interface StateAgentModelInfo {
+  loaded: boolean;
+  error: string | null;
+  model_path: string;
+  num_features: number;
+  actions: string[];
+}
+
+export interface StateAgentNeeds {
+  seconds_since_last_msg: number;
+  current_hour: number;
+  fatigue: number;
+  need_social: number;
+  boredom: number;
+  in_active_dialog: boolean;
+  timestamp: string;
+}
+
+export interface StateAgentInference {
+  action: string;
+  probabilities: Record<string, number>;
+  inference_time_ms: number;
+  model_loaded: boolean;
+  fallback: boolean;
+}
+
+export interface StateAgentStatus {
+  model: StateAgentModelInfo;
+  needs: StateAgentNeeds;
+  inference: StateAgentInference | null;
+}
+
+export interface NeedsOverride {
+  fatigue?: number;
+  need_social?: number;
+  boredom?: number;
+  seconds_since_last_msg?: number;
+  current_hour?: number;
+  in_active_dialog?: boolean;
+}
+
+export const getStateAgentStatus = () => request<StateAgentStatus>('/state-agent');
+export const runStateAgent = () => request<StateAgentInference>('/state-agent/run', { method: 'POST' });
+export const overrideNeeds = (data: NeedsOverride) =>
+  request<StateAgentStatus>('/state-agent/needs', { method: 'POST', body: JSON.stringify(data) });

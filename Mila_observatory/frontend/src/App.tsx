@@ -9,6 +9,7 @@ import ToolsControl from './pages/ToolsControl';
 import PipelineViewer from './pages/PipelineViewer';
 import ConfigPage from './pages/ConfigPage';
 import SleepControl from './pages/SleepControl';
+import StateAgentControl from './pages/StateAgentControl';
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/pipeline" element={<PipelineViewer />} />
         <Route path="/config" element={<ConfigPage />} />
         <Route path="/sleep" element={<SleepControl />} />
+        <Route path="/state-agent" element={<StateAgentControl />} />
       </Routes>
     </Layout>
   );

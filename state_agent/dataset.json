@@ -1,0 +1,902 @@
+[
+  {
+    "seconds_since_last_msg": 0,
+    "current_hour": 14,
+    "fatigue": 0.1,
+    "need_social": 0.8,
+    "boredom": 0.7,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 3600,
+    "current_hour": 23,
+    "fatigue": 0.9,
+    "need_social": 0.1,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 86400,
+    "current_hour": 8,
+    "fatigue": 0.3,
+    "need_social": 0.4,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 120,
+    "current_hour": 15,
+    "fatigue": 0.4,
+    "need_social": 0.3,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 45,
+    "current_hour": 10,
+    "fatigue": 0.2,
+    "need_social": 0.9,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 2000,
+    "current_hour": 1,
+    "fatigue": 0.95,
+    "need_social": 0.2,
+    "boredom": 0.1,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 45000,
+    "current_hour": 7,
+    "fatigue": 0.25,
+    "need_social": 0.3,
+    "boredom": 0.55,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 300,
+    "current_hour": 16,
+    "fatigue": 0.5,
+    "need_social": 0.4,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 600,
+    "current_hour": 22,
+    "fatigue": 0.8,
+    "need_social": 0.2,
+    "boredom": 0.4,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 15,
+    "current_hour": 12,
+    "fatigue": 0.15,
+    "need_social": 0.75,
+    "boredom": 0.9,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 1200,
+    "current_hour": 9,
+    "fatigue": 0.2,
+    "need_social": 0.35,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 28800,
+    "current_hour": 10,
+    "fatigue": 0.4,
+    "need_social": 0.5,
+    "boredom": 0.65,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 5400,
+    "current_hour": 3,
+    "fatigue": 0.88,
+    "need_social": 0.05,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 50,
+    "current_hour": 17,
+    "fatigue": 0.35,
+    "need_social": 0.6,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 7200,
+    "current_hour": 13,
+    "fatigue": 0.5,
+    "need_social": 0.85,
+    "boredom": 0.7,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 900,
+    "current_hour": 20,
+    "fatigue": 0.7,
+    "need_social": 0.4,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 0,
+    "current_hour": 18,
+    "fatigue": 0.3,
+    "need_social": 0.9,
+    "boredom": 0.85,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 40000,
+    "current_hour": 6,
+    "fatigue": 0.3,
+    "need_social": 0.25,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 2400,
+    "current_hour": 0,
+    "fatigue": 0.92,
+    "need_social": 0.1,
+    "boredom": 0.15,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 110,
+    "current_hour": 11,
+    "fatigue": 0.25,
+    "need_social": 0.3,
+    "boredom": 0.4,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 310,
+    "current_hour": 19,
+    "fatigue": 0.45,
+    "need_social": 0.7,
+    "boredom": 0.55,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 15000,
+    "current_hour": 23,
+    "fatigue": 0.85,
+    "need_social": 0.15,
+    "boredom": 0.25,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 500,
+    "current_hour": 8,
+    "fatigue": 0.55,
+    "need_social": 0.4,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 65000,
+    "current_hour": 9,
+    "fatigue": 0.2,
+    "need_social": 0.45,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 75,
+    "current_hour": 16,
+    "fatigue": 0.3,
+    "need_social": 0.8,
+    "boredom": 0.8,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 800,
+    "current_hour": 2,
+    "fatigue": 0.9,
+    "need_social": 0.1,
+    "boredom": 0.1,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 1800,
+    "current_hour": 14,
+    "fatigue": 0.5,
+    "need_social": 0.3,
+    "boredom": 0.45,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 60,
+    "current_hour": 12,
+    "fatigue": 0.15,
+    "need_social": 0.95,
+    "boredom": 0.85,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 36000,
+    "current_hour": 10,
+    "fatigue": 0.35,
+    "need_social": 0.35,
+    "boredom": 0.55,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 200,
+    "current_hour": 17,
+    "fatigue": 0.4,
+    "need_social": 0.2,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 4200,
+    "current_hour": 22,
+    "fatigue": 0.78,
+    "need_social": 0.25,
+    "boredom": 0.4,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 10,
+    "current_hour": 9,
+    "fatigue": 0.1,
+    "need_social": 0.7,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 2100,
+    "current_hour": 4,
+    "fatigue": 0.93,
+    "need_social": 0.05,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 340,
+    "current_hour": 15,
+    "fatigue": 0.5,
+    "need_social": 0.5,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 70000,
+    "current_hour": 6,
+    "fatigue": 0.28,
+    "need_social": 0.2,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 90,
+    "current_hour": 18,
+    "fatigue": 0.35,
+    "need_social": 0.85,
+    "boredom": 0.75,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 5000,
+    "current_hour": 21,
+    "fatigue": 0.82,
+    "need_social": 0.3,
+    "boredom": 0.35,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 250,
+    "current_hour": 11,
+    "fatigue": 0.2,
+    "need_social": 0.4,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 48000,
+    "current_hour": 8,
+    "fatigue": 0.3,
+    "need_social": 0.45,
+    "boredom": 0.7,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 30,
+    "current_hour": 13,
+    "fatigue": 0.25,
+    "need_social": 0.7,
+    "boredom": 0.9,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 1100,
+    "current_hour": 1,
+    "fatigue": 0.87,
+    "need_social": 0.1,
+    "boredom": 0.25,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 400,
+    "current_hour": 19,
+    "fatigue": 0.55,
+    "need_social": 0.35,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 87000,
+    "current_hour": 7,
+    "fatigue": 0.33,
+    "need_social": 0.3,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 380,
+    "current_hour": 16,
+    "fatigue": 0.45,
+    "need_social": 0.75,
+    "boredom": 0.65,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 1900,
+    "current_hour": 23,
+    "fatigue": 0.88,
+    "need_social": 0.15,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 70,
+    "current_hour": 10,
+    "fatigue": 0.15,
+    "need_social": 0.4,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 55000,
+    "current_hour": 9,
+    "fatigue": 0.2,
+    "need_social": 0.5,
+    "boredom": 0.7,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 25,
+    "current_hour": 14,
+    "fatigue": 0.2,
+    "need_social": 0.9,
+    "boredom": 0.8,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 1300,
+    "current_hour": 0,
+    "fatigue": 0.94,
+    "need_social": 0.05,
+    "boredom": 0.1,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 210,
+    "current_hour": 17,
+    "fatigue": 0.5,
+    "need_social": 0.3,
+    "boredom": 0.35,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 8000,
+    "current_hour": 6,
+    "fatigue": 0.25,
+    "need_social": 0.3,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 180,
+    "current_hour": 18,
+    "fatigue": 0.4,
+    "need_social": 0.8,
+    "boredom": 0.7,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 6000,
+    "current_hour": 22,
+    "fatigue": 0.8,
+    "need_social": 0.2,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 300,
+    "current_hour": 12,
+    "fatigue": 0.25,
+    "need_social": 0.35,
+    "boredom": 0.4,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 50000,
+    "current_hour": 8,
+    "fatigue": 0.3,
+    "need_social": 0.4,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 5,
+    "current_hour": 15,
+    "fatigue": 0.1,
+    "need_social": 0.85,
+    "boredom": 0.9,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 1400,
+    "current_hour": 3,
+    "fatigue": 0.9,
+    "need_social": 0.05,
+    "boredom": 0.15,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 750,
+    "current_hour": 19,
+    "fatigue": 0.6,
+    "need_social": 0.25,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 90000,
+    "current_hour": 7,
+    "fatigue": 0.28,
+    "need_social": 0.4,
+    "boredom": 0.55,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 240,
+    "current_hour": 13,
+    "fatigue": 0.3,
+    "need_social": 0.7,
+    "boredom": 0.65,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 3200,
+    "current_hour": 0,
+    "fatigue": 0.86,
+    "need_social": 0.2,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 80,
+    "current_hour": 10,
+    "fatigue": 0.2,
+    "need_social": 0.3,
+    "boredom": 0.25,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 60000,
+    "current_hour": 9,
+    "fatigue": 0.15,
+    "need_social": 0.5,
+    "boredom": 0.7,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 35,
+    "current_hour": 16,
+    "fatigue": 0.3,
+    "need_social": 0.8,
+    "boredom": 0.75,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 4000,
+    "current_hour": 23,
+    "fatigue": 0.87,
+    "need_social": 0.1,
+    "boredom": 0.25,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 150,
+    "current_hour": 14,
+    "fatigue": 0.4,
+    "need_social": 0.4,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 78000,
+    "current_hour": 8,
+    "fatigue": 0.35,
+    "need_social": 0.45,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 90,
+    "current_hour": 17,
+    "fatigue": 0.35,
+    "need_social": 0.85,
+    "boredom": 0.8,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 2700,
+    "current_hour": 2,
+    "fatigue": 0.91,
+    "need_social": 0.05,
+    "boredom": 0.1,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 330,
+    "current_hour": 11,
+    "fatigue": 0.3,
+    "need_social": 0.45,
+    "boredom": 0.4,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 54000,
+    "current_hour": 7,
+    "fatigue": 0.25,
+    "need_social": 0.35,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 40,
+    "current_hour": 12,
+    "fatigue": 0.2,
+    "need_social": 0.75,
+    "boredom": 0.85,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 700,
+    "current_hour": 21,
+    "fatigue": 0.75,
+    "need_social": 0.25,
+    "boredom": 0.35,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 260,
+    "current_hour": 15,
+    "fatigue": 0.45,
+    "need_social": 0.3,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 82000,
+    "current_hour": 10,
+    "fatigue": 0.3,
+    "need_social": 0.5,
+    "boredom": 0.55,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 100,
+    "current_hour": 18,
+    "fatigue": 0.35,
+    "need_social": 0.8,
+    "boredom": 0.7,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 2000,
+    "current_hour": 0,
+    "fatigue": 0.9,
+    "need_social": 0.1,
+    "boredom": 0.15,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 45,
+    "current_hour": 9,
+    "fatigue": 0.15,
+    "need_social": 0.2,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 4800,
+    "current_hour": 6,
+    "fatigue": 0.22,
+    "need_social": 0.35,
+    "boredom": 0.45,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 12,
+    "current_hour": 13,
+    "fatigue": 0.25,
+    "need_social": 0.9,
+    "boredom": 0.8,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 3200,
+    "current_hour": 22,
+    "fatigue": 0.83,
+    "need_social": 0.15,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 160,
+    "current_hour": 16,
+    "fatigue": 0.5,
+    "need_social": 0.35,
+    "boredom": 0.45,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 68000,
+    "current_hour": 8,
+    "fatigue": 0.4,
+    "need_social": 0.4,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 55,
+    "current_hour": 14,
+    "fatigue": 0.3,
+    "need_social": 0.75,
+    "boredom": 0.65,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 1500,
+    "current_hour": 1,
+    "fatigue": 0.88,
+    "need_social": 0.1,
+    "boredom": 0.2,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 220,
+    "current_hour": 12,
+    "fatigue": 0.3,
+    "need_social": 0.3,
+    "boredom": 0.25,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 72000,
+    "current_hour": 9,
+    "fatigue": 0.25,
+    "need_social": 0.5,
+    "boredom": 0.5,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 18,
+    "current_hour": 15,
+    "fatigue": 0.2,
+    "need_social": 0.8,
+    "boredom": 0.7,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 2700,
+    "current_hour": 23,
+    "fatigue": 0.85,
+    "need_social": 0.2,
+    "boredom": 0.35,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 390,
+    "current_hour": 10,
+    "fatigue": 0.2,
+    "need_social": 0.45,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 58000,
+    "current_hour": 7,
+    "fatigue": 0.35,
+    "need_social": 0.35,
+    "boredom": 0.6,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 25,
+    "current_hour": 17,
+    "fatigue": 0.3,
+    "need_social": 0.9,
+    "boredom": 0.85,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 800,
+    "current_hour": 4,
+    "fatigue": 0.92,
+    "need_social": 0.1,
+    "boredom": 0.15,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 190,
+    "current_hour": 18,
+    "fatigue": 0.5,
+    "need_social": 0.25,
+    "boredom": 0.4,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 83000,
+    "current_hour": 10,
+    "fatigue": 0.2,
+    "need_social": 0.45,
+    "boredom": 0.55,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 8,
+    "current_hour": 11,
+    "fatigue": 0.15,
+    "need_social": 0.7,
+    "boredom": 0.75,
+    "in_active_dialog": false,
+    "action": "write_to_user"
+  },
+  {
+    "seconds_since_last_msg": 3500,
+    "current_hour": 22,
+    "fatigue": 0.8,
+    "need_social": 0.25,
+    "boredom": 0.3,
+    "in_active_dialog": false,
+    "action": "sleep"
+  },
+  {
+    "seconds_since_last_msg": 430,
+    "current_hour": 13,
+    "fatigue": 0.4,
+    "need_social": 0.3,
+    "boredom": 0.35,
+    "in_active_dialog": false,
+    "action": "wait"
+  },
+  {
+    "seconds_since_last_msg": 76000,
+    "current_hour": 8,
+    "fatigue": 0.35,
+    "need_social": 0.4,
+    "boredom": 0.65,
+    "in_active_dialog": false,
+    "action": "plan_day"
+  },
+  {
+    "seconds_since_last_msg": 22,
+    "current_hour": 16,
+    "fatigue": 0.2,
+    "need_social": 0.75,
+    "boredom": 0.7,
+    "in_active_dialog": true,
+    "action": "write_to_user"
+  }
+]

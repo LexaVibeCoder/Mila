@@ -18,6 +18,9 @@ services:
       - ./models:/app/models:ro
       # Mount Pyrogram session file (created once via create_session.py)
       - ./mila_session.session:/app/mila_session.session:Z
+      # Host timezone
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     command: python main.py
     networks:
       - mila_network
@@ -41,6 +44,9 @@ services:
       - mila_logs:/app/logs
       # Mount local AI models (read-only)
       - ./models:/app/models:ro
+      # Host timezone
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     command: python -m Mila_observatory.server
     depends_on:
       - bot

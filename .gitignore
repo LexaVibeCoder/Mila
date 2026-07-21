@@ -19,6 +19,7 @@ data/
 models/
 *.bin
 *.safetensors
+AGENTS.md
 
 # Logs
 logs/

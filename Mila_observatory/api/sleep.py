@@ -14,12 +14,12 @@ from pydantic import BaseModel, Field
 
 from Mila_observatory.runtime import runtime_config
 from Mila_observatory.api.dashboard import add_event
-from core.sleep_manager import (
+from core.sleep.manager import (
     start_sleep, wake_up, get_sleep_status, is_sleeping, 
     recover_from_crash, get_pending_messages_count
 )
-from core.diary import get_diary_entry_count
-from core.sleep_state import get_active_dialogs_detail
+from core.diary.manager import get_diary_entry_count
+from core.sleep.state import get_active_dialogs_detail
 
 router = APIRouter(tags=["sleep"])
 

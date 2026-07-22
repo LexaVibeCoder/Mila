@@ -8,7 +8,7 @@
 
 ## 1. Векторная память (FAISS)
 
-**Файл**: `core/memory.py`
+**Файл**: `core/memory/vector.py`
 
 ### Класс `VectorMemory`
 
@@ -92,7 +92,7 @@ sequenceDiagram
 
 ## 3. Автобиографическая память Милы
 
-**Файл**: `core/mila_memory.py`
+**Файл**: `core/memory/eternal.py`
 
 Таблица `mila_memory_chunks` в `mila.db`:
 
@@ -137,7 +137,7 @@ CREATE TABLE mila_memory_chunks (
 
 ## 4. EmbeddingClient
 
-**Файл**: `core/embedding_client.py`
+**Файл**: `core/llm/embeddings.py`
 
 Двухрежимный клиент для получения эмбеддингов:
 
@@ -148,7 +148,7 @@ CREATE TABLE mila_memory_chunks (
 
 ## 5. RerankerClient
 
-**Файл**: `core/reranker.py`
+**Файл**: `core/llm/reranker.py`
 
 BGE-Reranker-v2-m3 через sentence-transformers `CrossEncoder`.
 

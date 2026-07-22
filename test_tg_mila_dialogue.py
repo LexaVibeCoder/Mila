@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import settings
-from core.llm_client import LLMClient
+from core.llm.client import LLMClient
 
 DEFAULT_ROUNDS = 5
 

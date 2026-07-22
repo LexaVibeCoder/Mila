@@ -1,20 +1,14 @@
 """
-State Agent API — endpoints for needs tracking and ML inference.
-
-This API is for testing only and does NOT affect Mila's behavior.
+Needs API — endpoints for needs tracking and ML inference.
 """
 
-import sys
-import os
 from datetime import datetime
 from typing import Optional
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from state_agent.needs_tracker import get_tracker, ACTIONS
+from core.needs.tracker import get_tracker, ACTIONS
 
 router = APIRouter(tags=["state-agent"])
 
@@ -62,7 +56,6 @@ class NeedsOverride(BaseModel):
 
 @router.get("/api/state-agent", response_model=StateAgentStatus)
 async def get_state_agent_status():
-    """Get current state agent status: model info, computed needs, and inference."""
     tracker = get_tracker()
     model_info = tracker.get_model_info()
     needs = tracker.compute_needs()
@@ -77,7 +70,6 @@ async def get_state_agent_status():
 
 @router.post("/api/state-agent/run", response_model=InferenceResult)
 async def run_state_agent():
-    """Run inference with fresh needs from real data."""
     tracker = get_tracker()
     needs = tracker.compute_needs()
     result = tracker.run_inference(needs)
@@ -86,7 +78,6 @@ async def run_state_agent():
 
 @router.post("/api/state-agent/needs", response_model=StateAgentStatus)
 async def override_needs(override: NeedsOverride):
-    """Override needs manually and run inference with the overridden values."""
     tracker = get_tracker()
     current = tracker.compute_needs()
 

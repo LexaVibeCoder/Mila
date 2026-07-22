@@ -1,19 +1,9 @@
-# core/tools.py
-"""
-Tool definitions and executor for the single-stage pipeline.
-Model calls `think(thoughts, actions)` — system executes actions.
-"""
-
+# core/tools/executor.py
 import json
 from typing import List, Dict, Any, Optional
 
 
 def get_tool_definitions() -> List[Dict]:
-    """OpenAI-compatible tool definitions вЂ” single `think` function.
-    
-    Reads runtime config to determine which tools are enabled/disabled.
-    """
-    # Check runtime config for tool enablement
     try:
         from Mila_observatory.runtime import runtime_config
         tools_enabled = runtime_config.get("tools", {})
@@ -22,13 +12,11 @@ def get_tool_definitions() -> List[Dict]:
         silence_enabled = tools_enabled.get("silence", True)
         diary_enabled = tools_enabled.get("write_diary", True)
     except ImportError:
-        # Observatory not installed — use defaults
         search_enabled = True
         send_enabled = True
         silence_enabled = True
         diary_enabled = True
 
-    # Build action enum dynamically
     action_enum = []
     if send_enabled:
         action_enum.append("send_message")
@@ -39,7 +27,6 @@ def get_tool_definitions() -> List[Dict]:
     if diary_enabled:
         action_enum.append("write_diary")
 
-    # If no tools are enabled, at least allow silence
     if not action_enum:
         action_enum.append("silence")
 
@@ -124,8 +111,6 @@ def get_tool_definitions() -> List[Dict]:
 
 
 class ToolExecutor:
-    """Executes actions from the `think` function call."""
-
     def __init__(
         self,
         text_memory,
@@ -139,15 +124,6 @@ class ToolExecutor:
         self.chat_id = chat_id
 
     async def execute_action(self, action: Dict) -> Dict:
-        """
-        Execute a single action from the think() response.
-
-        Args:
-            action: dict with action_type and params
-
-        Returns:
-            Action result dict with type, status, and action-specific fields.
-        """
         action_type = action.get("action_type", "")
         params = action.get("params", {})
 
@@ -179,7 +155,7 @@ class ToolExecutor:
     async def _handle_search_memory(self, params: Dict) -> Dict:
         query = params.get("query", "")
 
-        from core.reranker import RerankerClient
+        from core.llm.reranker import RerankerClient
         from core.db import search_memories_by_faiss_ids
 
         try:
@@ -235,7 +211,6 @@ class ToolExecutor:
             }
 
     async def _handle_silence(self, params: Dict) -> Dict:
-        """Handle silence action — LLM chose not to respond."""
         reason = params.get("reason", "")
         print(f"[ToolExecutor] Silence: {reason}")
         return {
@@ -245,7 +220,6 @@ class ToolExecutor:
         }
 
     async def _handle_write_diary(self, params: Dict) -> Dict:
-        """Handle write_diary action — LLM writes a conscious diary entry."""
         entry = params.get("entry", "")
         if not entry.strip():
             return {
@@ -253,8 +227,8 @@ class ToolExecutor:
                 "status": "error",
                 "error": "Empty diary entry"
             }
-        
-        from core.diary import add_diary_entry
+
+        from core.diary.manager import add_diary_entry
         entry_num = add_diary_entry(entry.strip())
         print(f"[ToolExecutor] Diary entry #{entry_num} written")
         return {

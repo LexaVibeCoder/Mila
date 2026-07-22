@@ -18,6 +18,7 @@ Mila_observatory/
 │   ├── diary.py         # Просмотр дневника
 │   ├── memory.py        # CRUD памяти + FAISS rebuild
 │   ├── model.py         # Настройки LLM + тестовый запрос
+│   ├── needs.py         # State Agent роутер потребностей
 │   ├── personality.py   # Редактор персоны
 │   ├── pipeline.py      # Логи пайплайна
 │   ├── sleep.py         # Управление сном

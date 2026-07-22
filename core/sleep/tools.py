@@ -1,30 +1,12 @@
 """
-core/sleep_llm_tools.py — LLM tool definitions for sleep processes.
-
-During sleep, three LLM processes run, each with its own tool set.
-LLMs ONLY interact with the system through these tools — no JSON responses.
-
-Tools are divided into three categories matching the three sleep processes:
-
-1. Diary Analysis: add/update/delete mila_memory_chunks
-2. Dialog Summarization: create summaries in context_buffer
-3. User Fact Extraction: add/update facts in user memories
+core/sleep/tools.py — LLM tool definitions for sleep processes.
 """
 
 import json
 from typing import List, Dict, Any, Optional
 
 
-# ═══════════════════════════════════════════════════════════════
-# 1. TOOLS FOR DIARY ANALYSIS (process 1)
-# ═══════════════════════════════════════════════════════════════
-
 def get_diary_analysis_tools() -> List[Dict]:
-    """Tool definitions for diary analysis process.
-    
-    LLM reads the diary, gets current eternal memory chunks,
-    and can add/update/delete chunks.
-    """
     return [
         {
             "type": "function",
@@ -113,19 +95,10 @@ def get_diary_analysis_tools() -> List[Dict]:
 
 
 def get_diary_analysis_tool_names() -> List[str]:
-    """Return the list of tool names for diary analysis."""
     return ["add_memory_chunk", "update_memory_chunk", "delete_memory_chunk"]
 
 
-# ═══════════════════════════════════════════════════════════════
-# 2. TOOLS FOR DIALOG SUMMARIZATION (process 2)
-# ═══════════════════════════════════════════════════════════════
-
 def get_dialog_summarization_tools() -> List[Dict]:
-    """Tool definitions for dialog summarization process.
-    
-    LLM reads dialog messages, creates a summary, and marks them for cleanup.
-    """
     return [
         {
             "type": "function",
@@ -180,20 +153,10 @@ def get_dialog_summarization_tools() -> List[Dict]:
 
 
 def get_dialog_summarization_tool_names() -> List[str]:
-    """Return the list of tool names for dialog summarization."""
     return ["save_dialog_summary", "skip_dialog"]
 
 
-# ═══════════════════════════════════════════════════════════════
-# 3. TOOLS FOR USER FACT EXTRACTION (process 3)
-# ═══════════════════════════════════════════════════════════════
-
 def get_user_fact_extraction_tools() -> List[Dict]:
-    """Tool definitions for user fact extraction process.
-    
-    LLM reads dialog messages and extracts long-term facts about users.
-    Supports group chats — facts must be attributed to the correct user.
-    """
     return [
         {
             "type": "function",
@@ -253,20 +216,10 @@ def get_user_fact_extraction_tools() -> List[Dict]:
 
 
 def get_user_fact_extraction_tool_names() -> List[str]:
-    """Return the list of tool names for user fact extraction."""
     return ["add_user_fact", "skip_user_fact_extraction"]
 
 
-# ═══════════════════════════════════════════════════════════════
-# 4. VERIFICATION TOOLS (used by verifier LLM)
-# ═══════════════════════════════════════════════════════════════
-
 def get_verification_tools() -> List[Dict]:
-    """Tool definitions for the verification stage.
-    
-    The verifier LLM checks the output of the first LLM and either
-    approves or rejects it.
-    """
     return [
         {
             "type": "function",
@@ -322,5 +275,4 @@ def get_verification_tools() -> List[Dict]:
 
 
 def get_verification_tool_names() -> List[str]:
-    """Return the list of tool names for verification."""
     return ["approve_changes", "reject_changes"]

@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, List
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.llm_client import LLMClient
+from core.llm.client import LLMClient
 from config import settings, normalize_api_base
 from Mila_observatory.runtime import runtime_config
 

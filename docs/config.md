@@ -186,10 +186,10 @@ EMBED_MODEL=nomic-embed-text
 
 | Модуль | Что читает |
 |--------|------------|
-| `llm_manager.py` | `llm.*`, `night_llm.*`, `night_verifier_llm.*` |
-| `tools.py` | `tools.*` (enabled/disabled) |
-| `persona.py` | `persona.*` (custom_prompt, эмпатия, etc.) |
-| `pipeline.py` | `pipeline.*` |
-| `sleep_manager.py` | `sleep.*` (расписание, длительность) |
-| `sleep_processes.py` | `night_llm.*`, `night_verifier_llm.*` |
-| `server.py` | `system.observatory_port` |
+| `Mila_observatory/llm_manager.py` | `llm.*`, `night_llm.*`, `night_verifier_llm.*` |
+| `core/tools/executor.py` | `tools.*` (enabled/disabled) |
+| `core/llm/persona.py` | `persona.*` (custom_prompt, эмпатия, etc.) |
+| `core/pipeline.py` | `pipeline.*` |
+| `core/sleep/manager.py` | `sleep.*` (расписание, длительность) |
+| `core/sleep/processes.py` | `night_llm.*`, `night_verifier_llm.*` |
+| `Mila_observatory/server.py` | `system.observatory_port` |

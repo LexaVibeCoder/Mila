@@ -1,6 +1,6 @@
 # Система тулзов (Tools)
 
-**Файл**: `core/tools.py`
+**Файл**: `core/tools/executor.py`
 
 Система инструментов (тулзов) — механизм, через который LLM взаимодействует с внешним миром. Модель **обязана** вызывать функцию `think()` на каждом шаге пайплайна (`tool_choice="required"`).
 
@@ -101,11 +101,11 @@
 { "action_type": "write_diary", "params": { "entry": "Сегодня был интересный разговор о..." } }
 ```
 
-Вызывает `add_diary_entry()` из `core/diary.py`.
+Вызывает `add_diary_entry()` из `core/diary/manager.py`.
 
 ## ToolExecutor
 
-**Класс**: `ToolExecutor` в `core/tools.py`
+**Класс**: `ToolExecutor` в `core/tools/executor.py`
 
 ```python
 class ToolExecutor:
@@ -150,4 +150,4 @@ LLM → think() → парсинг JSON → список actions
 
 ## Специальные тулзы для сна
 
-В `core/sleep_llm_tools.py` определены отдельные наборы тулзов для каждого из трёх ночных процессов. Они НЕ доступны в основном пайплайне — только во сне.
+В `core/sleep/tools.py` определены отдельные наборы тулзов для каждого из трёх ночных процессов. Они НЕ доступны в основном пайплайне — только во сне.

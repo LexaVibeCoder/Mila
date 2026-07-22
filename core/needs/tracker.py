@@ -1,8 +1,5 @@
 """
-Needs Tracker — computes Mila's internal needs from real runtime data.
-
-This module is completely separate from the core bot.
-Loaded by Mila_observatory for testing purposes only.
+core/needs/tracker.py — Needs Tracker for Mila's state agent.
 """
 
 import os
@@ -13,17 +10,16 @@ from typing import Optional
 
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from state_agent.train_state_agent import MLP, predict, NUM_FEATURES, ACTIONS
 
-STATE_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_AGENT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "state_agent"
+)
 MODEL_PATH = os.path.join(STATE_AGENT_DIR, "state_agent.pt")
 
 
 class NeedsTracker:
-    """Tracks Mila's needs and runs state agent inference."""
-
     def __init__(self):
         self._model = None
         self._mean = None
@@ -65,12 +61,6 @@ class NeedsTracker:
         }
 
     def compute_needs(self) -> dict:
-        """
-        Compute needs from real runtime data and heuristics.
-
-        Returns:
-            dict with all features, needs, and metadata
-        """
         now = datetime.now()
         current_hour = now.hour
 
@@ -92,7 +82,6 @@ class NeedsTracker:
         }
 
     def run_inference(self, needs: Optional[dict] = None) -> dict:
-        """Run ML model inference. If needs not provided, compute them."""
         if not self._model_loaded:
             self.load_model()
 

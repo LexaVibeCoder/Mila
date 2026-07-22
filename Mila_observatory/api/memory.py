@@ -18,7 +18,7 @@ from core.db import (
     search_memories_by_ids as db_search_memories_by_ids,
     add_memory as db_add_memory,
 )
-from core.embedding_client import EmbeddingClient
+from core.llm.embeddings import EmbeddingClient
 
 router = APIRouter(tags=["memory"])
 
@@ -179,7 +179,7 @@ async def create_memory(req: MemoryCreateRequest):
         vec = vec[0]
 
         # Import here to avoid circular imports
-        from core.memory import VectorMemory
+        from core.memory.vector import VectorMemory
         from config import settings
 
         text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
@@ -213,8 +213,8 @@ async def create_memory(req: MemoryCreateRequest):
 async def rebuild_faiss():
     """Rebuild FAISS index from all memories in SQLite."""
     try:
-        from core.memory import VectorMemory
-        from core.embedding_client import EmbeddingClient
+        from core.memory.vector import VectorMemory
+        from core.llm.embeddings import EmbeddingClient
         from config import settings
         import numpy as np
 
@@ -239,7 +239,7 @@ async def rebuild_faiss():
 
         # Create new index
         text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
-        from core.memory import VectorMemory as VM
+        from core.memory.vector import VectorMemory as VM
         import faiss
         new_index = faiss.IndexIDMap(faiss.IndexFlatL2(settings.EMBED_DIM))
 

@@ -1,19 +1,5 @@
 """
-core/mila_memory.py — Mila's eternal (autobiographical) memory.
-
-This is Mila's own life experience memory, completely separate from
-user memories. It stores only important events of Mila's own life:
-- Serious personality changes
-- Extremely important experiences
-- Events that influenced future behavior
-
-This is NOT a diary. This is autobiographical memory.
-
-Storage:
-- Each chunk is a Markdown text
-- Each chunk is a separate DB record in mila.db
-- Each chunk has its own metadata
-- Chunks can be updated (not just duplicated) as personality develops
+core/memory/eternal.py — Mila's eternal (autobiographical) memory.
 """
 
 import json
@@ -25,7 +11,6 @@ from core.db import get_conn
 
 
 def _ensure_table():
-    """Create mila_memory_chunks table in mila.db if not exists."""
     conn = get_conn()
     try:
         conn.execute("""
@@ -46,10 +31,6 @@ def _ensure_table():
 
 
 def add_chunk(title: str, content_md: str, importance: float = 0.5) -> str:
-    """
-    Add a new chunk to Mila's eternal memory.
-    Returns the chunk_id.
-    """
     _ensure_table()
     chunk_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat()
@@ -70,11 +51,6 @@ def add_chunk(title: str, content_md: str, importance: float = 0.5) -> str:
 
 def update_chunk(chunk_id: str, title: str = None, content_md: str = None, 
                  importance: float = None) -> bool:
-    """
-    Update an existing chunk. This is how personality develops — 
-    existing chunks are updated rather than creating duplicates.
-    Returns True if successful.
-    """
     _ensure_table()
     conn = get_conn()
     try:
@@ -116,10 +92,6 @@ def update_chunk(chunk_id: str, title: str = None, content_md: str = None,
 
 
 def deactivate_chunk(chunk_id: str) -> bool:
-    """
-    Soft-delete a chunk by marking it inactive.
-    This preserves history while removing it from active memory.
-    """
     _ensure_table()
     conn = get_conn()
     try:
@@ -135,7 +107,6 @@ def deactivate_chunk(chunk_id: str) -> bool:
 
 
 def get_all_active_chunks() -> List[Dict]:
-    """Get all active chunks in chronological order."""
     _ensure_table()
     conn = get_conn()
     try:
@@ -152,7 +123,6 @@ def get_all_active_chunks() -> List[Dict]:
 
 
 def get_chunk(chunk_id: str) -> Optional[Dict]:
-    """Get a single chunk by ID."""
     _ensure_table()
     conn = get_conn()
     try:
@@ -167,10 +137,6 @@ def get_chunk(chunk_id: str) -> Optional[Dict]:
 
 
 def get_chunks_metadata() -> List[Dict]:
-    """
-    Get metadata of all active chunks (without content_md).
-    Used by LLM to decide what to update during sleep.
-    """
     _ensure_table()
     conn = get_conn()
     try:
@@ -187,10 +153,6 @@ def get_chunks_metadata() -> List[Dict]:
 
 
 def get_all_chunks_markdown() -> str:
-    """
-    Get all active chunks as a single Markdown document.
-    Used by LLM during sleep analysis.
-    """
     chunks = get_all_active_chunks()
     if not chunks:
         return "[No eternal memory chunks yet]"
@@ -209,7 +171,6 @@ def get_all_chunks_markdown() -> str:
 
 
 def get_chunk_count() -> int:
-    """Get number of active chunks."""
     _ensure_table()
     conn = get_conn()
     try:

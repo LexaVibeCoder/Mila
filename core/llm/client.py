@@ -1,16 +1,10 @@
-# core/llm_client.py
+# core/llm/client.py
 import openai
 import json
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from config import settings, normalize_api_base
 
 class LLMClient:
-    """Unified LLM client for Mila.
-    
-    Can be configured for the main daytime LLM (creative thinking)
-    or for night/memory processing with different model settings.
-    """
-    
     def __init__(self, model: str = None, api_base: str = None, api_key: str = None,
                  max_tokens: int = None, temperature: float = None,
                  top_p: float = None, frequency_penalty: float = None,
@@ -31,11 +25,6 @@ class LLMClient:
                     max_tokens: int = None, temperature: float = None,
                     top_p: float = None, frequency_penalty: float = None,
                     presence_penalty: float = None):
-        """Reconfigure client parameters without re-creating the client.
-        
-        All parameters are optional — only provided ones are updated.
-        This allows changing LLM model/settings on the fly without restarting the bot.
-        """
         if model is not None:
             self.model = model
         if api_base is not None:
@@ -71,53 +60,35 @@ class LLMClient:
         max_retries: int = 3,
         retry_delay: float = 2.0
     ) -> dict:
-        """
-        Generate response with optional tool calling and system prompt override.
-        
-        Args:
-            messages: Chat history
-            tools: OpenAI-format tool definitions (optional)
-            tool_choice: "auto", "required", or function name
-            max_tokens: Override default max tokens
-            temperature: Override default temperature
-            system_prompt: Override system prompt by prepending to messages
-            max_retries: Number of retries on empty response or transient API errors
-            retry_delay: Base delay in seconds between retries (exponential backoff)
-        
-        Returns:
-            dict with: role, content, tool_calls (or None), finish_reason
-        """
         import time
         import asyncio
-        
+
         if max_tokens is None:
             max_tokens = self.default_max_tokens
         if temperature is None:
             temperature = self.default_temperature
-        
-        # Inject system prompt if provided
+
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}] + messages
-        
+
         kwargs = dict(
             model=self.model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature
         )
-        
-        # Pass optional sampling parameters if configured
+
         if self.default_top_p is not None:
             kwargs["top_p"] = self.default_top_p
         if self.default_frequency_penalty is not None:
             kwargs["frequency_penalty"] = self.default_frequency_penalty
         if self.default_presence_penalty is not None:
             kwargs["presence_penalty"] = self.default_presence_penalty
-        
+
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
-        
+
         last_error = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -128,7 +99,7 @@ class LLMClient:
             except Exception as e:
                 print(f"  [LLM] API Error (attempt {attempt}): {e}")
                 last_error = e
-                
+
                 if attempt < max_retries:
                     wait = retry_delay * (2 ** (attempt - 1))
                     print(f"  [LLM] Retry in {wait:.1f}s...")
@@ -136,7 +107,7 @@ class LLMClient:
                     continue
                 else:
                     raise
-            
+
             if not response.choices:
                 print(f"  [LLM] Empty response choices (attempt {attempt}), retrying...")
                 last_error = Exception("Empty response from LLM API")
@@ -145,11 +116,10 @@ class LLMClient:
                     continue
                 else:
                     raise Exception("Empty response from LLM API after all retries")
-            
+
             choice = response.choices[0]
             message = choice.message
-            
-            # Check for empty content when no tool calls
+
             has_tool_calls = hasattr(message, 'tool_calls') and message.tool_calls
             if not has_tool_calls and not (message.content or "").strip():
                 print(f"  [LLM] Empty content (attempt {attempt}), retrying...")
@@ -159,18 +129,18 @@ class LLMClient:
                     continue
                 else:
                     raise Exception("Empty response from LLM API after all retries")
-            
+
             tool_calls = None
             if has_tool_calls:
                 tool_calls = message.tool_calls
-            
+
             return {
                 "role": message.role,
                 "thoughts": message.content or "",
                 "tool_calls": tool_calls,
                 "finish_reason": choice.finish_reason
             }
-        
+
         raise last_error or Exception("Empty response from LLM API")
 
     async def generate_stream(
@@ -182,22 +152,11 @@ class LLMClient:
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """
-        Stream response token by token.
-        
-        For tool calls (think function), yields the full response at the end.
-        For regular text responses, yields each token as it arrives.
-        
-        Yields:
-            str: Either a token chunk (for text responses) or a special
-                 "__tool_call__:<json>" marker for tool calls.
-        """
         if max_tokens is None:
             max_tokens = self.default_max_tokens
         if temperature is None:
             temperature = self.default_temperature
 
-        # Inject system prompt if provided
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}] + messages
 
@@ -210,7 +169,6 @@ class LLMClient:
             stream_options={"include_usage": False},
         )
 
-        # Pass optional sampling parameters
         if self.default_top_p is not None:
             kwargs["top_p"] = self.default_top_p
         if self.default_frequency_penalty is not None:
@@ -232,12 +190,10 @@ class LLMClient:
                 if not delta:
                     continue
 
-                # Text content
                 if delta.content:
                     collected_content += delta.content
                     yield delta.content
 
-                # Tool calls
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
                         idx = tc_delta.index
@@ -254,7 +210,6 @@ class LLMClient:
                             if tc_delta.function.arguments:
                                 collected_tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
 
-            # If we have tool calls, yield them as a special marker
             if collected_tool_calls:
                 tool_calls_list = []
                 for idx in sorted(collected_tool_calls.keys()):
@@ -272,14 +227,13 @@ class LLMClient:
 
         except Exception as e:
             print(f"  [LLM Stream Error] {e}")
-            # Fall back to non-streaming if streaming fails
             response = await self.generate(
                 messages=messages if not system_prompt else [{"role": "system", "content": system_prompt}] + messages,
                 tools=tools,
                 tool_choice=tool_choice,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                system_prompt=None,  # Already prepended
+                system_prompt=None,
             )
             thoughts = response.get("thoughts", "")
             if thoughts:

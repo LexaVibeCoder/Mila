@@ -1,24 +1,28 @@
 # State Agent (экспериментальный)
 
-**Директория**: `state_agent/`
+**Основные файлы**: `core/needs/tracker.py`, `Mila_observatory/api/needs.py`
 
 Экспериментальный модуль для отслеживания "потребностей" Милы на основе PyTorch MLP-модели. Позволяет Миле проявлять инициативу: написать пользователю первой, лечь спать, спланировать день.
 
-> **Статус**: экспериментальный, полунезависимый (собственный `requirements.txt`, `Dockerfile`).
+> **Статус**: экспериментальный.
 
 ## Архитектура
 
 ```
-state_agent/
-├── needs_tracker.py      # NeedsTracker — трекер + rule-based fallback
-├── train_state_agent.py  # MLP + обучение
-├── infer.py              # CLI инференс
-├── api.py                # FastAPI роутер (монтируется на Observatory)
-├── dataset.json          # 52 тренировочных сэмпла
-├── state_agent.pt        # Обученная модель
+state_agent/               # обучение + CLI
+├── train_state_agent.py   # MLP + обучение
+├── infer.py               # CLI инференс
+├── dataset.json           # 52 тренировочных сэмпла
+├── state_agent.pt         # Обученная модель
 ├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yml
+
+core/needs/                # рантайм
+└── tracker.py             # NeedsTracker — трекер + rule-based fallback
+
+Mila_observatory/api/      # API роутер
+└── needs.py               # FastAPI роутер (монтируется на Observatory)
 ```
 
 ## MLP модель
@@ -53,7 +57,7 @@ MLP(
 
 ## NeedsTracker
 
-**Файл**: `state_agent/needs_tracker.py`
+**Файл**: `core/needs/tracker.py`
 
 ### Компоненты потребностей
 
@@ -75,7 +79,7 @@ MLP(
 ### Сиглтон
 
 ```python
-from state_agent.needs_tracker import get_tracker
+from core.needs.tracker import get_tracker
 tracker = get_tracker()
 needs = tracker.compute_needs()
 result = tracker.run_inference(needs)
@@ -98,6 +102,8 @@ result = tracker.run_inference(needs)
 ```
 
 ## API (монтируется на Observatory)
+
+**Файл**: `Mila_observatory/api/needs.py`
 
 | Эндпоинт | Описание |
 |----------|----------|

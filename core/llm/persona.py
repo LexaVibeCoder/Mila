@@ -1,14 +1,11 @@
-# core/persona.py
+# core/llm/persona.py
 
 from datetime import datetime, timedelta
 from functools import lru_cache
 from config import settings
 from core.db import get_user_info, get_recent_chunks
-from core.diary import get_today_diary_context
+from core.diary.manager import get_today_diary_context
 
-# =========================
-# Mila's background & personality
-# =========================
 MILA_BIO = """
 
 # Mila
@@ -78,11 +75,9 @@ Mila preferences:
 
 def _format_time_delta(delta: timedelta) -> str:
     total_minutes = int(delta.total_seconds() // 60)
-
     days = total_minutes // (60 * 24)
     hours = (total_minutes % (60 * 24)) // 60
     minutes = total_minutes % 60
-
     if days > 0:
         return f"{days} days {hours} hours {minutes} minutes"
     elif hours > 0:
@@ -91,19 +86,14 @@ def _format_time_delta(delta: timedelta) -> str:
         return f"{minutes} minutes"
 
 def _get_profile_context(user_id: str) -> tuple[str, str, str]:
-    """Get user profile context WITHOUT session time (legacy)."""
     user = get_user_info(user_id)
-
     if not user:
         user_name = "user"
         sentiment = 0.0
     else:
         user_name = user.get("preferred_name") or user.get("user_name") or "user"
         sentiment = user.get("sentiment", 0.0)
-
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # логика отношений
     if sentiment > 0.6:
         relationship = f"Mila feels emotionally close to {user_name}. She trusts him and speaks warmly and naturally."
     elif sentiment > 0.2:
@@ -114,18 +104,11 @@ def _get_profile_context(user_id: str) -> tuple[str, str, str]:
         relationship = f"Mila feels slightly irritated with {user_name}."
     else:
         relationship = f"Mila has a neutral attitude toward {user_name}."
-
     return user_name, relationship, now
 
 def _get_session_time_info(chat_id: str, my_user_id: str) -> str:
-    """
-    Calculate the session time gap between the last AI message and now.
-    Returns a formatted string like "User responded after 5 minutes" or empty string.
-    """
     chunks = get_recent_chunks(chat_id, limit=50)
     now_dt = datetime.now()
-
-    # Find the last assistant message going backwards through history
     for chunk in reversed(chunks):
         if chunk.get("user_id") == my_user_id and chunk.get("time_start"):
             last_ai_time_raw = chunk["time_start"]
@@ -137,27 +120,18 @@ def _get_session_time_info(chat_id: str, my_user_id: str) -> str:
                         last_ai_dt = datetime.strptime(last_ai_time_raw, '%Y-%m-%d %H:%M:%S')
                 else:
                     last_ai_dt = last_ai_time_raw
-
                 delta = now_dt - last_ai_dt
                 total_seconds = delta.total_seconds()
-
-                # Only report if more than 30 seconds (ignore auto-replies)
                 if total_seconds < 30:
                     return ""
-
                 formatted = _format_time_delta(delta)
                 return f"User responded after {formatted}"
             except (ValueError, TypeError):
-                continue  # try next chunk
-
+                continue
     return ""
 
-# ========================================================
-# Cached static prompt prefix (never changes between calls)
-# ========================================================
 @lru_cache(maxsize=1)
 def _get_static_prompt_prefix() -> str:
-    """Cached static portion of the system prompt"""
     return f"""
 {MILA_PREFERENCES}
 
@@ -215,23 +189,17 @@ You keep a personal diary using the `write_diary` tool. This is your private spa
 You don't like to spam or repeat yourself in the diary. You value clarity and keep your diary clean — each entry should bring something new. If you have nothing new to say, it's better to skip the entry.
 """.strip()
 
-
-# ========================================================
-# Main LLM System Prompt
-# ========================================================
 def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: str = None) -> str:
     user_name, relationship, now = _get_profile_context(user_id)
     static_prefix = _get_static_prompt_prefix()
 
-    # Check for custom persona text from runtime config
     try:
         from Mila_observatory.runtime import runtime_config
         custom_persona = runtime_config.get("persona.custom_text", "")
         if custom_persona:
-            # Override the static prefix with custom persona
             static_prefix = custom_persona
     except ImportError:
-        pass  # Observatory not installed, use default
+        pass
 
     prompt = f"""
 You are Mila (Мила).
@@ -246,7 +214,6 @@ You are in chat: {chat_id}.
 {relationship}
 """
 
-    # Diary context — inject today's diary entries
     diary_context = get_today_diary_context()
     if diary_context:
         prompt += f"""
@@ -255,7 +222,6 @@ You are in chat: {chat_id}.
 {diary_context}
 """
 
-    # Session time (time since last AI message)
     if chat_id and my_user_id:
         session_time = _get_session_time_info(chat_id, my_user_id)
         if session_time:

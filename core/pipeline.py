@@ -23,11 +23,11 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 
 from config import settings
-from core.llm_client import LLMClient
-from core.tools import ToolExecutor, get_tool_definitions
-from core.persona import build_main_llm_system_prompt
-from core.embedding_client import EmbeddingClient
-from core.memory import VectorMemory
+from core.llm.client import LLMClient
+from core.tools.executor import ToolExecutor, get_tool_definitions
+from core.llm.persona import build_main_llm_system_prompt
+from core.llm.embeddings import EmbeddingClient
+from core.memory.vector import VectorMemory
 
 
 # Try to import Observatory modules for dynamic config

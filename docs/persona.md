@@ -1,6 +1,6 @@
 # Персона и системный промпт
 
-**Файл**: `core/persona.py`
+**Файл**: `core/llm/persona.py`
 
 Сборка системного промпта для LLM — объединение биографии Милы, динамического контекста и настроек из runtime config.
 
@@ -62,7 +62,7 @@ build_main_llm_system_prompt(user_id, chat_id, my_user_id)
 
 ## get_today_diary_context()
 
-Последние записи дневника за сегодня (из `core/diary.py`).
+Последние записи дневника за сегодня (из `core/diary/manager.py`).
 
 ## Кастомный промпт
 

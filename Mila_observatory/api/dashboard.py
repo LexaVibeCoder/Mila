@@ -76,7 +76,7 @@ async def get_status():
 
     # Check sleep state
     try:
-        from core.sleep_state import get_state
+        from core.sleep.state import get_state
         sleep_state = get_state().value
         is_sleeping = sleep_state == "sleeping" or sleep_state == "committing"
     except Exception:

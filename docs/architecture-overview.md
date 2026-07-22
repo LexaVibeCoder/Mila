@@ -17,16 +17,16 @@
 │  │ core/pipeline.py │ │◄────────►│  │ 9 API routers      │  │
 │  └────────┬────────┘ │          │  └────────────────────┘  │
 │           │          │          └──────────────────────────┘
-│  ┌────────▼────────┐ │
-│  │   ToolExecutor   │ │
-│  │   core/tools.py  │ │
-│  └──┬─────┬─────┬──┘ │
-│     │     │     │    │
-│     ▼     ▼     ▼    │
-│  ┌──┐ ┌───┐ ┌────┐  │
-│  │  │ │   │ │    │   │
-│  │FAISS│SQLite│Diary│  │
-│  └──┘ └───┘ └────┘  │
+│  ┌──────────▼───────────┐ │
+│  │      ToolExecutor     │ │
+│  │  core/tools/executor.py  │ │
+│  └──┬────────┬────────┬──┘ │
+│     │        │        │    │
+│     ▼        ▼        ▼    │
+│  ┌───┐ ┌────┐ ┌───────┐   │
+│  │   │ │    │ │       │   │
+│  │FAISS│SQLite│ Diary  │   │
+│  └───┘ └────┘ └───────┘   │
 └──────────────────────┘
 ```
 
@@ -38,20 +38,20 @@
 |--------|------------|
 | `bot.py` | `MilaUserbot` — Pyrogram-клиент, хендлер сообщений, сжатие контекста |
 | `pipeline.py` | `ThinkPipeline` — цикл рассуждения: LLM → think() → экзекуция тулзов |
-| `llm_client.py` | `LLMClient` — OpenAI-совместимая обёртка с реконфигурацией на ходу |
-| `tools.py` | `ToolExecutor` — исполнение действий (send_message, search_memory, etc.) |
-| `memory.py` | `VectorMemory` — FAISS `IndexFlatL2` + `IndexIDMap` |
-| `mila_memory.py` | Автобиографическая память Милы (SQLite + markdown) |
-| `context_buffer.py` | Per-chat буфер контекста с токен-аваром |
-| `diary.py` | Дневник — записи от имени Милы |
-| `persona.py` | Построитель системного промпта |
-| `embedding_client.py` | Эмбеддинг-клиент (Ollama / OpenAI) |
-| `reranker.py` | BGE-Reranker-v2-m3 для переранжирования |
-| `token_counter.py` | Подсчёт токенов через tiktoken |
-| `sleep_manager.py` | Оркестратор ночного цикла |
-| `sleep_processes.py` | Три параллельных процесса ночи |
-| `sleep_state.py` | Машина состояний сна + SQLite |
-| `sleep_llm_tools.py` | Тулзы для LLM во сне |
+| `llm/client.py` | `LLMClient` — OpenAI-совместимая обёртка с реконфигурацией на ходу |
+| `tools/executor.py` | `ToolExecutor` — исполнение действий (send_message, search_memory, etc.) |
+| `memory/vector.py` | `VectorMemory` — FAISS `IndexFlatL2` + `IndexIDMap` |
+| `memory/eternal.py` | Автобиографическая память Милы (SQLite + markdown) |
+| `context/buffer.py` | Per-chat буфер контекста с токен-аваром |
+| `diary/manager.py` | Дневник — записи от имени Милы |
+| `llm/persona.py` | Построитель системного промпта |
+| `llm/embeddings.py` | Эмбеддинг-клиент (Ollama / OpenAI) |
+| `llm/reranker.py` | BGE-Reranker-v2-m3 для переранжирования |
+| `llm/counter.py` | Подсчёт токенов через tiktoken |
+| `sleep/manager.py` | Оркестратор ночного цикла |
+| `sleep/processes.py` | Три параллельных процесса ночи |
+| `sleep/state.py` | Машина состояний сна + SQLite |
+| `sleep/tools.py` | Тулзы для LLM во сне |
 | `db.py` | Основная БД `mila.db` |
 
 ### 2. Веб-панель (`Mila_observatory/`)
@@ -72,14 +72,14 @@
 | `api/sleep.py` | Управление сном |
 | `api/tools.py` | Включение/выключение тулзов |
 
-### 3. State Agent (`state_agent/`)
+### 3. State Agent
 
 | Модуль | Назначение |
 |--------|------------|
-| `needs_tracker.py` | Трекер потребностей (ML + rule-based) |
-| `train_state_agent.py` | Обучение MLP-модели |
-| `api.py` | FastAPI-роутер для веб-панели |
-| `infer.py` | CLI-инференс |
+| `core/needs/tracker.py` | `NeedsTracker` — трекер потребностей (ML + rule-based) |
+| `state_agent/train_state_agent.py` | Обучение MLP-модели |
+| `Mila_observatory/api/needs.py` | FastAPI-роутер для веб-панели |
+| `state_agent/infer.py` | CLI-инференс |
 
 ## Поток данных: сообщение → ответ
 

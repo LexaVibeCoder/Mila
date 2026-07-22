@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 
-from core.diary import (
+from core.diary.manager import (
     load_daily_report,
     list_daily_reports,
     get_diary_markdown,
@@ -112,7 +112,7 @@ async def get_diary_by_date(date: str):
             detail=f"Дневник за {date} не найден"
         )
     
-    from core.diary import DAILY_REPORTS_DIR
+    from core.diary.manager import DAILY_REPORTS_DIR
     filepath = os.path.join(DAILY_REPORTS_DIR, f"{date}.md")
     file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
     entry_count = content.count("## Запись #")

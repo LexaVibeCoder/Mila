@@ -68,7 +68,7 @@ LLM возвращает tool_call с JSON:
 
 ## ToolExecutor
 
-**Файл**: `core/tools.py`
+**Файл**: `core/tools/executor.py`
 
 Исполняет действия из think():
 

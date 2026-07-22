@@ -9,17 +9,17 @@ from config import settings
 from core.db import (
     ensure_user_exists, ensure_chat_exists, add_chunk, get_recent_chunks, get_user_info
 )
-from core.context_buffer import (
+from core.context.buffer import (
     push_message, push_summary, get_context, get_context_within_token_limit,
     pop_oldest_messages, pop_oldest_messages_by_tokens,
     get_total_entries, get_total_message_tokens, get_raw_content_for_llm
 )
-from core.token_counter import count_tokens
-from core.embedding_client import EmbeddingClient
-from core.memory import VectorMemory
+from core.llm.counter import count_tokens
+from core.llm.embeddings import EmbeddingClient
+from core.memory.vector import VectorMemory
 from core.pipeline import ThinkPipeline
-from core.llm_client import LLMClient
-from core.sleep_manager import (
+from core.llm.client import LLMClient
+from core.sleep.manager import (
     recover_from_crash, is_sleeping, is_committing, queue_incoming_message,
     start_auto_sleep_scheduler, get_sleep_status
 )

@@ -5,10 +5,10 @@
 ## Архитектура
 
 ```
-core/sleep_manager.py   — оркестратор
-core/sleep_processes.py — 3 процесса
-core/sleep_state.py     — машина состояний + SQLite
-core/sleep_llm_tools.py — определения тулзов для LLM
+core/sleep/manager.py   — оркестратор
+core/sleep/processes.py — 3 процесса
+core/sleep/state.py     — машина состояний + SQLite
+core/sleep/tools.py — определения тулзов для LLM
 ```
 
 ## Машина состояний

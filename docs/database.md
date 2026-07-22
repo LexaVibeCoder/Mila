@@ -163,7 +163,7 @@ CREATE TABLE sleep_dialog_summary_log (
 
 **Файл**: `data/context_buffer.db`
 
-Управляется модулем `core/context_buffer.py`.
+Управляется модулем `core/context/buffer.py`.
 
 ### Таблицы
 
@@ -221,4 +221,4 @@ from core.db import init_db
 init_db()  # создаёт все таблицы, если их нет
 ```
 
-В `core/context_buffer.py` таблицы создаются лениво при первом обращении к чату (`ensure_chat_table`).
+В `core/context/buffer.py` таблицы создаются лениво при первом обращении к чату (`ensure_chat_table`).

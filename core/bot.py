@@ -23,6 +23,7 @@ from core.sleep.manager import (
     recover_from_crash, is_sleeping, is_committing, queue_incoming_message,
     start_auto_sleep_scheduler, get_sleep_status
 )
+from core.needs.tracker import get_tracker as get_needs_tracker
 
 
 class MilaUserbot:
@@ -243,6 +244,26 @@ class MilaUserbot:
 
         # Compress context if needed (before processing)
         await self._compress_context(chat_id)
+
+        # ── Needs pre-filter ──
+        needs = get_needs_tracker().get_needs()
+        hour = needs["current_hour"]
+        is_night = hour >= 22 or hour <= 7
+
+        if needs["fatigue"] > 0.85 and is_night:
+            print(f"[Needs] Fatigue {needs['fatigue']:.2f} at night — auto silence")
+            # Записываем silence в историю, чтобы сохранить временную последовательность
+            add_chunk(
+                chat_id, str(self.me.id),
+                content="",
+                llm_full_response="[auto-silence: высокая усталость]",
+                token_count=0,
+                type='raw'
+            )
+            get_needs_tracker().apply_action_effect("silence")
+            return
+
+        # ── End pre-filter ──
 
         # Typing indicator — runs while pipeline is processing
         stop_typing = asyncio.Event()

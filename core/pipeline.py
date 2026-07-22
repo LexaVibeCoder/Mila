@@ -28,6 +28,7 @@ from core.tools.executor import ToolExecutor, get_tool_definitions
 from core.llm.persona import build_main_llm_system_prompt
 from core.llm.embeddings import EmbeddingClient
 from core.memory.vector import VectorMemory
+from core.needs.tracker import get_tracker as get_needs_tracker
 
 
 # Try to import Observatory modules for dynamic config
@@ -183,6 +184,7 @@ class ThinkPipeline:
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
                     all_actions.append(executed)
+                    get_needs_tracker().apply_action_effect(action.get("action_type"))
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
@@ -409,6 +411,7 @@ class ThinkPipeline:
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
                     all_actions.append(executed)
+                    get_needs_tracker().apply_action_effect(action.get("action_type"))
                     yield {"type": "action", "action": executed}
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":

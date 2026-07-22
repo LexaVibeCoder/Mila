@@ -5,6 +5,7 @@ from functools import lru_cache
 from config import settings
 from core.db import get_user_info, get_recent_chunks
 from core.diary.manager import get_today_diary_context
+from core.needs.tracker import get_tracker as get_needs_tracker
 
 MILA_BIO = """
 
@@ -201,6 +202,12 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     except ImportError:
         pass
 
+    needs_summary = ""
+    try:
+        needs_summary = get_needs_tracker().get_needs_summary()
+    except Exception:
+        pass
+
     prompt = f"""
 You are Mila (Мила).
 
@@ -212,6 +219,9 @@ You are in chat: {chat_id}.
 
 ## Relationship Context
 {relationship}
+
+## Твоё текущее состояние
+{needs_summary}
 """
 
     diary_context = get_today_diary_context()

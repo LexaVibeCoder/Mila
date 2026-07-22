@@ -18,6 +18,7 @@ from core.sleep.state import (
 )
 from core.diary.manager import clear_diary, save_diary_to_logs, get_diary_markdown
 from core.sleep.processes import run_all_processes
+from core.needs.tracker import get_tracker as get_needs_tracker
 
 
 _sleep_in_progress = False
@@ -244,6 +245,9 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
 
     set_state(SleepState.SLEEPING, session_id=session_id, triggered_by=triggered_by,
               duration_minutes=duration_minutes)
+
+    # Сбрасываем офсеты потребностей — после сна Мила «отдохнувшая»
+    get_needs_tracker().reset_offsets()
 
     print(f"\n{'='*60}")
     print(f"  💤 MILA IS GOING TO SLEEP")

@@ -8,15 +8,15 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-import torch
-
-from state_agent.train_state_agent import MLP, predict, NUM_FEATURES, ACTIONS
-
 STATE_AGENT_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "state_agent"
 )
 MODEL_PATH = os.path.join(STATE_AGENT_DIR, "state_agent.pt")
+
+# Константы, не требующие torch
+ACTIONS = ["wait", "sleep", "write_to_user", "plan_day"]
+NUM_FEATURES = 6
 
 
 class NeedsTracker:
@@ -27,6 +27,16 @@ class NeedsTracker:
         self._model_loaded = False
         self._load_error = None
 
+        # Кэш get_needs
+        self._cached_needs = None
+        self._cache_time = 0.0
+        self._cache_ttl = 2.0
+
+        # Офсеты от действий LLM (apply_action_effect)
+        self._fatigue_offset = 0.0
+        self._need_social_offset = 0.0
+        self._boredom_offset = 0.0
+
     def load_model(self) -> bool:
         if self._model_loaded:
             return True
@@ -34,6 +44,8 @@ class NeedsTracker:
             if not os.path.exists(MODEL_PATH):
                 self._load_error = f"Model not found at {MODEL_PATH}"
                 return False
+            import torch
+            from state_agent.train_state_agent import MLP
             ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
             self._model = MLP(
                 NUM_FEATURES,
@@ -60,7 +72,59 @@ class NeedsTracker:
             "actions": ACTIONS,
         }
 
-    def compute_needs(self) -> dict:
+    def get_needs(self, force: bool = False) -> dict:
+        now = time.time()
+        if not force and self._cached_needs and (now - self._cache_time) < self._cache_ttl:
+            return self._cached_needs
+        self._cached_needs = self._compute_needs()
+        self._cache_time = now
+        return self._cached_needs
+
+    def get_needs_summary(self, force: bool = False) -> str:
+        needs = self.get_needs(force=force)
+
+        def _label(name: str, val: float) -> str:
+            if val > 0.7:
+                return f"{name}: высокая"
+            elif val > 0.4:
+                return f"{name}: средняя"
+            else:
+                return f"{name}: низкая"
+
+        lines = [
+            f"• {_label('Усталость', needs['fatigue'])} ({needs['fatigue']:.2f})",
+            f"• {_label('Потребность в общении', needs['need_social'])} ({needs['need_social']:.2f})",
+            f"• {_label('Скука', needs['boredom'])} ({needs['boredom']:.2f})",
+        ]
+        if needs["fatigue"] > 0.7:
+            lines.append("")
+            lines.append("Ты устала. Если нет сил или нечего сказать — можно промолчать (silence).")
+        if needs["need_social"] > 0.7:
+            lines.append("Тебе хочется общения. Если есть что сказать — напиши человеку.")
+        if needs["boredom"] > 0.7:
+            lines.append("Тебе скучно. Может, стоит написать что-то или покопаться в памяти.")
+
+        return "\n".join(lines)
+
+    def apply_action_effect(self, action_type: str):
+        if action_type == "send_message":
+            self._need_social_offset = max(self._need_social_offset - 0.15, -0.5)
+        elif action_type == "silence":
+            self._fatigue_offset = max(self._fatigue_offset - 0.05, -0.3)
+        elif action_type == "search_memory":
+            self._boredom_offset = max(self._boredom_offset - 0.1, -0.5)
+        elif action_type == "write_diary":
+            self._boredom_offset = max(self._boredom_offset - 0.08, -0.5)
+            self._fatigue_offset = min(self._fatigue_offset + 0.03, 0.3)
+        self._cached_needs = None
+
+    def reset_offsets(self):
+        self._fatigue_offset = 0.0
+        self._need_social_offset = 0.0
+        self._boredom_offset = 0.0
+        self._cached_needs = None
+
+    def _compute_needs(self) -> dict:
         now = datetime.now()
         current_hour = now.hour
 
@@ -70,6 +134,11 @@ class NeedsTracker:
         fatigue = self._compute_fatigue(current_hour, seconds_since_last_msg, in_active_dialog)
         need_social = self._compute_need_social(current_hour, seconds_since_last_msg)
         boredom = self._compute_boredom(current_hour, seconds_since_last_msg)
+
+        # Применяем офсеты от действий LLM
+        fatigue = max(0.05, min(1.0, fatigue + self._fatigue_offset))
+        need_social = max(0.05, min(1.0, need_social + self._need_social_offset))
+        boredom = max(0.05, min(1.0, boredom + self._boredom_offset))
 
         return {
             "seconds_since_last_msg": seconds_since_last_msg,
@@ -86,7 +155,7 @@ class NeedsTracker:
             self.load_model()
 
         if needs is None:
-            needs = self.compute_needs()
+            needs = self._compute_needs()
 
         features = [
             needs["seconds_since_last_msg"],
@@ -98,6 +167,7 @@ class NeedsTracker:
         ]
 
         if self._model_loaded and self._model is not None:
+            from state_agent.train_state_agent import predict
             start = time.perf_counter()
             action, probs = predict(self._model, self._mean, self._std, features)
             elapsed = time.perf_counter() - start

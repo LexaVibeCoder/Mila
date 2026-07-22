@@ -58,7 +58,7 @@ class NeedsOverride(BaseModel):
 async def get_state_agent_status():
     tracker = get_tracker()
     model_info = tracker.get_model_info()
-    needs = tracker.compute_needs()
+    needs = tracker.get_needs()
     inference = tracker.run_inference(needs)
 
     return StateAgentStatus(
@@ -71,7 +71,7 @@ async def get_state_agent_status():
 @router.post("/api/state-agent/run", response_model=InferenceResult)
 async def run_state_agent():
     tracker = get_tracker()
-    needs = tracker.compute_needs()
+    needs = tracker.get_needs(force=True)
     result = tracker.run_inference(needs)
     return InferenceResult(**result)
 
@@ -79,7 +79,7 @@ async def run_state_agent():
 @router.post("/api/state-agent/needs", response_model=StateAgentStatus)
 async def override_needs(override: NeedsOverride):
     tracker = get_tracker()
-    current = tracker.compute_needs()
+    current = tracker.get_needs(force=True)
 
     if override.fatigue is not None:
         current["fatigue"] = override.fatigue

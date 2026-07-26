@@ -2,23 +2,22 @@ services:
   # ============================================================
   # Mila Bot — Telegram userbot
   # ============================================================
+
   bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: mila-bot
+    user: root
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      # Persist data (SQLite, FAISS indexes, photos, logs)
+      - .:/app
       - mila_data:/app/data
       - mila_logs:/app/logs
-      # Mount local AI models (large files, downloaded once)
       - ./models:/app/models:ro
-      # Mount Pyrogram session file (created once via create_session.py)
       - ./mila_session.session:/app/mila_session.session:Z
-      # Host timezone
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     command: python main.py
@@ -28,26 +27,27 @@ services:
   # ============================================================
   # Mila Observatory — FastAPI web panel
   # ============================================================
+
   observatory:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: mila-observatory
+    user: root
     restart: unless-stopped
     env_file:
       - .env
     ports:
       - "8080:8080"
     volumes:
-      # Share the same data directory (SQLite DB)
+      - .:/app:z
+      - frontend_dist:/app/Mila_observatory/frontend/dist
       - mila_data:/app/data
       - mila_logs:/app/logs
-      # Mount local AI models (read-only)
       - ./models:/app/models:ro
-      # Host timezone
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-    command: python -m Mila_observatory.server
+    command: uvicorn Mila_observatory.server:app --host 0.0.0.0 --port 8080 --reload
     depends_on:
       - bot
     networks:
@@ -56,6 +56,7 @@ services:
 volumes:
   mila_data:
   mila_logs:
+  frontend_dist:
 
 networks:
   mila_network:

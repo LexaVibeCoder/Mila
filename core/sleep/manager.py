@@ -169,6 +169,14 @@ async def execute_sleep(session_id: str, duration_minutes: int = None) -> bool:
 
         all_success, message, process_results = await run_all_processes(session_id)
 
+        if all_success and duration_minutes:
+            elapsed = time.time() - _sleep_start_time
+            remaining = max(0, duration_minutes * 60 - elapsed)
+            if remaining > 0:
+                set_stage(SleepStage.IDLE, progress_pct=90.0)
+                print(f"[Sleep] Processing done, staying asleep for {remaining:.0f}s more...")
+                await asyncio.sleep(remaining)
+
         print(f"\n{'='*60}")
         print(f"  SLEEP RESULTS")
         for pr in process_results:

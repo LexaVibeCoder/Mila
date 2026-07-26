@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Dict, Optional, Any, Callable
 
@@ -103,14 +103,14 @@ def set_state(state: SleepState, session_id: str = None, triggered_by: str = "ma
     _ensure_sleep_tables()
     conn = get_conn()
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         if state == SleepState.SLEEPING:
             if not session_id:
                 session_id = str(uuid.uuid4())
             scheduled_end = None
             if duration_minutes:
-                scheduled_end = (datetime.utcnow() + timedelta(minutes=duration_minutes)).isoformat()
+                scheduled_end = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
 
             conn.execute(
                 """UPDATE sleep_state SET 

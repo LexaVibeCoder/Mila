@@ -4,7 +4,7 @@ core/memory/eternal.py — Mila's eternal (autobiographical) memory.
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 
 from core.db import get_conn
@@ -33,7 +33,7 @@ def _ensure_table():
 def add_chunk(title: str, content_md: str, importance: float = 0.5) -> str:
     _ensure_table()
     chunk_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
     try:
         conn.execute(
@@ -64,7 +64,7 @@ def update_chunk(chunk_id: str, title: str = None, content_md: str = None,
             return False
 
         current_version = row["version"]
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         updates = ["updated_at=?", "version=?"]
         params = [now, current_version + 1]
@@ -97,7 +97,7 @@ def deactivate_chunk(chunk_id: str) -> bool:
     try:
         conn.execute(
             "UPDATE mila_memory_chunks SET is_active=0, updated_at=? WHERE chunk_id=?",
-            (datetime.utcnow().isoformat(), chunk_id)
+            (datetime.now(timezone.utc).isoformat(), chunk_id)
         )
         conn.commit()
         print(f"[MilaMemory] Deactivated chunk {chunk_id[:8]}...")

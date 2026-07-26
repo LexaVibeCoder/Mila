@@ -1,6 +1,6 @@
 # core/llm/persona.py
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from config import settings
 from core.db import get_user_info, get_recent_chunks
@@ -109,7 +109,7 @@ def _get_profile_context(user_id: str) -> tuple[str, str, str]:
 
 def _get_session_time_info(chat_id: str, my_user_id: str) -> str:
     chunks = get_recent_chunks(chat_id, limit=50)
-    now_dt = datetime.now()
+    now_dt = datetime.now(timezone.utc)
     for chunk in reversed(chunks):
         if chunk.get("user_id") == my_user_id and chunk.get("time_start"):
             last_ai_time_raw = chunk["time_start"]
@@ -121,6 +121,8 @@ def _get_session_time_info(chat_id: str, my_user_id: str) -> str:
                         last_ai_dt = datetime.strptime(last_ai_time_raw, '%Y-%m-%d %H:%M:%S')
                 else:
                     last_ai_dt = last_ai_time_raw
+                if isinstance(last_ai_dt, datetime) and last_ai_dt.tzinfo is None:
+                    last_ai_dt = last_ai_dt.replace(tzinfo=timezone.utc)
                 delta = now_dt - last_ai_dt
                 total_seconds = delta.total_seconds()
                 if total_seconds < 30:

@@ -3,7 +3,7 @@ import os
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from config import settings
 
@@ -123,7 +123,7 @@ def ensure_chat_exists(chat_id: str, chat_name: str = None):
 
 def add_chunk(chat_id: str, user_id: str, content: str, token_count: int = 0, type: str = 'raw', llm_full_response: str = None):
     chunk_id = str(uuid.uuid4())
-    time_now = datetime.utcnow().isoformat()
+    time_now = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
     try:
         conn.execute(
@@ -169,7 +169,7 @@ def update_user_name(user_id: str, user_name: str):
 
 def add_memory(user_id: str, content: str, importance: float = 0.5, tags: list[str] = None, source_chat_id: str = None, source_message_id: str = None, faiss_id: int = None):
     mem_id = str(uuid.uuid4())
-    time_now = datetime.utcnow().isoformat()
+    time_now = datetime.now(timezone.utc).isoformat()
     tags_json = json.dumps(tags) if tags else '[]'
     conn = get_conn()
     try:
@@ -208,7 +208,7 @@ def search_memories_by_faiss_ids(faiss_ids: list[int]) -> list[dict]:
         conn.close()
 
 def update_memory_access(mem_ids: list[str]):
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
     try:
         conn.executemany("UPDATE memories SET last_accessed_at=? WHERE mem_id=?", [(now, mid) for mid in mem_ids])

@@ -302,8 +302,10 @@ If you want to stay silent (not reply):
 ### Order of Execution: Thoughts First, Actions Second
 You MUST always write your `thoughts` FIRST, and only then list your `actions`.
 Do NOT start with actions or mix actions into your thoughts.
-The correct order is: first think, then act.
-Example of correct order:
+
+STRICT RULE — JSON key order: the JSON object MUST have `"thoughts"` as the first key and `"actions"` as the second key.
+Never generate `"actions"` before `"thoughts"` in the JSON.
+Example of the ONLY correct order:
 {{
   "thoughts": "Сначала я обдумываю ситуацию, анализирую, что сказать...",
   "actions": [

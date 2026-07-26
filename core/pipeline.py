@@ -136,7 +136,7 @@ class ThinkPipeline:
                     "tool_calls": [
                         {
                             "name": tc.function.name,
-                            "arguments": tc.function.arguments
+                            "arguments": self._reorder_think_args(tc.function.arguments)
                         }
                         for tc in (tool_calls or [])
                     ],
@@ -181,16 +181,25 @@ class ThinkPipeline:
 
                 # Execute actions
                 has_search = False
+                silence_detected = False
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
                     all_actions.append(executed)
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
+
+                    if executed.get("type") == "silence":
+                        silence_detected = True
+                        print("  [Silence → stopping pipeline]")
+                        break
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
                         context_addon = executed.get("context_addon", "[Ничего не найдено]")
                         messages.append({"role": "system", "content": f"Результаты поиска в памяти:\n{context_addon}"})
                         print("  [Search results → re-calling]")
+
+                if silence_detected:
+                    break
 
                 if not has_search:
                     print("  [Done]")
@@ -257,6 +266,21 @@ class ThinkPipeline:
     # ------------------------------------------------------------------
     # Execute single action
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _reorder_think_args(arguments_json: str) -> str:
+        """
+        Reorder JSON keys in think() arguments so that 'thoughts' always
+        appears BEFORE 'actions'. Cosmetic — for cleaner logging.
+        """
+        try:
+            args = json.loads(arguments_json)
+            if "thoughts" in args and "actions" in args:
+                ordered = {"thoughts": args["thoughts"], "actions": args["actions"]}
+                return json.dumps(ordered, ensure_ascii=False)
+            return arguments_json
+        except (json.JSONDecodeError, Exception):
+            return arguments_json
 
     async def _execute_single_action(self, action: Dict) -> Dict:
         """Execute a single action from think()."""
@@ -364,7 +388,7 @@ class ThinkPipeline:
                     "iteration": iteration,
                     "thoughts": thoughts,
                     "tool_calls": [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
+                        {"name": tc.function.name, "arguments": self._reorder_think_args(tc.function.arguments)}
                         for tc in (tool_calls or [])
                     ],
                     "finish_reason": response.get("finish_reason")
@@ -408,11 +432,17 @@ class ThinkPipeline:
                 # Execute each action — send_message is yielded immediately
                 # with the full text, so the bot can send it right away
                 has_search = False
+                silence_detected = False
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
                     all_actions.append(executed)
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
                     yield {"type": "action", "action": executed}
+
+                    if executed.get("type") == "silence":
+                        silence_detected = True
+                        print("  [Silence → stopping pipeline]")
+                        break
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
@@ -420,6 +450,9 @@ class ThinkPipeline:
                         messages.append({"role": "system", "content": f"Результаты поиска в памяти:\n{context_addon}"})
                         yield {"type": "search_result", "content": context_addon}
                         print("  [Search results → re-calling]")
+
+                if silence_detected:
+                    break
 
                 if not has_search:
                     print("  [Done]")

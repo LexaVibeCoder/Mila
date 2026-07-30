@@ -6,8 +6,9 @@ Changes to this config apply IMMEDIATELY without restarting the bot.
 
 Architecture:
 - Singleton RuntimeConfig object, loaded once at import time
-- All changes go through set() methods, which update memory + save to JSON
-- Mila reads from this config on every pipeline iteration
+- On startup, seeds from config.py (.env) so all values are populated
+- All writes go through set()/update() methods, which update memory + save to JSON
+- Mila reads from this config on every pipeline iteration (single source of truth)
 - Observatory API writes to this config
 """
 
@@ -45,15 +46,15 @@ class RuntimeConfig:
         self._initialized = True
         self._lock = threading.Lock()
 
-        # Default values
+        # Default values (None = will be seeded from config.py/.env on startup)
         self._config: Dict[str, Any] = {
             # LLM
             "llm": {
-                "model": None,          # None = use settings.MAIN_LLM_MODEL
-                "api_base": None,       # None = use settings.LLM_API_BASE
-                "api_key": None,        # None = use settings.LLM_API_KEY
-                "temperature": None,    # None = use settings.MAIN_LLM_TEMPERATURE
-                "max_tokens": None,     # None = use settings.MAIN_LLM_MAX_TOKENS
+                "model": None,
+                "api_base": None,
+                "api_key": None,
+                "temperature": None,
+                "max_tokens": None,
                 "top_p": None,
                 "frequency_penalty": None,
                 "presence_penalty": None,
@@ -79,7 +80,7 @@ class RuntimeConfig:
             },
             # Persona
             "persona": {
-                "custom_text": "",       # Empty = use default from persona.py
+                "custom_text": "",
                 "parameters": {
                     "empathy": 0.8,
                     "humor": 0.6,
@@ -99,7 +100,7 @@ class RuntimeConfig:
             "sleep": {
                 "start_hour": None,
                 "end_hour": None,
-                "forced_awake": False,   # Override sleep mode
+                "forced_awake": False,
             },
             # System
             "system": {
@@ -114,8 +115,12 @@ class RuntimeConfig:
             }
         }
 
-        # Load saved config
+        # Load saved config, then seed remaining None values from .env
         self._load()
+        try:
+            self._seed_from_settings()
+        except ImportError:
+            pass  # config.py not available (e.g. minimal install)
 
     # ─── Public API ──────────────────────────────────────────
 
@@ -195,6 +200,51 @@ class RuntimeConfig:
 
     # ─── Helpers ─────────────────────────────────────────────
 
+    def _seed_from_settings(self) -> None:
+        """Fill None values from config.py (.env). Makes runtime_config.json
+        the single source of truth with all values resolved on startup."""
+        from config import settings
+
+        mapping = {
+            "llm.model": "MAIN_LLM_MODEL",
+            "llm.api_base": "LLM_API_BASE",
+            "llm.api_key": "LLM_API_KEY",
+            "llm.temperature": "MAIN_LLM_TEMPERATURE",
+            "llm.max_tokens": "MAIN_LLM_MAX_TOKENS",
+            "pipeline.max_context_tokens": "MAX_CONTEXT_TOKENS",
+            "pipeline.decay_lambda": "DECAY_LAMBDA",
+            "pipeline.forget_threshold": "FORGET_THRESHOLD",
+            "pipeline.similarity_threshold": "SIMILARITY_THRESHOLD_IMAGE",
+        }
+
+        changed = False
+        for dot_key, attr_name in mapping.items():
+            current = self._deep_get(self._config, dot_key)
+            if current is None:
+                value = getattr(settings, attr_name, None)
+                if value is not None:
+                    RuntimeConfig._deep_set(self._config, dot_key, value)
+                    changed = True
+
+        # Seed night_llm from main llm values (if still None)
+        for field in ["model", "api_base", "api_key"]:
+            if self._deep_get(self._config, f"night_llm.{field}") is None:
+                llm_val = self._deep_get(self._config, f"llm.{field}")
+                if llm_val is not None:
+                    RuntimeConfig._deep_set(self._config, f"night_llm.{field}", llm_val)
+                    changed = True
+
+        # night_llm temperature/max_tokens hardcoded defaults
+        if self._deep_get(self._config, "night_llm.temperature") is None:
+            RuntimeConfig._deep_set(self._config, "night_llm.temperature", 0.3)
+            changed = True
+        if self._deep_get(self._config, "night_llm.max_tokens") is None:
+            RuntimeConfig._deep_set(self._config, "night_llm.max_tokens", 4096)
+            changed = True
+
+        if changed:
+            self._save()
+
     @staticmethod
     def _deep_get(d: dict, key: str, default: Any = None) -> Any:
         """Get a nested value using dot notation."""
@@ -206,6 +256,17 @@ class RuntimeConfig:
             else:
                 return default
         return ptr
+
+    @staticmethod
+    def _deep_set(d: dict, key: str, value: Any) -> None:
+        """Set a nested value using dot notation (mutates d in place)."""
+        keys = key.split(".")
+        ptr = d
+        for k in keys[:-1]:
+            if k not in ptr or not isinstance(ptr[k], dict):
+                ptr[k] = {}
+            ptr = ptr[k]
+        ptr[keys[-1]] = value
 
     @staticmethod
     def _deep_merge(base: dict, override: dict) -> None:

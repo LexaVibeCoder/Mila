@@ -59,7 +59,14 @@ class ThinkPipeline:
         self.chat_id = chat_id
         self.my_user_id = my_user_id
 
-        self.main_llm = LLMClient()
+        if not HAS_OBSERVATORY:
+            self._fallback_llm = LLMClient()
+
+    @property
+    def main_llm(self) -> LLMClient:
+        if HAS_OBSERVATORY:
+            return llm_manager.get_main_client()
+        return self._fallback_llm
 
     async def process_message(
         self,

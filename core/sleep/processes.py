@@ -37,11 +37,11 @@ def _create_night_llm() -> LLMClient:
     try:
         from Mila_observatory.runtime import runtime_config
         night_config = runtime_config.get("night_llm", {})
-        model = night_config.get("model") or settings.MAIN_LLM_MODEL
-        api_base = night_config.get("api_base") or settings.LLM_API_BASE
-        api_key = night_config.get("api_key") or settings.LLM_API_KEY
-        temperature = night_config.get("temperature") or 0.3
-        max_tokens = night_config.get("max_tokens") or 4096
+        model = night_config.get("model")
+        api_base = night_config.get("api_base")
+        api_key = night_config.get("api_key")
+        temperature = night_config.get("temperature", 0.3)
+        max_tokens = night_config.get("max_tokens", 4096)
     except ImportError:
         model = settings.MAIN_LLM_MODEL
         api_base = settings.LLM_API_BASE
@@ -62,9 +62,9 @@ def _create_verifier_llm() -> LLMClient:
     try:
         from Mila_observatory.runtime import runtime_config
         night_config = runtime_config.get("night_llm", {})
-        model = night_config.get("model") or settings.MAIN_LLM_MODEL
-        api_base = night_config.get("api_base") or settings.LLM_API_BASE
-        api_key = night_config.get("api_key") or settings.LLM_API_KEY
+        model = night_config.get("model")
+        api_base = night_config.get("api_base")
+        api_key = night_config.get("api_key")
     except ImportError:
         model = settings.MAIN_LLM_MODEL
         api_base = settings.LLM_API_BASE

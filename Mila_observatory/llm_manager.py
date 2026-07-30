@@ -141,23 +141,12 @@ class LLMManager:
 
     def _apply_runtime_overrides(self, client: LLMClient, config_prefix: str) -> None:
         """Apply runtime config overrides to an LLM client."""
-        model = runtime_config.get(f"{config_prefix}.model")
-        api_base = runtime_config.get(f"{config_prefix}.api_base")
-        api_key = runtime_config.get(f"{config_prefix}.api_key")
-        temperature = runtime_config.get(f"{config_prefix}.temperature")
-        max_tokens = runtime_config.get(f"{config_prefix}.max_tokens")
-
         overrides = {}
-        if model is not None:
-            overrides["model"] = model
-        if api_base is not None:
-            overrides["api_base"] = api_base
-        if api_key is not None:
-            overrides["api_key"] = api_key
-        if temperature is not None:
-            overrides["temperature"] = temperature
-        if max_tokens is not None:
-            overrides["max_tokens"] = max_tokens
+        for field in ["model", "api_base", "api_key", "temperature",
+                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty"]:
+            value = runtime_config.get(f"{config_prefix}.{field}")
+            if value is not None:
+                overrides[field] = value
 
         if overrides:
             client.reconfigure(**overrides)

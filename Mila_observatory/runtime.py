@@ -58,6 +58,7 @@ class RuntimeConfig:
                 "top_p": None,
                 "frequency_penalty": None,
                 "presence_penalty": None,
+                "tool_choice": "required",
             },
             # Night LLM
             "night_llm": {
@@ -66,6 +67,7 @@ class RuntimeConfig:
                 "api_key": None,
                 "temperature": None,
                 "max_tokens": None,
+                "tool_choice": "required",
             },
             # Tools (enabled/disabled)
             "tools": {

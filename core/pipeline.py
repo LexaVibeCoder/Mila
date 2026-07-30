@@ -114,12 +114,12 @@ class ThinkPipeline:
                 iteration += 1
                 print(f"\n── Iteration {iteration}/{MAX_THINK_ITERATIONS} ──")
 
-                # Call LLM with think function (tool_choice="required")
+                tool_choice = runtime_config.get("llm.tool_choice", "required") if HAS_OBSERVATORY else "required"
                 response = await self.main_llm.generate(
                     messages=messages,
                     system_prompt=main_system_prompt,
                     tools=tool_definitions,
-                    tool_choice="required",
+                    tool_choice=tool_choice,
                     max_tokens=2048,
                     temperature=self.main_llm.default_temperature,
                 )
@@ -376,11 +376,12 @@ class ThinkPipeline:
                 iteration += 1
                 print(f"\n── Iteration {iteration}/{MAX_THINK_ITERATIONS} [stream] ──")
 
+                tool_choice = runtime_config.get("llm.tool_choice", "required") if HAS_OBSERVATORY else "required"
                 response = await self.main_llm.generate(
                     messages=messages,
                     system_prompt=main_system_prompt,
                     tools=tool_definitions,
-                    tool_choice="required",
+                    tool_choice=tool_choice,
                     max_tokens=2048,
                     temperature=self.main_llm.default_temperature,
                 )

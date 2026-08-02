@@ -20,9 +20,12 @@ from typing import Any, Dict, Optional
 from copy import deepcopy
 
 
+# Stored in the project root (not data/) so it persists on the host via the
+# docker-compose bind mount (.:/app) instead of the mila_data named volume.
+# gitignored because it may contain secrets.
 RUNTIME_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "runtime_config.json"
+    "runtime_config.json"
 )
 
 

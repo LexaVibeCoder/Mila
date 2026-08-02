@@ -12,6 +12,9 @@ data/
 *.db
 *.sqlite
 
+# Runtime config (may contain secrets)
+runtime_config.json
+
 # AI models
 models/
 *.bin

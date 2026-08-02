@@ -1,29 +1,23 @@
 # core/bot.py
 import asyncio
-import json
-import re
-import random
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import settings
-from core.db import (
-    ensure_user_exists, ensure_chat_exists, add_chunk, get_recent_chunks, get_user_info
-)
+from core.db import get_recent_chunks
 from core.context.buffer import (
-    push_message, push_summary, get_context, get_context_within_token_limit,
-    pop_oldest_messages, pop_oldest_messages_by_tokens,
-    get_total_entries, get_total_message_tokens, get_raw_content_for_llm
+    push_summary, get_context_within_token_limit,
+    pop_oldest_messages_by_tokens,
+    get_total_entries, get_total_message_tokens
 )
-from core.llm.counter import count_tokens
 from core.llm.embeddings import EmbeddingClient
 from core.memory.vector import VectorMemory
 from core.pipeline import ThinkPipeline
 from core.llm.client import LLMClient
 from core.sleep.manager import (
-    recover_from_crash, is_sleeping, is_committing, queue_incoming_message,
-    start_auto_sleep_scheduler, get_sleep_status
+    recover_from_crash,
+    start_auto_sleep_scheduler
 )
-from core.needs.tracker import get_tracker as get_needs_tracker
+from core.queue import MessageCoordinate
 
 
 class MilaUserbot:
@@ -44,6 +38,8 @@ class MilaUserbot:
         self.me = None
         # Cheap summarizer for daytime context compression
         self.summarizer_llm = None  # lazy init
+        # Per-chat batching / debounce coordinator
+        self.messages = MessageCoordinate(self)
 
     async def start(self):
         # Crash recovery: check if previous sleep was interrupted
@@ -225,179 +221,8 @@ class MilaUserbot:
         return resolved
 
     async def handle_text_message(self, client: Client, message: Message):
-        user_id = str(message.from_user.id)
-        chat_id = str(message.chat.id)
-        
-        # Always save to canonical storage
-        ensure_user_exists(user_id, message.from_user.first_name or "Unknown")
-        ensure_chat_exists(chat_id, message.chat.first_name or "Личный чат")
-        chunk_id = add_chunk(chat_id, user_id, message.text, token_count=0, type='raw')
-
-        # Check if Mila is sleeping — queue messages and don't process
-        if is_sleeping():
-            queue_incoming_message(chat_id, user_id, message.text)
-            print(f"[Sleep] Message queued from {user_id[:8]}... in {chat_id[:8]}...")
-            return
-
-        # Also push to context buffer (daytime working memory)
-        push_message(chat_id, message.text, source_chunk_id=chunk_id)
-
-        # Compress context if needed (before processing)
-        await self._compress_context(chat_id)
-
-        # ── Needs pre-filter ──
-        needs = get_needs_tracker().get_needs()
-        hour = needs["current_hour"]
-        is_night = hour >= 22 or hour <= 7
-
-        if needs["fatigue"] > 0.85 and is_night:
-            print(f"[Needs] Fatigue {needs['fatigue']:.2f} at night — auto silence")
-            # Записываем silence в историю, чтобы сохранить временную последовательность
-            add_chunk(
-                chat_id, str(self.me.id),
-                content="",
-                llm_full_response="[auto-silence: высокая усталость]",
-                token_count=0,
-                type='raw'
-            )
-            get_needs_tracker().apply_action_effect("silence")
-            return
-
-        # ── End pre-filter ──
-
-        # Typing indicator — runs while pipeline is processing
-        stop_typing = asyncio.Event()
-        async def typing_loop():
-            while not stop_typing.is_set():
-                await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
-                await asyncio.sleep(4)
-        typing_task = asyncio.create_task(typing_loop())
-
-        try:
-            # Build histories from context buffer
-            raw_user_visible, raw_agent_internal = self._build_histories(chat_id)
-            
-            # Resolve roles by cross-referencing with chunks
-            user_visible_history = self._resolve_roles_in_histories(raw_user_visible, chat_id)
-            agent_internal_history = self._resolve_roles_in_histories(raw_agent_internal, chat_id)
-            
-            # Update pipeline context
-            self.pipeline.user_id = user_id
-            self.pipeline.chat_id = chat_id
-
-            # ── Streaming processing ──
-            full_response = ""
-            has_silence_action = False
-            sent_any = False
-
-            async for event in self.pipeline.process_message_stream(
-                user_message=message.text,
-                user_visible_history=user_visible_history,
-                agent_internal_history=agent_internal_history,
-                user_profile=get_user_info(user_id)
-            ):
-                etype = event.get("type")
-
-                if etype == "thought":
-                    thoughts = event.get("thoughts", "")
-                    thoughts_preview = thoughts[:120].replace("\n", " ")
-                    print(f"  Thoughts: {thoughts_preview}...")
-
-                elif etype == "action":
-                    action = event.get("action", {})
-
-                    if action.get("type") == "send_message":
-                        send_text = action.get("text", "").strip()
-                        target_chat_id = action.get("chat_id", chat_id)
-
-                        if send_text:
-                            print(f"\n[SENDING] {send_text[:100]}...")
-                            await asyncio.sleep(random.uniform(0.3, 1.0))
-                            try:
-                                await client.send_message(int(target_chat_id), send_text)
-                                # Save to DB and context buffer
-                                add_chunk(
-                                    target_chat_id, str(self.me.id),
-                                    content=send_text,
-                                    llm_full_response=full_response or send_text,
-                                    token_count=0,
-                                    type='raw'
-                                )
-                                push_message(target_chat_id, send_text, source_chunk_id=None)
-                                sent_any = True
-                                print("[✓] Message sent to Telegram")
-                            except Exception as e:
-                                print(f"[❌ ERROR] Failed to send: {e}")
-                        else:
-                            print(f"\n[Silent Mode] AI thought but chose not to respond")
-
-                    elif action.get("type") == "silence":
-                        has_silence_action = True
-                        silence_reason = action.get("reason", "")
-                        print(f"\n[Silence Mode] AI chose not to respond. Reason: {silence_reason}")
-
-                    elif action.get("type") == "search_memory":
-                        print(f"[Memory] Search executed: '{action.get('query', '')}'")
-
-                    elif action.get("type") == "write_diary":
-                        entry_num = action.get("entry_number", "?")
-                        print(f"\n[Diary] Entry #{entry_num} written")
-
-                elif etype == "search_result":
-                    print(f"  [Search results added to context]")
-
-                elif etype == "done":
-                    result = event.get("result", {})
-                    full_response = result.get("thoughts", full_response)
-
-                elif etype == "error":
-                    print(f"\n[Pipeline Error] {event.get('error')}")
-
-            # ── Post-processing ──
-            # If no send_message was sent but there's a long thought — fallback
-            if not sent_any and not has_silence_action and full_response:
-                thoughts_stripped = full_response.strip()
-                if len(thoughts_stripped) > 80:
-                    print(f"\n[⚠️ FALLBACK] No send_message called — auto-sending...")
-                    await asyncio.sleep(random.uniform(0.5, 2.0))
-                    try:
-                        await client.send_message(int(chat_id), thoughts_stripped)
-                        add_chunk(
-                            chat_id, str(self.me.id),
-                            content=thoughts_stripped,
-                            llm_full_response=thoughts_stripped,
-                            token_count=0,
-                            type='raw'
-                        )
-                        push_message(chat_id, thoughts_stripped, source_chunk_id=None)
-                        print(f"[✓] Fallback message sent")
-                    except Exception as e:
-                        print(f"[❌ ERROR] Fallback send failed: {e}")
-                elif full_response:
-                    add_chunk(
-                        chat_id, str(self.me.id),
-                        content="",
-                        llm_full_response=full_response,
-                        token_count=0,
-                        type='raw'
-                    )
-
-            elif has_silence_action and full_response:
-                add_chunk(
-                    chat_id, str(self.me.id),
-                    content="",
-                    llm_full_response=full_response,
-                    token_count=0,
-                    type='raw'
-                )
-
-        except Exception:
-            import traceback
-            print("[❌ CRITICAL ERROR] Unhandled exception:")
-            traceback.print_exc()
-        finally:
-            stop_typing.set()
-            typing_task.cancel()
+        """Thin delegator — the batching/processing lives in self.messages."""
+        await self.messages.handle(client, message)
 
     async def stop(self):
         self.text_memory.save()

@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     CONTEXT_MAX_MESSAGES: int = 40  # Legacy — kept for backward compat, but token limit takes precedence
     CONTEXT_SUMMARIZE_CHUNK: int = 20  # Legacy
 
+    # Message batching / debounce
+    MESSAGE_DEBOUNCE_SECONDS: float = 2.0  # Wait window after the last message before responding
+    TYPING_WAIT_MAX_SECONDS: float = 8.0   # Max extra wait if the user is still typing
+
     class Config:
         env_file = ".env"
         extra = "allow"  # Allow extra fields from .env (night_llm, sleep, etc.) to be used by runtime_config

@@ -166,7 +166,11 @@ class MilaUserbot:
         
         for entry in context_entries:
             content_raw = entry.get("content", "") or ""
-            
+            ts = entry.get("created_at", "")
+            time_prefix = ""
+            if ts and entry["type"] != "summary":
+                time_prefix = f"[{ts}] "
+
             if entry["type"] == "summary":
                 # Summary entries are injected as a system-like context block
                 summary_block = f"[Сводка предыдущего разговора:]\n{content_raw}"
@@ -181,11 +185,11 @@ class MilaUserbot:
             else:
                 user_visible.append({
                     "role": "user",
-                    "content": content_raw
+                    "content": f"{time_prefix}{content_raw}"
                 })
                 agent_internal.append({
                     "role": "user",
-                    "content": content_raw
+                    "content": f"{time_prefix}{content_raw}"
                 })
         
         return user_visible, agent_internal

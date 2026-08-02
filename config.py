@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     CONTEXT_MAX_MESSAGES: int = 40  # Legacy — kept for backward compat, but token limit takes precedence
     CONTEXT_SUMMARIZE_CHUNK: int = 20  # Legacy
 
+    # Local time for message metadata (IANA name, e.g. "Europe/Moscow").
+    # Empty = use the system's local timezone (honors TZ env / mounted /etc/localtime),
+    # which works both inside Docker (when TZ is set) and on the host.
+    LOCAL_TIMEZONE: str = ""
+
     # Message batching / debounce
     MESSAGE_DEBOUNCE_SECONDS: float = 2.0  # Wait window after the last message before responding
     TYPING_WAIT_MAX_SECONDS: float = 8.0   # Max extra wait if the user is still typing

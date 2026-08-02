@@ -4,15 +4,30 @@ core/context/buffer.py — Context Buffer for Mila's working memory.
 
 import os
 import sqlite3
-import uuid
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
+from zoneinfo import ZoneInfo
 
 from config import settings
 from core.llm.counter import count_tokens
 
 
 CONTEXT_DB_PATH = settings.CONTEXT_DB_PATH
+
+
+def _local_zone():
+    """Return the configured IANA timezone, falling back to the OS local zone."""
+    if getattr(settings, "LOCAL_TIMEZONE", ""):
+        try:
+            return ZoneInfo(settings.LOCAL_TIMEZONE)
+        except Exception:
+            pass
+    return datetime.now().astimezone().tzinfo
+
+
+def now_local() -> datetime:
+    """Current datetime in the local timezone (config-aware, Docker-safe)."""
+    return datetime.now(_local_zone())
 
 
 def _get_conn():
@@ -57,11 +72,12 @@ def push_message(chat_id: str, content: str, source_chunk_id: str = None):
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     token_count = count_tokens(content)
+    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     try:
         conn.execute(
-            f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count) VALUES (?, 'message', ?, ?)",
-            (content, source_chunk_id, token_count)
+            f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count, created_at) VALUES (?, 'message', ?, ?, ?)",
+            (content, source_chunk_id, token_count, ts)
         )
         conn.commit()
     finally:
@@ -72,11 +88,12 @@ def push_summary(chat_id: str, summary_text: str):
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     token_count = count_tokens(summary_text)
+    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     try:
         conn.execute(
-            f"INSERT INTO [{table}] (content, type, token_count) VALUES (?, 'summary', ?)",
-            (summary_text, token_count)
+            f"INSERT INTO [{table}] (content, type, token_count, created_at) VALUES (?, 'summary', ?, ?)",
+            (summary_text, token_count, ts)
         )
         conn.commit()
     finally:

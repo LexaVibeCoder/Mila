@@ -7,6 +7,7 @@ transformers>=4.40.0
 torch>=2.3.0
 python-dotenv>=1.0.0
 pydantic-settings>=2.2.0
+tzdata>=2024.1
 Pillow>=10.3.0
 aiofiles>=23.2.0
 huggingface-hub>=0.21.0

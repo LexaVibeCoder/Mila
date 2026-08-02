@@ -233,7 +233,7 @@ class MessageCoordinate:
                                     token_count=0,
                                     type='raw'
                                 )
-                                push_message(target_chat_id, send_text, source_chunk_id=None)
+                                push_message(target_chat_id, send_text, source_chunk_id=None, role="assistant")
                                 sent_any = True
                                 print("[✓] Message sent to Telegram")
                             except Exception as e:
@@ -265,7 +265,7 @@ class MessageCoordinate:
                         await client.send_message(int(chat_id), stripped)
                         add_chunk(chat_id, str(bot.me.id), content=stripped,
                                   llm_full_response=stripped, token_count=0, type='raw')
-                        push_message(chat_id, stripped, source_chunk_id=None)
+                        push_message(chat_id, stripped, source_chunk_id=None, role="assistant")
                         print("[✓] Fallback sent")
                     except Exception as e:
                         print(f"[✗ ERROR] Fallback send failed: {e}")

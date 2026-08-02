@@ -3,7 +3,6 @@ import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import settings
-from core.db import get_recent_chunks
 from core.context.buffer import (
     push_summary, get_context_within_token_limit,
     pop_oldest_messages_by_tokens,
@@ -184,11 +183,11 @@ class MilaUserbot:
                 })
             else:
                 user_visible.append({
-                    "role": "user",
+                    "role": "assistant" if entry.get("role") == "assistant" else "user",
                     "content": f"{time_prefix}{content_raw}"
                 })
                 agent_internal.append({
-                    "role": "user",
+                    "role": "assistant" if entry.get("role") == "assistant" else "user",
                     "content": f"{time_prefix}{content_raw}"
                 })
         
@@ -196,33 +195,10 @@ class MilaUserbot:
 
     def _resolve_roles_in_histories(self, histories: list[dict], chat_id: str) -> list[dict]:
         """
-        Resolve roles in context buffer histories by cross-referencing with chunks.
-        The context buffer stores only content without roles.
-        We look up recent chunks to determine who said what.
-        Fetches enough chunks to cover the token-based context limit.
+        Roles are now stored directly in the context buffer, so histories are
+        already correctly attributed. Kept as a pass-through for callers.
         """
-        # Fetch enough chunks to cover the 30K token limit (~500 messages with ~60 tokens each)
-        chunks = get_recent_chunks(chat_id, 500)
-        # Build a map: content_hash -> role for recent messages
-        content_to_role = {}
-        for chunk in chunks:
-            role = "assistant" if chunk["user_id"] == str(self.me.id) else "user"
-            content = chunk.get("content", "") or ""
-            if content:
-                content_to_role[content] = role
-
-        resolved = []
-        for entry in histories:
-            if entry["role"] == "system":
-                # Keep summaries as system
-                resolved.append(entry)
-            else:
-                content = entry["content"]
-                # Try to find role from chunks
-                role = content_to_role.get(content, "user")  # default to user
-                resolved.append({"role": role, "content": content})
-        
-        return resolved
+        return histories
 
     async def handle_text_message(self, client: Client, message: Message):
         """Thin delegator — the batching/processing lives in self.messages."""

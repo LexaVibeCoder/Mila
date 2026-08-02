@@ -56,6 +56,7 @@ def ensure_chat_table(chat_id: str):
                 type TEXT NOT NULL CHECK(type IN ('message', 'summary')),
                 source_chunk_id TEXT,
                 token_count INTEGER DEFAULT 0,
+                role TEXT NOT NULL DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
@@ -63,12 +64,16 @@ def ensure_chat_table(chat_id: str):
             conn.execute(f"ALTER TABLE [{table}] ADD COLUMN token_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute(f"ALTER TABLE [{table}] ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
 
 
-def push_message(chat_id: str, content: str, source_chunk_id: str = None):
+def push_message(chat_id: str, content: str, source_chunk_id: str = None, role: str = "user"):
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     token_count = count_tokens(content)
@@ -76,8 +81,8 @@ def push_message(chat_id: str, content: str, source_chunk_id: str = None):
     conn = _get_conn()
     try:
         conn.execute(
-            f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count, created_at) VALUES (?, 'message', ?, ?, ?)",
-            (content, source_chunk_id, token_count, ts)
+            f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count, role, created_at) VALUES (?, 'message', ?, ?, ?, ?)",
+            (content, source_chunk_id, token_count, role, ts)
         )
         conn.commit()
     finally:
@@ -108,7 +113,7 @@ def get_context(chat_id: str, limit: int = None) -> List[Dict]:
     conn = _get_conn()
     try:
         cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, created_at FROM [{table}] ORDER BY id DESC LIMIT ?",
+            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] ORDER BY id DESC LIMIT ?",
             (limit,)
         )
         rows = [dict(r) for r in cur.fetchall()]
@@ -150,7 +155,7 @@ def get_context_within_token_limit(chat_id: str, max_tokens: int) -> List[Dict]:
     conn = _get_conn()
     try:
         cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, created_at FROM [{table}] ORDER BY id ASC"
+            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] ORDER BY id ASC"
         )
         all_entries = [dict(r) for r in cur.fetchall()]
 
@@ -184,7 +189,7 @@ def pop_oldest_messages_by_tokens(chat_id: str, target_tokens: int) -> List[Dict
     conn = _get_conn()
     try:
         cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, created_at FROM [{table}] WHERE type='message' ORDER BY id ASC"
+            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] WHERE type='message' ORDER BY id ASC"
         )
         all_messages = [dict(r) for r in cur.fetchall()]
 
@@ -223,7 +228,7 @@ def pop_oldest_messages(chat_id: str, count: int) -> List[Dict]:
     conn = _get_conn()
     try:
         cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, created_at FROM [{table}] WHERE type='message' ORDER BY id ASC LIMIT ?",
+            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] WHERE type='message' ORDER BY id ASC LIMIT ?",
             (count,)
         )
         to_remove = [dict(r) for r in cur.fetchall()]

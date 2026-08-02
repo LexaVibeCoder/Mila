@@ -87,7 +87,8 @@ class MessageCoordinate:
                 await self._debounce(chat_id)
 
                 # 2. Wait a bit longer while the user is still typing.
-                await self._wait_typing(chat_id, client)
+                if settings.ENABLE_TYPING_WAIT:
+                    await self._wait_typing(chat_id, client)
 
                 # 3. Generate for whatever accumulated; restart if new message
                 #    arrived while we were generating.

@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # Message batching / debounce
     MESSAGE_DEBOUNCE_SECONDS: float = 2.0  # Wait window after the last message before responding
     TYPING_WAIT_MAX_SECONDS: float = 8.0   # Max extra wait if the user is still typing
+    ENABLE_TYPING_WAIT: bool = False       # Off by default — typing detection isn't reliable yet
 
     class Config:
         env_file = ".env"

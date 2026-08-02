@@ -95,7 +95,12 @@ class MessageCoordinate:
                 if restart:
                     continue
 
-                # No new messages and generation finished — session is done.
+                # If a message slipped in after generation finished (e.g. during
+                # the task.done() gap in handle()), process it too.
+                if self._pending.get(chat_id):
+                    continue
+
+                # Nothing left — this batch session is done.
                 self._pending.pop(chat_id, None)
                 return
         except asyncio.CancelledError:

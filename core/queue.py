@@ -133,8 +133,8 @@ class MessageCoordinate:
         while waited < settings.TYPING_WAIT_MAX_SECONDS:
             if event.is_set():
                 return  # a message arrived — the debounce/worker handled it
-            await asyncio.sleep(wait_step)
-            waited += wait_step
+            await asyncio.sleep(poll_step)
+            waited += poll_step
 
     async def _generate_for_chat(self, client, chat_id: str) -> bool:
         """Send the accumulated batch to the pipeline.

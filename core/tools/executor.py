@@ -11,11 +11,13 @@ def get_tool_definitions() -> List[Dict]:
         send_enabled = tools_enabled.get("send_message", True)
         silence_enabled = tools_enabled.get("silence", True)
         diary_enabled = tools_enabled.get("write_diary", True)
+        diary_update_enabled = tools_enabled.get("update_diary", True)
     except ImportError:
         search_enabled = True
         send_enabled = True
         silence_enabled = True
         diary_enabled = True
+        diary_update_enabled = True
 
     action_enum = []
     if send_enabled:
@@ -26,9 +28,13 @@ def get_tool_definitions() -> List[Dict]:
         action_enum.append("silence")
     if diary_enabled:
         action_enum.append("write_diary")
+    if diary_update_enabled:
+        action_enum.append("update_diary")
 
     if not action_enum:
         action_enum.append("silence")
+
+    diary_categories_enum = ["day_entries", "reflection_entries"]
 
     return [
         {
@@ -57,7 +63,7 @@ def get_tool_definitions() -> List[Dict]:
                                            "If you want to reply to the user, include a send_message action. "
                                            "If you need more information from memory, include search_memory. "
                                            "If you want to stay silent (not reply), include a silence action. "
-                                           "If you want to write a diary entry about this moment, include write_diary.",
+                                           "If you want to write or update your diary, include write_diary or update_diary.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -78,7 +84,8 @@ def get_tool_definitions() -> List[Dict]:
                                             },
                                             "text": {
                                                 "type": "string",
-                                                "description": "Message text to send (for send_message only)"
+                                                "description": "Message text to send to the user (for send_message only). "
+                                                               "Do NOT use 'text' for diary actions — diary uses 'entry'."
                                             },
                                             "query": {
                                                 "type": "string",
@@ -91,11 +98,21 @@ def get_tool_definitions() -> List[Dict]:
                                             },
                                             "entry": {
                                                 "type": "string",
-                                                "description": "Diary entry content (for write_diary only). "
-                                                               "Write what happened or what you're feeling. "
-                                                               "This is a personal diary entry, not a message to anyone. "
-                                                               "Each entry is automatically saved to 'data/daily reports/{date}.md' "
-                                                               "as a permanent Markdown record."
+                                                "description": "Diary entry content (for write_diary / update_diary only). "
+                                                               "1-3 short sentences, first person, natural. "
+                                                               "Use the 'entry' param for diary actions (not 'text')."
+                                            },
+                                            "category": {
+                                                "type": "string",
+                                                "enum": diary_categories_enum,
+                                                "description": "Diary entry category (for write_diary / update_diary only). "
+                                                               "'day_entries' — what happened during the day (events, conversations, moments). "
+                                                               "'reflection_entries' — your thoughts and feelings about what happened."
+                                            },
+                                            "entry_id": {
+                                                "type": "string",
+                                                "description": "ID of an existing diary entry to update (for update_diary only). "
+                                                               "Take it from the diary block in the system prompt, e.g. '[ID: 2]'."
                                             }
                                         }
                                     }
@@ -136,6 +153,8 @@ class ToolExecutor:
             return await self._handle_silence(params)
         elif action_type == "write_diary":
             return await self._handle_write_diary(params)
+        elif action_type == "update_diary":
+            return await self._handle_update_diary(params)
         else:
             return {
                 "type": action_type,
@@ -220,20 +239,64 @@ class ToolExecutor:
             "status": "silent"
         }
 
-    async def _handle_write_diary(self, params: Dict) -> Dict:
+    def _extract_entry_text(self, params: Dict) -> str:
+        """Диary text may be passed as 'entry' or 'text' — accept both to avoid
+        model mistakes between the send_message ('text') and diary ('entry') params."""
         entry = params.get("entry", "")
-        if not entry.strip():
+        if not entry or not entry.strip():
+            entry = params.get("text", "")
+        return (entry or "").strip()
+
+    async def _handle_write_diary(self, params: Dict) -> Dict:
+        entry = self._extract_entry_text(params)
+        if not entry:
             return {
                 "type": "write_diary",
                 "status": "error",
-                "error": "Empty diary entry"
+                "error": "Missing diary entry text (param 'entry')"
             }
 
         from core.diary.manager import add_diary_entry
-        entry_num = add_diary_entry(entry.strip())
-        print(f"[ToolExecutor] Diary entry #{entry_num} written")
+        category = params.get("category", "day_entries")
+        result = add_diary_entry(entry.strip(), category=category)
+        print(f"[ToolExecutor] Diary entry #{result['entry_number']} (ID: {result['entry_id']}, {result['category']}) written")
         return {
             "type": "write_diary",
-            "entry_number": entry_num,
+            "entry_number": result["entry_number"],
+            "entry_id": result["entry_id"],
+            "category": result["category"],
             "status": "written"
+        }
+
+    async def _handle_update_diary(self, params: Dict) -> Dict:
+        entry = self._extract_entry_text(params)
+        entry_id = params.get("entry_id", "")
+        if not entry:
+            return {
+                "type": "update_diary",
+                "status": "error",
+                "error": "Missing diary entry text (param 'entry')"
+            }
+        if not str(entry_id).strip():
+            return {
+                "type": "update_diary",
+                "status": "error",
+                "error": "Missing entry_id"
+            }
+
+        from core.diary.manager import update_diary_entry
+        category = params.get("category")
+        updated = update_diary_entry(int(entry_id), entry.strip(), category=category)
+        if not updated:
+            return {
+                "type": "update_diary",
+                "entry_id": entry_id,
+                "status": "not_found",
+                "error": f"Diary entry ID {entry_id} not found"
+            }
+        print(f"[ToolExecutor] Diary entry ID {entry_id} updated")
+        return {
+            "type": "update_diary",
+            "entry_id": entry_id,
+            "status": "updated"
         }

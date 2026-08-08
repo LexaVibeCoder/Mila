@@ -116,6 +116,8 @@ class NeedsTracker:
         elif action_type == "write_diary":
             self._boredom_offset = max(self._boredom_offset - 0.08, -0.5)
             self._fatigue_offset = min(self._fatigue_offset + 0.03, 0.3)
+        elif action_type == "update_diary":
+            self._boredom_offset = max(self._boredom_offset - 0.04, -0.5)
         self._cached_needs = None
 
     def reset_offsets(self):

@@ -247,6 +247,8 @@ class MessageCoordinate:
                         print(f"[Memory] Search: '{action.get('query', '')}'")
                     elif action.get("type") == "write_diary":
                         print(f"\n[Diary] Entry written")
+                    elif action.get("type") == "update_diary":
+                        print(f"\n[Diary] Entry updated")
                 elif etype == "search_result":
                     print("  [Search results added to context]")
                 elif etype == "done":

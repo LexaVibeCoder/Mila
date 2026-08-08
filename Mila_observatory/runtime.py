@@ -78,6 +78,7 @@ class RuntimeConfig:
                 "send_message": True,
                 "silence": True,
                 "write_diary": True,
+                "update_diary": True,
             },
             # Diary
             "diary": {

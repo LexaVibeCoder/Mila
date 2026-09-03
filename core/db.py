@@ -1,4 +1,3 @@
-# core/db.py
 import os
 import json
 import sqlite3
@@ -10,7 +9,6 @@ from config import settings
 DB_PATH = settings.SQLITE_PATH
 
 def get_conn():
-    # Создаем директорию для базы данных, если она не существует
     db_dir = os.path.dirname(DB_PATH)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
@@ -22,11 +20,9 @@ def get_conn():
     return conn
 
 def init_db():
-    # Подключаемся к базе (get_conn создаст директорию, если нужно)
     conn = get_conn()
     cur = conn.cursor()
     
-    # Всегда создаем таблицы, если они не существуют
     cur.executescript("""
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
@@ -136,7 +132,7 @@ def add_chunk(chat_id: str, user_id: str, content: str, token_count: int = 0, ty
         conn.close()
 
 def get_recent_chunks(chat_id: str, limit: int = 30) -> list[dict]:
-    """Возвращает последние N сообщений в чате в хронологическом порядке (старые -> новые)."""
+    """Returns the most recent N messages in the chat in chronological order (old -> new)."""
     conn = get_conn()
     try:
         cur = conn.cursor()

@@ -1,4 +1,3 @@
-# core/tools/executor.py
 import json
 from typing import List, Dict, Any, Optional
 
@@ -186,7 +185,7 @@ class ToolExecutor:
             valid_indices = [int(idx) for idx in indices if idx != -1]
 
             results = None
-            context_addon = "[Ничего не найдено по запросу]"
+            context_addon = "[Nothing found in memory]"
 
             if valid_indices:
                 memories = search_memories_by_faiss_ids(valid_indices)
@@ -204,10 +203,10 @@ class ToolExecutor:
                                 seen.add(mem.get("mem_id"))
                                 break
 
-                    context_lines = ["[Результаты поиска в памяти:]"]
+                    context_lines = ["[Search results in memory:]"]
                     for r in results[:5]:
                         preview = r.get("content", "")[:200]
-                        context_lines.append(f"- {preview} (релевантность: {r.get('score', 0):.2f})")
+                        context_lines.append(f"- {preview} (relevance: {r.get('score', 0):.2f})")
                     context_addon = "\n".join(context_lines)
 
             print(f"[ToolExecutor] Search: '{query}' → {len(results or [])} results")
@@ -225,7 +224,7 @@ class ToolExecutor:
                 "type": "search_memory",
                 "query": query,
                 "results": None,
-                "context_addon": "[Ошибка поиска в памяти]",
+                "context_addon": "[Error searching memory]",
                 "status": "error",
                 "error": str(e)
             }
@@ -240,7 +239,7 @@ class ToolExecutor:
         }
 
     def _extract_entry_text(self, params: Dict) -> str:
-        """Диary text may be passed as 'entry' or 'text' — accept both to avoid
+        """Diary text may be passed as 'entry' or 'text' — accept both to avoid
         model mistakes between the send_message ('text') and diary ('entry') params."""
         entry = params.get("entry", "")
         if not entry or not entry.strip():

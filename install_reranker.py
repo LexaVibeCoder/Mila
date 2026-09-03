@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Script to download and setup BGE-Reranker-v2-m3 model locally.
 This runs independently to avoid cluttering the main project.

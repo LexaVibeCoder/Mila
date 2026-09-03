@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
 """
-Скрипт для первичной авторизации Pyrogram (userbot).
-Запускается один раз на хосте (не в Docker).
-Создаёт файл mila_session.session, который потом используется в Docker.
+First-time setup script for Pyrogram (userbot).
+Runs once on the host.
+Creates the .session file, which is then used later.
 
-Использование:
+Usage:
     python create_session.py
 
-После запуска введи номер телефона и код из Telegram.
+After running, enter your phone number and the code received from Telegram.
 """
 import asyncio
 import sys
@@ -23,10 +22,10 @@ from config import settings
 
 
 async def main():
-    print("=== Создание сессии Pyrogram ===")
+    print("=== Creating Pyrogram Session ===")
     print(f"API_ID: {settings.API_ID}")
     print(f"API_HASH: {settings.API_HASH[:8]}...")
-    print(f"PHONE_NUMBER: {settings.PHONE_NUMBER or 'не указан (будет запрошен)'}")
+    print(f"PHONE_NUMBER: {settings.PHONE_NUMBER or 'not specified (will be requested)'}")
     print()
 
     app = Client(
@@ -39,8 +38,8 @@ async def main():
 
     async with app:
         me = await app.get_me()
-        print(f"\n✓ Сессия создана! Аккаунт: {me.first_name} (@{me.username})")
-        print(f"  Файл: mila_session.session")
+        print(f"\n✓ Session created! Account: {me.first_name} (@{me.username})")
+        print(f"  File: mila_session.session")
         print(f"  ID: {me.id}")
 
 

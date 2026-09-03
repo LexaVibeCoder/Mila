@@ -1,4 +1,3 @@
-# core/queue.py
 """
 Per-chat message batching with debounce.
 

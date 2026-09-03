@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 import os
 from config import settings
@@ -6,11 +5,10 @@ from core.db import init_db
 from core.bot import MilaUserbot
 
 async def main():
-    # Создаем необходимые директории
     os.makedirs(settings.PHOTOS_DIR, exist_ok=True)
     os.makedirs(settings.DAILY_REPORTS, exist_ok=True)
     os.makedirs(settings.LOG_DIR, exist_ok=True)
-    
+
     init_db()
     bot = MilaUserbot()
     try:

@@ -12,7 +12,7 @@ data/
 *.db
 *.sqlite
 
-# Runtime config (may contain secrets)
+# Runtime config
 runtime_config.json
 
 # AI models

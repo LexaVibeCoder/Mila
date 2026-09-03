@@ -254,7 +254,7 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
     set_state(SleepState.SLEEPING, session_id=session_id, triggered_by=triggered_by,
               duration_minutes=duration_minutes)
 
-    # Сбрасываем офсеты потребностей — после сна Мила «отдохнувшая»
+    # Reset needs tracker offsets to avoid double-counting during sleep
     get_needs_tracker().reset_offsets()
 
     print(f"\n{'='*60}")

@@ -1,4 +1,3 @@
-# core/llm/reranker.py
 import os
 from pathlib import Path
 from typing import List, Tuple

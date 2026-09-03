@@ -1,4 +1,3 @@
-# core/pipeline.py
 """
 Single-stage reasoning pipeline:
 Model calls `think(thoughts, actions)` — system executes actions.
@@ -156,8 +155,8 @@ class ThinkPipeline:
                         print("  [Retry: no think() call]")
                         messages.append({
                             "role": "system",
-                            "content": "ОШИБКА: Ты не вызвала функцию think(). Ты ОБЯЗАНА вызвать think() в каждом ответе. "
-                                       "Пожалуйста, перегенерируй ответ и обязательно вызови think() с мыслями и действиями."
+                            "content": "ERROR: You did not call the think() function. You MUST call think() in every response. "
+                                       "Please regenerate the response and make sure to call think() with your thoughts and actions."
                         })
                         continue
                     else:
@@ -169,9 +168,9 @@ class ThinkPipeline:
                         print(f"  [Retry: called {first_tool.function.name} instead of think]")
                         messages.append({
                             "role": "system",
-                            "content": f"ОШИБКА: Ты вызвала функцию '{first_tool.function.name}' вместо 'think'. "
-                                       "Ты ОБЯЗАНА использовать функцию think() в каждом ответе. "
-                                       "Пожалуйста, перегенерируй ответ и обязательно вызови think()."
+                            "content": f"ERROR: You called function '{first_tool.function.name}' instead of 'think'. "
+                                       "You MUST use the 'think()' function in every response. "
+                                       "Please regenerate the response and make sure to call 'think()' with your thoughts and actions."
                         })
                         continue
                     else:
@@ -201,8 +200,8 @@ class ThinkPipeline:
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
-                        context_addon = executed.get("context_addon", "[Ничего не найдено]")
-                        messages.append({"role": "system", "content": f"Результаты поиска в памяти:\n{context_addon}"})
+                        context_addon = executed.get("context_addon", "[No results found]")
+                        messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
                         print("  [Search results → re-calling]")
 
                 if silence_detected:
@@ -408,8 +407,8 @@ class ThinkPipeline:
                         print("  [Retry: no think() call]")
                         messages.append({
                             "role": "system",
-                            "content": "ОШИБКА: Ты не вызвала функцию think(). Ты ОБЯЗАНА вызвать think() в каждом ответе. "
-                                       "Пожалуйста, перегенерируй ответ и обязательно вызови think() с мыслями и действиями."
+                            "content": "ERROR: You did not call the think() function. You MUST call think() in every response. "
+                                       "Please regenerate the response and make sure to call think() with your thoughts and actions."
                         })
                         continue
                     else:
@@ -421,9 +420,9 @@ class ThinkPipeline:
                         print(f"  [Retry: called {first_tool.function.name} instead of think]")
                         messages.append({
                             "role": "system",
-                            "content": f"ОШИБКА: Ты вызвала функцию '{first_tool.function.name}' вместо 'think'. "
-                                       "Ты ОБЯЗАНА использовать функцию think() в каждом ответе. "
-                                       "Пожалуйста, перегенерируй ответ и обязательно вызови think()."
+                            "content": f"ERROR: You called function '{first_tool.function.name}' instead of 'think'. "
+                                       "You MUST use the 'think()' function in every response. "
+                                       "Please regenerate the response and make sure to call 'think()' with your thoughts and actions."
                         })
                         continue
                     else:
@@ -454,8 +453,8 @@ class ThinkPipeline:
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
-                        context_addon = executed.get("context_addon", "[Ничего не найдено]")
-                        messages.append({"role": "system", "content": f"Результаты поиска в памяти:\n{context_addon}"})
+                        context_addon = executed.get("context_addon", "[No results found]")
+                        messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
                         yield {"type": "search_result", "content": context_addon}
                         print("  [Search results → re-calling]")
 

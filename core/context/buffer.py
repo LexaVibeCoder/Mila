@@ -272,12 +272,12 @@ def get_raw_content_for_llm(chat_id: str, limit: int = None) -> str:
 
     if summaries:
         summary_texts = "\n\n".join(s["content"] for s in summaries)
-        parts.append(f"[Сводка предыдущего разговора:]\n{summary_texts}")
+        parts.append(f"[summary of previous conversation:]\n{summary_texts}")
 
     if messages:
         msg_texts = []
         for m in messages:
             msg_texts.append(m["content"])
-        parts.append(f"[Последние сообщения:]\n" + "\n".join(msg_texts))
+        parts.append(f"[latest messages:]\n" + "\n".join(msg_texts))
 
     return "\n\n".join(parts)

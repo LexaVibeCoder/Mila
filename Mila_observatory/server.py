@@ -50,7 +50,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="Mila Observatory",
-        description="Панель управления и наблюдения за агентом Мила",
+        description="Monitor and control the Mila bot.",
         version="1.0.0",
         lifespan=lifespan,
     )

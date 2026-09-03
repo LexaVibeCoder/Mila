@@ -15,8 +15,8 @@ DIARY_TABLE = "diary_entries"
 DIARY_CATEGORIES = ("day_entries", "reflection_entries")
 
 DIARY_CATEGORY_LABELS = {
-    "day_entries": "События дня",
-    "reflection_entries": "Мысли и ощущения",
+    "day_entries": "Day Events",
+    "reflection_entries": "Thoughts and Feelings",
 }
 
 
@@ -81,7 +81,7 @@ def _sync_to_daily_file():
     date_str = _get_today_date_str()
     filepath = _daily_filepath(date_str)
 
-    lines = [f"# Личный дневник — {date_str}", ""]
+    lines = [f"# Personal Diary — {date_str}", ""]
     for category in DIARY_CATEGORIES:
         cat_entries = [e for e in entries if e.get("category") == category]
         if not cat_entries:
@@ -91,7 +91,7 @@ def _sync_to_daily_file():
         lines.append("")
         for entry in cat_entries:
             created = entry.get("created_at", "")[:16]
-            lines.append(f"## Запись #{entry['entry_number']} — {created} (ID: {entry['id']})")
+            lines.append(f"## Entry #{entry['entry_number']} — {created} (ID: {entry['id']})")
             lines.append("")
             lines.append(entry["content_md"])
             lines.append("")
@@ -299,7 +299,7 @@ def get_today_diary_context(max_entries: int = 30) -> str:
         return ""
 
     return f"""
-[Твой личный дневник за сегодня. У каждой записи есть ID — используй update_diary, чтобы обновить существующую запись:]
+[Your personal diary for today. Each entry has an ID — use update_diary to update an existing entry:]
 ---
 {chr(10).join(blocks)}
 ---

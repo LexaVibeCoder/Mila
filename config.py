@@ -17,7 +17,6 @@ def normalize_api_base(url: str) -> str:
     parsed = urlparse(url)
     path = parsed.path.rstrip("/")
     if not path.endswith("/v1"):
-        # Add /v1 to the path
         new_path = path + "/v1" if path else "/v1"
         parsed = parsed._replace(path=new_path)
     return urlunparse(parsed)
@@ -26,7 +25,7 @@ class Settings(BaseSettings):
     # Telegram
     API_ID: int
     API_HASH: str
-    PHONE_NUMBER: str = ""  # Номер телефона для авторизации Pyrogram (+7...)
+    PHONE_NUMBER: str = ""  # Phone number for auth
     DEVICE_MODEL: str = "PC 64bit"
     SYSTEM_VERSION: str = "Windows 11"
     APP_VERSION: str = "5.0.1"
@@ -46,7 +45,7 @@ class Settings(BaseSettings):
     EMBED_MODEL: str
     EMBED_DIM: int = 384  # Vector dimension (nomic-embed-text=384, text-embedding-3-small=1536, etc.)
 
-    # CLIP & Moondream локальные
+    # CLIP & Moondream local. Did't use yet
     CLIP_MODEL_PATH: str = "models/clip-vit-base-patch32"
     MOONDREAM_MODEL_PATH: str = "models/moondream-2b"
 

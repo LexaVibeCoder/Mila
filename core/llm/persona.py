@@ -1,5 +1,3 @@
-# core/llm/persona.py
-
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from config import settings

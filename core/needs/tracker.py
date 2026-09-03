@@ -14,7 +14,6 @@ STATE_AGENT_DIR = os.path.join(
 )
 MODEL_PATH = os.path.join(STATE_AGENT_DIR, "state_agent.pt")
 
-# Константы, не требующие torch
 ACTIONS = ["wait", "sleep", "write_to_user", "plan_day"]
 NUM_FEATURES = 6
 
@@ -27,12 +26,12 @@ class NeedsTracker:
         self._model_loaded = False
         self._load_error = None
 
-        # Кэш get_needs
+        #  cache for get_needs
         self._cached_needs = None
         self._cache_time = 0.0
         self._cache_ttl = 2.0
 
-        # Офсеты от действий LLM (apply_action_effect)
+        # LLM offsets (apply_action_effect)
         self._fatigue_offset = 0.0
         self._need_social_offset = 0.0
         self._boredom_offset = 0.0
@@ -85,24 +84,24 @@ class NeedsTracker:
 
         def _label(name: str, val: float) -> str:
             if val > 0.7:
-                return f"{name}: высокая"
+                return f"{name}: high"
             elif val > 0.4:
-                return f"{name}: средняя"
+                return f"{name}: medium"
             else:
-                return f"{name}: низкая"
+                return f"{name}: low"
 
         lines = [
-            f"• {_label('Усталость', needs['fatigue'])} ({needs['fatigue']:.2f})",
-            f"• {_label('Потребность в общении', needs['need_social'])} ({needs['need_social']:.2f})",
-            f"• {_label('Скука', needs['boredom'])} ({needs['boredom']:.2f})",
+            f"• {_label('Fatigue', needs['fatigue'])} ({needs['fatigue']:.2f})",
+            f"• {_label('Need for Social Interaction', needs['need_social'])} ({needs['need_social']:.2f})",
+            f"• {_label('Boredom', needs['boredom'])} ({needs['boredom']:.2f})",
         ]
         if needs["fatigue"] > 0.7:
             lines.append("")
-            lines.append("Ты устала. Если нет сил или нечего сказать — можно промолчать (silence).")
+            lines.append("You are tired. If you don't have the energy or nothing to say — you can remain silent (silence).")
         if needs["need_social"] > 0.7:
-            lines.append("Тебе хочется общения. Если есть что сказать — напиши человеку.")
+            lines.append("You want social interaction. If you have something to say — write to someone.")
         if needs["boredom"] > 0.7:
-            lines.append("Тебе скучно. Может, стоит написать что-то или покопаться в памяти.")
+            lines.append("You are bored. Maybe you should write something or dig into your memory.")
 
         return "\n".join(lines)
 
@@ -137,7 +136,7 @@ class NeedsTracker:
         need_social = self._compute_need_social(current_hour, seconds_since_last_msg)
         boredom = self._compute_boredom(current_hour, seconds_since_last_msg)
 
-        # Применяем офсеты от действий LLM
+        # Apply LLM action offsets
         fatigue = max(0.05, min(1.0, fatigue + self._fatigue_offset))
         need_social = max(0.05, min(1.0, need_social + self._need_social_offset))
         boredom = max(0.05, min(1.0, boredom + self._boredom_offset))

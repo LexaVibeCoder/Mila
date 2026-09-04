@@ -14,6 +14,9 @@ const styles: Record<string, React.CSSProperties> = {
   btnSecondary: { padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' },
   resultBox: { background: 'var(--bg-secondary)', borderRadius: '8px', padding: '12px', marginTop: '12px', fontSize: '13px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', maxHeight: '300px', overflow: 'auto' },
   row: { display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '12px' },
+  toggleRow: { display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '12px', marginTop: '4px' },
+  toggle: { position: 'relative', width: '44px', height: '24px', borderRadius: '12px', border: '1px solid var(--border)', cursor: 'pointer', transition: 'background 0.15s', flexShrink: 0 },
+  toggleHint: { fontSize: '12px', color: 'var(--text-secondary)' },
 };
 
 export default function ModelControl() {
@@ -35,12 +38,14 @@ export default function ModelControl() {
         api_base: String(m.api_base || ''),
         temperature: String(m.temperature ?? ''),
         max_tokens: String(m.max_tokens ?? ''),
+        tool_choice: String(m.tool_choice || 'required'),
       });
       setNightForm({
         model: String(n.model || ''),
         api_base: String(n.api_base || ''),
         temperature: String(n.temperature ?? ''),
         max_tokens: String(n.max_tokens ?? ''),
+        tool_choice: String(n.tool_choice || 'required'),
       });
     });
   }, []);
@@ -52,6 +57,7 @@ export default function ModelControl() {
       if (mainForm.api_base) params.api_base = mainForm.api_base;
       if (mainForm.temperature) params.temperature = parseFloat(mainForm.temperature);
       if (mainForm.max_tokens) params.max_tokens = parseInt(mainForm.max_tokens);
+      if (mainForm.tool_choice) params.tool_choice = mainForm.tool_choice;
       await updateMainModel(params);
       setMsg('Main LLM updated');
     } catch (e: unknown) { setMsg(`Error: ${e instanceof Error ? e.message : e}`); }
@@ -64,6 +70,7 @@ export default function ModelControl() {
       if (nightForm.api_base) params.api_base = nightForm.api_base;
       if (nightForm.temperature) params.temperature = parseFloat(nightForm.temperature);
       if (nightForm.max_tokens) params.max_tokens = parseInt(nightForm.max_tokens);
+      if (nightForm.tool_choice) params.tool_choice = nightForm.tool_choice;
       await updateNightModel(params);
       setMsg('Night LLM updated');
     } catch (e: unknown) { setMsg(`Error: ${e instanceof Error ? e.message : e}`); }
@@ -77,6 +84,46 @@ export default function ModelControl() {
       setTestResult(r);
     } catch (e: unknown) { setMsg(`Test error: ${e instanceof Error ? e.message : e}`); }
     setTestLoading(false);
+  };
+
+  const renderToolChoiceToggle = (
+    value: string,
+    onChange: (v: string) => void,
+  ) => {
+    const isRequired = (value || 'required') === 'required';
+    return (
+      <div style={styles.toggleRow}>
+        <div
+          style={{
+            ...styles.toggle,
+            background: isRequired ? 'var(--accent)' : 'var(--bg-secondary)',
+          }}
+          onClick={() => onChange(isRequired ? 'auto' : 'required')}
+          title={isRequired ? 'tool_choice=required — модель обязана вызвать think()' : 'tool_choice=auto — модель сама решает вызывать ли think()'}
+        >
+          <div style={{
+            position: 'absolute',
+            top: '2px',
+            left: isRequired ? '22px' : '2px',
+            width: '18px',
+            height: '18px',
+            borderRadius: '50%',
+            background: '#fff',
+            transition: 'left 0.15s',
+          }} />
+        </div>
+        <div>
+          <div style={{ fontSize: '13px', color: 'var(--text-primary)', fontWeight: 600 }}>
+            Принудительный вызов think() (tool_choice={isRequired ? 'required' : 'auto'})
+          </div>
+          <div style={styles.toggleHint}>
+            {isRequired
+              ? 'Вкл: модель обязана вызвать think(). Некоторые модели падают с ошибкой — тогда выключите.'
+              : 'Выкл (auto): модель сама решает. Если перестала вызывать think() — включите обратно.'}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -104,6 +151,7 @@ export default function ModelControl() {
             <input style={styles.input} type="number" step="100" min="100" max="32000" value={mainForm.max_tokens || ''} onChange={e => setMainForm({...mainForm, max_tokens: e.target.value})} />
           </div>
         </div>
+        {renderToolChoiceToggle(mainForm.tool_choice || 'required', v => setMainForm({...mainForm, tool_choice: v}))}
         <button style={styles.btn} onClick={saveMain}>Apply Changes</button>
       </div>
 
@@ -127,6 +175,7 @@ export default function ModelControl() {
             <input style={styles.input} type="number" step="100" min="100" max="32000" value={nightForm.max_tokens || ''} onChange={e => setNightForm({...nightForm, max_tokens: e.target.value})} />
           </div>
         </div>
+        {renderToolChoiceToggle(nightForm.tool_choice || 'required', v => setNightForm({...nightForm, tool_choice: v}))}
         <button style={styles.btn} onClick={saveNight}>Apply Changes</button>
       </div>
 

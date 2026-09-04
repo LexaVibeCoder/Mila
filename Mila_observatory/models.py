@@ -41,6 +41,7 @@ class ModelParams(BaseModel):
     top_p: Optional[float] = None
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
+    tool_choice: Optional[str] = Field(default=None, pattern="^(required|auto|none)$")
 
 
 class ModelResponse(BaseModel):

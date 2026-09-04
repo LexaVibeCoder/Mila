@@ -57,6 +57,7 @@ class LLMManager:
             "top_p": None,
             "frequency_penalty": None,
             "presence_penalty": None,
+            "tool_choice": runtime_config.get("llm.tool_choice", "required"),
         }
 
     # ─── Main LLM ────────────────────────────────────────────
@@ -79,6 +80,7 @@ class LLMManager:
             "api_key": "",
             "temperature": runtime_config.get("night_llm.temperature"),
             "max_tokens": runtime_config.get("night_llm.max_tokens"),
+            "tool_choice": runtime_config.get("night_llm.tool_choice", "required"),
         }
         # Don't leak full key; show masked prefix like main params do.
         full_key = runtime_config.get("night_llm.api_key")
@@ -90,7 +92,8 @@ class LLMManager:
         """Reconfigure night LLM (persisted to runtime config; picked up by
         night worker on next run via auto-reload — no restart needed)."""
         valid_fields = {"model", "api_base", "api_key", "temperature",
-                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty"}
+                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
+                       "tool_choice"}
         for key, value in params.items():
             if key in valid_fields:
                 runtime_config.set(f"night_llm.{key}", value)
@@ -98,17 +101,19 @@ class LLMManager:
     def configure_main(self, params: Dict[str, Any]) -> None:
         """Reconfigure main LLM client with new parameters."""
         valid_fields = {"model", "api_base", "api_key", "temperature",
-                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty"}
+                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
+                       "tool_choice"}
 
         # Store in runtime config
         for key, value in params.items():
             if key in valid_fields:
                 runtime_config.set(f"llm.{key}", value)
 
-        # Apply to client
+        # Apply to client (tool_choice is runtime-only, not an LLMClient field)
         self._apply_runtime_overrides(self._main_client, "llm")
         self._update_params_from_runtime("llm", self._main_params)
-        self._main_client.reconfigure(**params)
+        client_params = {k: v for k, v in params.items() if k != "tool_choice"}
+        self._main_client.reconfigure(**client_params)
 
     # ─── Test Query ──────────────────────────────────────────
 

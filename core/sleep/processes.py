@@ -33,6 +33,16 @@ MAX_VERIFICATION_RETRIES = 3
 SUMMARIZE_MIN_MESSAGES = 10
 
 
+def _get_night_tool_choice() -> str:
+    """Tool choice for night workers. Some models fail with 'required',
+    so it is configurable via Observatory (/model page)."""
+    try:
+        from Mila_observatory.runtime import runtime_config
+        return runtime_config.get("night_llm.tool_choice", "required") or "required"
+    except Exception:
+        return "required"
+
+
 def _create_night_llm() -> LLMClient:
     try:
         from Mila_observatory.runtime import runtime_config
@@ -372,7 +382,7 @@ Your task is to analyze today's diary entries and decide what should be added to
                 messages=generation_messages,
                 system_prompt=system_prompt,
                 tools=tools,
-                tool_choice="required",
+                tool_choice=_get_night_tool_choice(),
                 max_tokens=4096,
                 temperature=0.3
             )
@@ -443,7 +453,7 @@ If there are issues, call reject_changes with a detailed explanation.
                 messages=[{"role": "user", "content": "Verify the changes made to eternal memory."}],
                 system_prompt=verify_prompt,
                 tools=get_verification_tools(),
-                tool_choice="required",
+                tool_choice=_get_night_tool_choice(),
                 max_tokens=2048,
                 temperature=0.1
             )
@@ -489,7 +499,7 @@ async def _retry_generation(llm, messages, system_prompt, tools, executor, max_i
                 messages=messages,
                 system_prompt=system_prompt,
                 tools=tools,
-                tool_choice="required",
+                tool_choice=_get_night_tool_choice(),
                 max_tokens=4096,
                 temperature=0.3
             )
@@ -588,7 +598,7 @@ Your task is to analyze dialog messages and create a concise summary.
                     messages=gen_messages,
                     system_prompt=system_prompt,
                     tools=tools,
-                    tool_choice="required",
+                    tool_choice=_get_night_tool_choice(),
                     max_tokens=2048,
                     temperature=0.3
                 )
@@ -633,7 +643,7 @@ Call approve_changes if good, reject_changes if issues found.
                     messages=[{"role": "user", "content": f"Verify summary for dialog {chat_id[:12]}..."}],
                     system_prompt=verify_prompt,
                     tools=get_verification_tools(),
-                    tool_choice="required",
+                    tool_choice=_get_night_tool_choice(),
                     max_tokens=1024,
                     temperature=0.1
                 )
@@ -747,7 +757,7 @@ Your task is to extract long-term facts about users from dialog messages.
                     messages=gen_messages,
                     system_prompt=system_prompt,
                     tools=tools,
-                    tool_choice="required",
+                    tool_choice=_get_night_tool_choice(),
                     max_tokens=4096,
                     temperature=0.3
                 )
@@ -798,7 +808,7 @@ Call approve_changes if good, reject_changes if issues found.
                     messages=[{"role": "user", "content": f"Verify facts extracted from dialog {chat_id[:12]}..."}],
                     system_prompt=verify_prompt,
                     tools=get_verification_tools(),
-                    tool_choice="required",
+                    tool_choice=_get_night_tool_choice(),
                     max_tokens=1024,
                     temperature=0.1
                 )
@@ -830,7 +840,7 @@ Call approve_changes if good, reject_changes if issues found.
                                     messages=gen_messages,
                                     system_prompt=system_prompt,
                                     tools=tools,
-                                    tool_choice="required",
+                                    tool_choice=_get_night_tool_choice(),
                                     max_tokens=4096,
                                     temperature=0.3
                                 )

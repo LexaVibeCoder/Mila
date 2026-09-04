@@ -51,6 +51,7 @@ export interface ModelParams {
   top_p?: number;
   frequency_penalty?: number;
   presence_penalty?: number;
+  tool_choice?: 'required' | 'auto' | 'none';
 }
 
 export interface ModelData {

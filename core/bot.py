@@ -1,6 +1,5 @@
 import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from pytdbot import Client, types
 from config import settings
 from core.context.buffer import (
     push_summary, get_context_within_token_limit,
@@ -16,19 +15,23 @@ from core.sleep.manager import (
     start_auto_sleep_scheduler
 )
 from core.queue import MessageCoordinate
+from core.tg_adapter import is_text_message, is_private_chat
+from core.tg_auth import register_auth_handlers
 
 
 class MilaUserbot:
     def __init__(self):
         self.app = Client(
-            "mila_session",
             api_id=settings.API_ID,
             api_hash=settings.API_HASH,
-            phone_number=settings.PHONE_NUMBER or None,
+            files_directory=settings.TD_FILES_DIRECTORY,
+            database_encryption_key=settings.TD_DATABASE_ENCRYPTION_KEY,
             device_model=settings.DEVICE_MODEL,
-            system_version=settings.SYSTEM_VERSION,
-            app_version=settings.APP_VERSION,
-            workdir="."
+            use_message_database=True,
+            use_chat_info_database=True,
+            use_file_database=True,
+            td_verbosity=settings.TD_VERBOSITY,
+            user_bot=True,
         )
         self.emb = EmbeddingClient()
         self.text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
@@ -38,15 +41,49 @@ class MilaUserbot:
         self.summarizer_llm = None  # lazy init
         # Per-chat batching / debounce coordinator
         self.messages = MessageCoordinate(self)
+        self._ready = asyncio.Event()
+
+        register_auth_handlers(self.app, phone_hint=settings.PHONE_NUMBER or "")
+
+        @self.app.on_updateAuthorizationState()
+        async def _mark_ready(c: Client, update: types.UpdateAuthorizationState):
+            if isinstance(
+                update.authorization_state, types.AuthorizationStateReady
+            ):
+                self._ready.set()
+
+        @self.app.on_message()
+        async def _on_td_message(c: Client, message: types.Message):
+            # Skip our own outgoing messages to avoid self-loops.
+            if message.is_outgoing:
+                return
+            # Replaces pyrogram `filters.text & filters.private`.
+            if not is_text_message(message):
+                return
+            if not await is_private_chat(c, message.chat_id):
+                return
+            await self.handle_text_message(c, message)
 
     async def start(self):
         # Crash recovery: check if previous sleep was interrupted
         await recover_from_crash()
-        
-        await self.app.start()
-        self.me = await self.app.get_me()
-        print(f"Bot started as {self.me.first_name} (@{self.me.username})")
-        
+
+        await self.app.start(wait_login=False)
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "TDLib login timed out. Run 'python create_session.py' once "
+                "to authorize, then restart."
+            )
+        self.me = await self.app.getMe()
+        if isinstance(self.me, types.Error):
+            raise RuntimeError(f"TDLib getMe failed: {self.me.message}")
+        username = ""
+        if self.me.usernames and self.me.usernames.editable_username:
+            username = f" (@{self.me.usernames.editable_username})"
+        print(f"Bot started as {self.me.first_name}{username}")
+
         # Initialize pipeline after getting bot identity
         self.pipeline = ThinkPipeline(
             text_memory=self.text_memory,
@@ -56,15 +93,8 @@ class MilaUserbot:
             my_user_id=str(self.me.id)
         )
 
-        from pyrogram.handlers import MessageHandler
-
-        self.app.add_handler(
-            MessageHandler(self.handle_text_message, filters.text & filters.private),
-            group=0
-        )
-
         asyncio.create_task(self.periodic_save())
-        
+
         # Start auto-sleep scheduler
         start_auto_sleep_scheduler()
 
@@ -86,7 +116,7 @@ class MilaUserbot:
         """
         If context buffer has too many message tokens, compress the oldest ones into a summary.
         Called BEFORE each new message processing to keep context within limits.
-        
+
         Uses token-based counting: only message-type entries count toward the limit.
         Summaries are excluded from the limit (they're already compressed).
         """
@@ -116,9 +146,9 @@ class MilaUserbot:
         await self._ensure_summarizer()
         try:
             summary_prompt = (
-                "Сократи следующий диалог до краткой сводки (2-3 предложения). "
-                "Сохрани только факты: о чём говорили, ключевые темы. "
-                "Не добавляй интерпретаций.\n\n"
+                "Summarize the following conversation into a brief summary (2-3 sentences). "
+                "Only include facts: what was discussed, key topics. "
+                "Do not add interpretations.\n\n"
                 f"{texts_to_summarize}"
             )
             response = await self.summarizer_llm.generate(
@@ -128,14 +158,14 @@ class MilaUserbot:
             )
             summary_text = response.get("thoughts", "").strip()
             if not summary_text:
-                summary_text = "[Сводка предыдущего разговора]"
+                summary_text = "[Summary previous conversation]"
         except Exception as e:
             print(f"[Context Compression Error] {e}")
-            summary_text = "[Сводка предыдущего разговора]"
+            summary_text = "[Summary previous conversation]"
 
         # Push the summary as a context buffer entry
         push_summary(chat_id, summary_text)
-        
+
         # Log token-based stats
         remaining_tokens = get_total_message_tokens(chat_id)
         print(f"[Context Compressed] {len(oldest_messages)} messages (~{chunk_tokens} tokens) → summary. "
@@ -145,23 +175,23 @@ class MilaUserbot:
     def _build_histories(self, chat_id: str) -> tuple[list[dict], list[dict]]:
         """
         Build two separate histories from the CONTEXT BUFFER (not raw chunks):
-        
+
         1. user_visible_history — only messages that were actually sent to Telegram
         2. agent_internal_history — IDENTICAL to user_visible_history
-        
+
         The context buffer contains only messages that are part of the active
         context window, plus summaries of older conversation segments.
-        
+
         Uses token-based limit: only messages within CONTEXT_MAX_TOKENS are included.
         Summaries are always included (they're already compressed).
-        
+
         Silent (unsent) assistant entries (content="") are SKIPPED entirely.
         """
         context_entries = get_context_within_token_limit(chat_id, settings.CONTEXT_MAX_TOKENS)
-        
+
         user_visible = []
         agent_internal = []
-        
+
         for entry in context_entries:
             content_raw = entry.get("content", "") or ""
             ts = entry.get("created_at", "")
@@ -171,7 +201,7 @@ class MilaUserbot:
 
             if entry["type"] == "summary":
                 # Summary entries are injected as a system-like context block
-                summary_block = f"[Сводка предыдущего разговора:]\n{content_raw}"
+                summary_block = f"[Summary previous conversation:]\n{content_raw}"
                 user_visible.append({
                     "role": "system",
                     "content": summary_block
@@ -189,7 +219,7 @@ class MilaUserbot:
                     "role": "assistant" if entry.get("role") == "assistant" else "user",
                     "content": f"{time_prefix}{content_raw}"
                 })
-        
+
         return user_visible, agent_internal
 
     def _resolve_roles_in_histories(self, histories: list[dict], chat_id: str) -> list[dict]:
@@ -199,7 +229,7 @@ class MilaUserbot:
         """
         return histories
 
-    async def handle_text_message(self, client: Client, message: Message):
+    async def handle_text_message(self, client: Client, message: types.Message):
         """Thin delegator — the batching/processing lives in self.messages."""
         await self.messages.handle(client, message)
 

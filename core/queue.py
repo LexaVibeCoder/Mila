@@ -15,8 +15,7 @@ message, each chat gets a single worker that:
 import asyncio
 import random
 
-from pyrogram import enums
-from pyrogram.types import Message
+from pytdbot import types
 
 from config import settings
 from core.db import (
@@ -24,6 +23,7 @@ from core.db import (
 )
 from core.context.buffer import push_message
 from core.needs.tracker import get_tracker as get_needs_tracker
+from core.tg_adapter import normalize_message, send_text, send_typing
 
 
 class MessageCoordinate:
@@ -42,14 +42,15 @@ class MessageCoordinate:
     # Public entry point, called from the message handler
     # ------------------------------------------------------------------
 
-    async def handle(self, client, message: Message):
-        user_id = str(message.from_user.id)
-        chat_id = str(message.chat.id)
-        text = message.text
+    async def handle(self, client, message: types.Message):
+        nm = await normalize_message(client, message)
+        user_id = nm.user_id
+        chat_id = nm.chat_id
+        text = nm.text
 
         # Always save to canonical storage immediately.
-        ensure_user_exists(user_id, message.from_user.first_name or "Unknown")
-        ensure_chat_exists(chat_id, message.chat.first_name or "Личный чат")
+        ensure_user_exists(user_id, nm.sender_name)
+        ensure_chat_exists(chat_id, nm.chat_name)
         chunk_id = add_chunk(chat_id, user_id, text, token_count=0, type='raw')
 
         # If Mila is sleeping — just queue the message, no batching.
@@ -127,10 +128,9 @@ class MessageCoordinate:
         """
         Best-effort extra wait while the user keeps typing.
 
-        Telegram/Pyrogram do not expose the peer's typing flag via the public
-        API, so we approximate with a bounded wait that stops early as soon as a
-        new message actually arrives. Swap this body out if a raw-update typing
-        source becomes available.
+        TDLib does not expose a reliable peer-typing poll here, so we
+        approximate with a bounded wait that stops early as soon as a
+        new message actually arrives.
         """
         event = self._events[chat_id]
         waited = 0.0
@@ -178,9 +178,10 @@ class MessageCoordinate:
         # ── Typing indicator — runs only while the pipeline is processing ──
         stop_typing = asyncio.Event()
         async def typing_loop():
+            chat_int = int(chat_id)
             while not stop_typing.is_set():
                 try:
-                    await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
+                    await send_typing(client, chat_int)
                 except Exception:
                     pass
                 await asyncio.sleep(4)
@@ -218,21 +219,25 @@ class MessageCoordinate:
                 elif etype == "action":
                     action = gen_event.get("action", {})
                     if action.get("type") == "send_message":
-                        send_text = action.get("text", "").strip()
+                        send_text_content = action.get("text", "").strip()
                         target_chat_id = action.get("chat_id", chat_id)
-                        if send_text:
-                            print(f"\n[SENDING] {send_text[:100]}...")
+                        if send_text_content:
+                            print(f"\n[SENDING] {send_text_content[:100]}...")
                             await asyncio.sleep(random.uniform(0.3, 1.0))
                             try:
-                                await client.send_message(int(target_chat_id), send_text)
+                                await send_text(
+                                    client,
+                                    int(target_chat_id),
+                                    send_text_content,
+                                )
                                 add_chunk(
                                     target_chat_id, str(bot.me.id),
-                                    content=send_text,
-                                    llm_full_response=full_response or send_text,
+                                    content=send_text_content,
+                                    llm_full_response=full_response or send_text_content,
                                     token_count=0,
                                     type='raw'
                                 )
-                                push_message(target_chat_id, send_text, source_chunk_id=None, role="assistant")
+                                push_message(target_chat_id, send_text_content, source_chunk_id=None, role="assistant")
                                 sent_any = True
                                 print("[✓] Message sent to Telegram")
                             except Exception as e:
@@ -263,7 +268,7 @@ class MessageCoordinate:
                     print("\n[⚠️ FALLBACK] No send_message — auto-sending...")
                     await asyncio.sleep(random.uniform(0.5, 2.0))
                     try:
-                        await client.send_message(int(chat_id), stripped)
+                        await send_text(client, int(chat_id), stripped)
                         add_chunk(chat_id, str(bot.me.id), content=stripped,
                                   llm_full_response=stripped, token_count=0, type='raw')
                         push_message(chat_id, stripped, source_chunk_id=None, role="assistant")

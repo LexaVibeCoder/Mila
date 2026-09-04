@@ -8,26 +8,26 @@
 └──────────┬─────────────────────────────────────┬────────────┘
            │                                     │
            ▼                                     ▼
-┌──────────────────────┐          ┌──────────────────────────┐
-│   MilaUserbot (bot)  │          │  Mila Observatory (web)  │
-│   core/bot.py         │          │  Mila_observatory/server │
-│                      │          │                          │
-│  ┌─────────────────┐ │          │  ┌────────────────────┐  │
-│  │ ThinkPipeline    │ │          │  │ FastAPI + React    │  │
-│  │ core/pipeline.py │ │◄────────►│  │ 9 API routers      │  │
-│  └────────┬────────┘ │          │  └────────────────────┘  │
-│           │          │          └──────────────────────────┘
+┌───────────────────────────┐          ┌──────────────────────────┐
+│   MilaUserbot (bot)       │          │  Mila Observatory (web)  │
+│   core/bot.py             │          │  Mila_observatory/server │
+│                           │          │                          │
+│  ┌─────────────────┐      │          │  ┌────────────────────┐  │
+│  │ ThinkPipeline   │      │          │  │ FastAPI + React    │  │
+│  │ core/pipeline.py│      │◄────────►│  │ 9 API routers      │  │
+│  └────────┬────────┘      │          │  └────────────────────┘  │
+│           │               │          └──────────────────────────┘
 │  ┌──────────▼───────────┐ │
-│  │      ToolExecutor     │ │
-│  │  core/tools/executor.py  │ │
-│  └──┬────────┬────────┬──┘ │
-│     │        │        │    │
-│     ▼        ▼        ▼    │
+│  │      ToolExecutor    │ │
+│  │core/tools/executor.py│ │
+│  └──┬────────┬───────┬──┘ │
+│     │        │       │    │
+│     ▼        ▼       ▼    │
 │  ┌───┐ ┌────┐ ┌───────┐   │
 │  │   │ │    │ │       │   │
-│  │FAISS│SQLite│ Diary  │   │
+│  │FAISS│SQLite│ Diary │   │
 │  └───┘ └────┘ └───────┘   │
-└──────────────────────┘
+└───────────────────────────┘
 ```
 
 ## Компоненты
@@ -36,7 +36,7 @@
 
 | Модуль | Назначение |
 |--------|------------|
-| `bot.py` | `MilaUserbot` — Pyrogram-клиент, хендлер сообщений, сжатие контекста |
+| `bot.py` | `MilaUserbot` — pytdbot/TDLib-клиент, хендлер сообщений, сжатие контекста |
 | `pipeline.py` | `ThinkPipeline` — цикл рассуждения: LLM → think() → экзекуция тулзов |
 | `llm/client.py` | `LLMClient` — OpenAI-совместимая обёртка с реконфигурацией на ходу |
 | `tools/executor.py` | `ToolExecutor` — исполнение действий (send_message, search_memory, etc.) |

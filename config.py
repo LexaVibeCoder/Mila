@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     SYSTEM_VERSION: str = "Windows 11"
     APP_VERSION: str = "5.0.1"
 
+    # TDLib (pytdbot) storage.
+    # files_directory holds both the TDLib database and downloaded files.
+    # It replaces the old Pyrogram *.session file.
+    TD_FILES_DIRECTORY: str = "data/tdlib"
+    TD_DATABASE_ENCRYPTION_KEY: str = "mila-tdlib-key-change-me"
+    TD_VERBOSITY: int = 2
+
     # LLM Models
     LLM_API_BASE: str
     LLM_API_KEY: str

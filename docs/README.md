@@ -23,7 +23,7 @@ Mila — Telegram-юзербот с LLM-рассуждением, векторн
 ## Быстрый старт
 
 ```bash
-python create_session.py   # один раз: создать сессию Pyrogram
+python create_session.py   # один раз: создать сессию TDLib (pytdbot)
 python main.py             # запуск бота
 python -m Mila_observatory.server  # запуск веб-панели (отдельно)
 ```

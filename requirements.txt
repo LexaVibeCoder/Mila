@@ -1,4 +1,4 @@
-pyrogram==2.0.106
+Pytdbot[tdjson]>=0.10.0
 openai>=1.30.0
 httpx>=0.27.0
 faiss-cpu>=1.8.0

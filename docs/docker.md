@@ -14,7 +14,6 @@ services:
       - mila_data:/app/data
       - mila_logs:/app/logs
       - ./models:/app/models:ro
-      - ./mila_session.session:/app/mila_session.session
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     restart: unless-stopped
@@ -74,7 +73,7 @@ CMD ["python", "main.py"]
 | `mila_data` | `/app/data` | SQLite БД, FAISS индекс, daily reports, runtime config |
 | `mila_logs` | `/app/logs` | Логи пайплайна, diary logs |
 | `./models` (bind) | `/app/models:ro` | AI модели (BGE-reranker, CLIP, etc.) read-only |
-| `./mila_session.session` (bind) | `/app/mila_session.session` | Pyrogram сессия |
+| `mila_data` | `/app/data/tdlib` | TDLib база pytdbot (внутри mila_data) |
 
 ## Запуск
 

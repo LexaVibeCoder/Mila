@@ -5,6 +5,8 @@ __pycache__/
 
 # Virtual environment
 venv/
+.start-venv/
+start/.venv-session/
 .env
 
 # Databases
@@ -27,6 +29,9 @@ logs/
 # IDE
 .vscode/
 
-#Telegram
+#Telegram (TDLib / pytdbot)
+data/tdlib/
+data/tdlib_test/
+tdlib.log
 *.session
 *.session-journal

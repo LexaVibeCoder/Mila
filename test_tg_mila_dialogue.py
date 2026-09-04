@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ТЕСТ: Твой аккаунт ↔ Мила (через Telegram)
+ТЕСТ: Твой аккаунт ↔ Мила (через Telegram, pytdbot/TDLib)
 """
 
 import asyncio
@@ -9,7 +9,7 @@ import sys
 import traceback
 import os
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -55,11 +55,13 @@ class Tester:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.name = "Пользователь"
         self.log_dir = None
-        self.SESSION = "mila_test"
+        self.FILES_DIRECTORY = "data/tdlib_test"
         self.PAUSE = 2
+        self._ready = asyncio.Event()
 
     async def connect(self):
-        from pyrogram import Client
+        from pytdbot import Client, types
+        from core.tg_auth import register_auth_handlers
 
         print("\n" + "=" * 50)
         phone = input("  Номер (+79123456789): ").strip()
@@ -67,58 +69,49 @@ class Tester:
             sys.exit(1)
 
         self.client = Client(
-            self.SESSION, api_id=settings.API_ID,
-            api_hash=settings.API_HASH, workdir="."
+            api_id=settings.API_ID,
+            api_hash=settings.API_HASH,
+            files_directory=self.FILES_DIRECTORY,
+            database_encryption_key=settings.TD_DATABASE_ENCRYPTION_KEY,
+            device_model=settings.DEVICE_MODEL,
+            td_verbosity=settings.TD_VERBOSITY,
+            user_bot=True,
         )
+        register_auth_handlers(self.client, phone_hint=phone)
 
-        # Сначала пробуем start() — он сам соединится, авторизуется (если есть сессия) и запустит обновления
+        @self.client.on_updateAuthorizationState()
+        async def _ready_handler(c: Client, update: types.UpdateAuthorizationState):
+            if isinstance(
+                update.authorization_state, types.AuthorizationStateReady
+            ):
+                self._ready.set()
+
+        await self.client.start(wait_login=False)
         try:
-            await self.client.start()
-            self.me = await self.client.get_me()
-            self.name = self.me.first_name or "Пользователь"
-            print(f"\n  ✓ Сессия есть: {self.name} (@{self.me.username})")
-            return
-        except Exception:
-            # Сессии нет, start() не смог — подключаемся вручную
-            pass
-
-        await self.client.connect()
-        try:
-            self.me = await self.client.get_me()
-            self.name = self.me.first_name or "Пользователь"
-            await self.client.initialize()
-            print(f"\n  ✓ Сессия активна: {self.name}")
-            return
-        except Exception:
-            pass  # Не авторизованы
-
-        sent = await self.client.send_code(phone)
-        code = input("  Код: ").strip()
-        if not code:
-            await self.client.disconnect()
+            await asyncio.wait_for(self._ready.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            print("  ✗ Login timed out.")
+            await self.client.stop()
             sys.exit(1)
 
-        try:
-            await self.client.sign_in(phone, sent.phone_code_hash, code)
-        except Exception as e:
-            if "PASSWORD" in str(e).upper() or "2FA" in str(e).upper():
-                pw = input("  Пароль 2FA: ")
-                await self.client.check_password(pw)
-            else:
-                raise
-
-        # Запускаем приём сообщений
-        await self.client.initialize()
-
-        self.me = await self.client.get_me()
+        self.me = await self.client.getMe()
+        if isinstance(self.me, types.Error):
+            print(f"  ✗ getMe failed: {self.me.message}")
+            await self.client.stop()
+            sys.exit(1)
         self.name = self.me.first_name or "Пользователь"
-        print(f"\n  ✓ Готов: {self.name} (@{self.me.username}) ID={self.me.id}")
-        print(f"  ✓ {self.SESSION}.session сохранён")
+        username = ""
+        if self.me.usernames and self.me.usernames.editable_username:
+            username = f" (@{self.me.usernames.editable_username})"
+        print(f"\n  ✓ Готов: {self.name}{username} ID={self.me.id}")
+        print(f"  ✓ TDLib dir: {self.FILES_DIRECTORY}/")
 
     async def resolve(self):
-        ident = input("\n  Получатель (@username, +79... или ID): ").strip()
+        from pytdbot import types
+
+        ident = input("\n  Получатель (@username или ID): ").strip()
         if not ident:
-            await self.client.disconnect()
+            await self.client.stop()
             sys.exit(1)
         self.target_raw = ident
 
@@ -126,39 +119,37 @@ class Tester:
             self.target_id = int(ident)
         else:
             clean = ident.lstrip('@')
-            try:
-                u = await self.client.get_users(clean)
-                self.target_id = u.id
-            except Exception:
-                from pyrogram.raw.functions.contacts import ResolvePhone
-                r = await self.client.invoke(ResolvePhone(phone=clean.replace("+", "")))
-                if r.users:
-                    self.target_id = r.users[0].id
-                else:
-                    print("  Не найден")
-                    await self.client.disconnect()
-                    sys.exit(1)
+            chat = await self.client.searchPublicChat(username=clean)
+            if isinstance(chat, types.Error):
+                print(f"  Не найден: {chat.message}")
+                print("  (TDLib-тестер резолвит только @username и numeric ID)")
+                await self.client.stop()
+                sys.exit(1)
+            self.target_id = chat.id
 
-        chat = await self.client.get_chat(self.target_id)
-        cn = getattr(chat, 'first_name', getattr(chat, 'title', 'Чат'))
-        print(f"  Цель: {cn} (ID={self.target_id})")
+        chat = await self.client.getChat(chat_id=self.target_id)
+        if isinstance(chat, types.Error):
+            print(f"  Не найден: {chat.message}")
+            await self.client.stop()
+            sys.exit(1)
+        print(f"  Цель: {chat.title} (ID={self.target_id})")
 
     async def on_msg(self, client, msg):
         try:
-            print(f"  [DEBUG] chat={msg.chat.id} from={msg.from_user.id if msg.from_user else '?'} "
-                  f"me={self.me.id if self.me else '?'} out={msg.outgoing} "
-                  f"text='{str(msg.text or msg.caption or '')[:80]}'")
+            print(f"  [DEBUG] chat={msg.chat_id} from={msg.from_id} "
+                  f"me={self.me.id if self.me else '?'} out={msg.is_outgoing} "
+                  f"text='{str(msg.text or '')[:80]}'")
         except Exception:
             pass
 
-        if msg.outgoing:
+        if msg.is_outgoing:
             return
-        if msg.from_user and self.me and msg.from_user.id == self.me.id:
+        if msg.from_id and self.me and msg.from_id == self.me.id:
             return
-        if msg.chat.id != self.target_id:
+        if msg.chat_id != self.target_id:
             return
 
-        text = (msg.text or msg.caption or "").strip()
+        text = (msg.text or "").strip()
         if not text:
             return
 
@@ -166,13 +157,18 @@ class Tester:
         print(f"\n  📩 {text[:120]}")
 
     async def run(self, rounds: int):
+        from pytdbot import types
+
         folder = input("\n  Папка логов: ").strip() or f"test_{datetime.now():%Y%m%d_%H%M%S}"
         self.log_dir = os.path.join(settings.LOG_DIR, folder)
         os.makedirs(self.log_dir, exist_ok=True)
 
-        from pyrogram import filters
-        from pyrogram.handlers import MessageHandler
-        self.client.add_handler(MessageHandler(self.on_msg, filters.private), group=0)
+        # Replaces pyrogram MessageHandler(..., filters.private):
+        # inner_object=True gives types.Message; private/text filtering
+        # is done inside on_msg + checks below.
+        self.client.add_handler(
+            "updateNewMessage", self.on_msg, inner_object=True
+        )
         print("  Обработчик → OK")
 
         llm = TesterLLM()
@@ -182,9 +178,16 @@ class Tester:
 
         turns = []
 
+        async def _send(text: str) -> None:
+            res = await self.client.sendTextMessage(
+                chat_id=self.target_id, text=text
+            )
+            if isinstance(res, types.Error):
+                raise RuntimeError(f"send failed: {res.code} {res.message}")
+
         # Раунд 1
         print(f"\n  РАУНД 1")
-        await self.client.send_message(self.target_id, "Привет, как дела?")
+        await _send("Привет, как дела?")
         self.history.append({"role": "user", "content": "Привет, как дела?"})
         print("  → Привет, как дела?")
 
@@ -205,7 +208,7 @@ class Tester:
 
             msg = await llm.gen(self.history, self.name)
             print(f"  {self.name}: {msg}")
-            await self.client.send_message(self.target_id, msg)
+            await _send(msg)
             self.history.append({"role": "user", "content": msg})
 
             try:
@@ -272,10 +275,10 @@ async def main():
 
     except KeyboardInterrupt:
         print("\n  ⚡ Прервано")
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
     finally:
-        if t.client and t.client.is_connected:
+        if t.client and getattr(t.client, "is_running", False):
             await t.stop()
 
 

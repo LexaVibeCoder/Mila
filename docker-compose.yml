@@ -10,6 +10,10 @@ services:
     container_name: mila-bot
     user: root
     restart: unless-stopped
+    # Keep stdin open so TDLib auth prompts can be answered via
+    # `docker attach mila-bot` (detach with Ctrl-P Ctrl-Q).
+    stdin_open: true
+    tty: true
     env_file:
       - .env
     volumes:
@@ -17,7 +21,6 @@ services:
       - mila_data:/app/data
       - mila_logs:/app/logs
       - ./models:/app/models:ro
-      - ./mila_session.session:/app/mila_session.session:Z
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     command: python main.py

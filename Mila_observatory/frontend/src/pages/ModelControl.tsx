@@ -28,8 +28,8 @@ export default function ModelControl() {
   useEffect(() => {
     getModelConfig().then(d => {
       setConfig(d);
-      const m = d.main as Record<string, unknown>;
-      const n = d.night as Record<string, unknown>;
+      const m = (d.main || {}) as Record<string, unknown>;
+      const n = (d.night || {}) as Record<string, unknown>;
       setMainForm({
         model: String(m.model || ''),
         api_base: String(m.api_base || ''),

@@ -45,6 +45,7 @@ class ModelParams(BaseModel):
 
 class ModelResponse(BaseModel):
     main: Dict[str, Any]
+    night: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TestQueryRequest(BaseModel):

@@ -71,6 +71,30 @@ class LLMManager:
         self._update_params_from_runtime("llm", self._main_params)
         return dict(self._main_params)
 
+    def get_night_params(self) -> Dict[str, Any]:
+        """Get current night LLM parameters (runtime config is source of truth)."""
+        night = {
+            "model": runtime_config.get("night_llm.model"),
+            "api_base": runtime_config.get("night_llm.api_base"),
+            "api_key": "",
+            "temperature": runtime_config.get("night_llm.temperature"),
+            "max_tokens": runtime_config.get("night_llm.max_tokens"),
+        }
+        # Don't leak full key; show masked prefix like main params do.
+        full_key = runtime_config.get("night_llm.api_key")
+        if full_key:
+            night["api_key"] = (full_key[:8] + "...") if len(full_key) > 8 else "..."
+        return night
+
+    def configure_night(self, params: Dict[str, Any]) -> None:
+        """Reconfigure night LLM (persisted to runtime config; picked up by
+        night worker on next run via auto-reload — no restart needed)."""
+        valid_fields = {"model", "api_base", "api_key", "temperature",
+                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty"}
+        for key, value in params.items():
+            if key in valid_fields:
+                runtime_config.set(f"night_llm.{key}", value)
+
     def configure_main(self, params: Dict[str, Any]) -> None:
         """Reconfigure main LLM client with new parameters."""
         valid_fields = {"model", "api_base", "api_key", "temperature",

@@ -30,10 +30,18 @@ RUNTIME_CONFIG_PATH = os.path.join(
 
 
 class RuntimeConfig:
-    """Thread-safe singleton runtime configuration."""
+    """Thread-safe singleton runtime configuration.
+
+    NOTE (docker): bot and observatory run in SEPARATE containers/processes,
+    each with its own in-memory copy. The JSON file is the bridge between
+    them (shared via bind mount). To make observatory changes visible to
+    the bot WITHOUT restart, every read auto-reloads from disk when the
+    file mtime changed, and every write re-reads the file first so it
+    doesn't clobber the other process's changes.
+    """
 
     _instance = None
-    _lock = threading.Lock()
+    _lock = threading.RLock()
 
     def __new__(cls):
         if cls._instance is None:
@@ -47,7 +55,8 @@ class RuntimeConfig:
         if self._initialized:
             return
         self._initialized = True
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._last_mtime: Optional[float] = None
 
         # Default values (None = will be seeded from config.py/.env on startup)
         self._config: Dict[str, Any] = {
@@ -133,16 +142,22 @@ class RuntimeConfig:
     def get(self, key: str, default: Any = None) -> Any:
         """Get a config value by dot-notation key: 'llm.model' or 'tools.search_memory'."""
         with self._lock:
+            self._maybe_auto_reload()
             return self._deep_get(self._config, key, default)
 
     def get_all(self) -> Dict[str, Any]:
         """Get a deep copy of the entire config."""
         with self._lock:
+            self._maybe_auto_reload()
             return deepcopy(self._config)
 
     def set(self, key: str, value: Any, updated_by: str = "observatory") -> bool:
         """Set a config value by dot-notation key. Returns True if changed."""
         with self._lock:
+            # Re-read the file first: the other container may have written
+            # newer values that aren't in our in-memory copy yet. Otherwise
+            # we'd overwrite them with stale data on save.
+            self._maybe_auto_reload()
             keys = key.split(".")
             ptr = self._config
             for k in keys[:-1]:
@@ -158,6 +173,7 @@ class RuntimeConfig:
     def update(self, updates: Dict[str, Any], prefix: str = "", updated_by: str = "observatory") -> bool:
         """Update multiple values at once. Keys can be dot-notation or nested dict."""
         with self._lock:
+            self._maybe_auto_reload()
             for key, value in updates.items():
                 full_key = f"{prefix}.{key}" if prefix else key
                 keys = full_key.split(".")
@@ -179,6 +195,19 @@ class RuntimeConfig:
 
     # ─── Persistence ─────────────────────────────────────────
 
+    def _maybe_auto_reload(self) -> None:
+        """Reload from disk if the file changed since last read.
+
+        Must be called with self._lock held (RLock, so re-entrant).
+        Stat failure (file missing) = keep in-memory copy.
+        """
+        try:
+            mtime = os.path.getmtime(RUNTIME_CONFIG_PATH)
+        except OSError:
+            return
+        if self._last_mtime is None or mtime != self._last_mtime:
+            self._load()
+
     def _load(self) -> bool:
         """Load config from JSON file. Merges with defaults."""
         try:
@@ -188,6 +217,10 @@ class RuntimeConfig:
                     saved = json.load(f)
                 # Deep merge saved into defaults
                 self._deep_merge(self._config, saved)
+                try:
+                    self._last_mtime = os.path.getmtime(RUNTIME_CONFIG_PATH)
+                except OSError:
+                    pass
                 return True
         except (json.JSONDecodeError, IOError) as e:
             print(f"[RuntimeConfig] Failed to load config: {e}")
@@ -199,6 +232,10 @@ class RuntimeConfig:
             os.makedirs(os.path.dirname(RUNTIME_CONFIG_PATH), exist_ok=True)
             with open(RUNTIME_CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
+            try:
+                self._last_mtime = os.path.getmtime(RUNTIME_CONFIG_PATH)
+            except OSError:
+                pass
             return True
         except IOError as e:
             print(f"[RuntimeConfig] Failed to save config: {e}")

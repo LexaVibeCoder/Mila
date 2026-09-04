@@ -22,7 +22,8 @@ router = APIRouter(tags=["model"])
 async def get_model_config():
     """Get current LLM model configuration."""
     main_params = llm_manager.get_main_params()
-    return ModelResponse(main=main_params)
+    night_params = llm_manager.get_night_params()
+    return ModelResponse(main=main_params, night=night_params)
 
 
 @router.put("/api/model/main", response_model=ModelResponse)
@@ -38,7 +39,25 @@ async def update_main_model(params: ModelParams):
     add_event("model_change", f"Main LLM updated: {changed}")
 
     main_params = llm_manager.get_main_params()
-    return ModelResponse(main=main_params)
+    night_params = llm_manager.get_night_params()
+    return ModelResponse(main=main_params, night=night_params)
+
+
+@router.put("/api/model/night", response_model=ModelResponse)
+async def update_night_model(params: ModelParams):
+    """Update night LLM configuration (applies on next night run, no restart)."""
+    update_dict = params.model_dump(exclude_none=True)
+    if not update_dict:
+        raise HTTPException(status_code=400, detail="No parameters to update")
+
+    llm_manager.configure_night(update_dict)
+
+    changed = ", ".join(update_dict.keys())
+    add_event("model_change", f"Night LLM updated: {changed}")
+
+    main_params = llm_manager.get_main_params()
+    night_params = llm_manager.get_night_params()
+    return ModelResponse(main=main_params, night=night_params)
 
 
 @router.post("/api/model/test", response_model=TestQueryResponse)

@@ -93,8 +93,14 @@ class Settings(BaseSettings):
 
     # Message batching / debounce
     MESSAGE_DEBOUNCE_SECONDS: float = 2.0  # Wait window after the last message before responding
-    TYPING_WAIT_MAX_SECONDS: float = 8.0   # Max extra wait if the user is still typing
-    ENABLE_TYPING_WAIT: bool = False       # Off by default — typing detection isn't reliable yet
+    # Full peer-typing support (TDLib updateChatAction):
+    # if the human is typing, the bot stops and waits for their message.
+    ENABLE_TYPING_WAIT: bool = True        # Master switch for typing-aware waits/aborts
+    TYPING_WAIT_MAX_SECONDS: float = 8.0   # Upper bound for waiting while peer keeps typing
+    TYPING_FRESHNESS_SECONDS: float = 6.0  # How long one typing event counts as "still typing"
+    TYPING_POLL_INTERVAL: float = 0.5      # Poll step while waiting for typing/message
+    TYPING_GRACE_SECONDS: float = 2.0      # Wait after typing stops for the message to arrive
+    TYPING_ABORT_GENERATION: bool = True   # Cancel LLM run/send if peer starts typing
 
     class Config:
         env_file = ".env"

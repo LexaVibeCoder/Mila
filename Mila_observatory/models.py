@@ -8,6 +8,14 @@ from pydantic import BaseModel, Field
 
 # ─── Dashboard ───────────────────────────────────────────────
 
+class PresenceInfo(BaseModel):
+    state: str = "rest"
+    focus_chat_id: Optional[str] = None
+    focus_user_name: Optional[str] = None
+    note: str = ""
+    updated_at: Optional[str] = None
+
+
 class StatusResponse(BaseModel):
     status: str = Field(..., description="online or offline")
     uptime: Optional[float] = None
@@ -17,6 +25,7 @@ class StatusResponse(BaseModel):
     last_activity: Optional[str] = None
     sleep_mode: bool = False
     runtime_config_version: int = 0
+    presence: Optional[PresenceInfo] = None
 
 
 class EventItem(BaseModel):

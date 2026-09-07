@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getDashboard, DashboardData, getSleepStatus, SleepStatus } from '../api/client';
+import { getDashboard, DashboardData, getSleepStatus, SleepStatus, PresenceInfo } from '../api/client';
 
 const styles: Record<string, React.CSSProperties> = {
   page: { maxWidth: '1200px' },
@@ -55,6 +55,20 @@ export default function Dashboard() {
   const sleepStageLabel = sleepStatus?.current_stage || 'idle';
   const sleepProgress = sleepStatus?.progress_pct || 0;
 
+  const presence: PresenceInfo | null | undefined = status.presence;
+  const pState = presence?.state || 'rest';
+  const pFocus = presence?.focus_user_name || (presence?.focus_chat_id ? `чат ${presence.focus_chat_id.slice(0, 12)}` : '');
+  const presenceBadge =
+    pState === 'dialog' ? '💬 Диалог' :
+    pState === 'working' ? '✍️ Занята' :
+    pState === 'sleep' ? '💤 К сну' : '😌 Отдыхает';
+  const presenceSub =
+    pState === 'dialog' && pFocus ? `с ${pFocus}` :
+    presence?.note ? presence.note :
+    pState === 'dialog' ? 'диалог' :
+    pState === 'working' ? 'свои дела' :
+    pState === 'sleep' ? 'намерение спать' : 'состояние по умолчанию';
+
   return (
     <div style={styles.page}>
       <h1 style={styles.title}>Dashboard</h1>
@@ -68,6 +82,20 @@ export default function Dashboard() {
             </span>
           </div>
           <div style={styles.cardSub}>Uptime: {uptimeStr}</div>
+        </div>
+
+        <div style={styles.card}>
+          <div style={styles.cardTitle}>Mila</div>
+          <div>
+            <span style={{
+              ...styles.badge,
+              background: pState === 'dialog' ? 'rgba(116, 185, 255, 0.2)' : pState === 'working' ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
+              color: pState === 'dialog' ? '#74b9ff' : pState === 'working' ? '#fdcb6e' : 'var(--success)',
+            }}>
+              {presenceBadge}
+            </span>
+          </div>
+          <div style={styles.cardSub}>{presenceSub}</div>
         </div>
 
         <div style={styles.card}>

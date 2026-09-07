@@ -53,9 +53,10 @@ docker compose up observatory
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/api/health` | Health check |
-| GET | `/api/status` | Системный статус (uptime, кол-во чанков, модель, сон) |
+| GET | `/api/status` | Системный статус (uptime, кол-во чанков, модель, сон, presence Милы) |
 | GET | `/api/events` | Последние события (in-memory, макс 50) |
 | GET | `/api/dashboard` | Комбинированные данные дашборда |
+| GET | `/api/presence` | Текущее состояние Милы (`state/focus_chat_id/focus_user_name/note/updated_at`) |
 
 ### Модель
 

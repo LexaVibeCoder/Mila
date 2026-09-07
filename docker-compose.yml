@@ -44,7 +44,6 @@ services:
       - "8080:8080"
     volumes:
       - .:/app:z
-      - frontend_dist:/app/Mila_observatory/frontend/dist
       - mila_data:/app/data
       - mila_logs:/app/logs
       - ./models:/app/models:ro
@@ -59,7 +58,6 @@ services:
 volumes:
   mila_data:
   mila_logs:
-  frontend_dist:
 
 networks:
   mila_network:

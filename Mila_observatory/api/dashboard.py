@@ -9,7 +9,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import APIRouter
-from Mila_observatory.models import StatusResponse, DashboardResponse, EventItem
+from Mila_observatory.models import StatusResponse, DashboardResponse, EventItem, PresenceInfo
 from Mila_observatory.runtime import runtime_config
 from Mila_observatory.llm_manager import llm_manager
 from core.db import get_conn as get_mila_conn, get_all_chat_ids_from_chunks
@@ -82,6 +82,21 @@ async def get_status():
     except Exception:
         is_sleeping = False
 
+    # Current Mila presence (rest/dialog/working/sleep) — never fails the status
+    presence = None
+    try:
+        from core.presence import get_presence
+        p = get_presence()
+        presence = PresenceInfo(
+            state=p.get("state", "rest"),
+            focus_chat_id=p.get("focus_chat_id"),
+            focus_user_name=p.get("focus_user_name"),
+            note=p.get("note", ""),
+            updated_at=p.get("updated_at"),
+        )
+    except Exception:
+        presence = None
+
     return StatusResponse(
         status="online",
         uptime=uptime,
@@ -91,7 +106,25 @@ async def get_status():
         last_activity=last_activity,
         sleep_mode=is_sleeping,
         runtime_config_version=1,
+        presence=presence,
     )
+
+
+@router.get("/api/presence", response_model=PresenceInfo)
+async def get_presence_state():
+    """Get Mila's current presence state."""
+    try:
+        from core.presence import get_presence
+        p = get_presence()
+        return PresenceInfo(
+            state=p.get("state", "rest"),
+            focus_chat_id=p.get("focus_chat_id"),
+            focus_user_name=p.get("focus_user_name"),
+            note=p.get("note", ""),
+            updated_at=p.get("updated_at"),
+        )
+    except Exception:
+        return PresenceInfo()
 
 
 @router.get("/api/events", response_model=list)

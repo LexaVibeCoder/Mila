@@ -33,7 +33,6 @@ services:
     ports: ["8080:8080"]
     volumes:
       - .:/app:z
-      - frontend_dist:/app/Mila_observatory/frontend/dist
       - mila_data:/app/data
       - mila_logs:/app/logs
       - ./models:/app/models:ro
@@ -43,7 +42,7 @@ services:
     depends_on: [bot]
     networks: [mila_network]
 
-volumes: { mila_data:, mila_logs:, frontend_dist: }
+volumes: { mila_data:, mila_logs: }
 networks: { mila_network: { driver: bridge } }
 ```
 
@@ -85,9 +84,21 @@ CMD ["python", "main.py"]
 | `mila_data` | `/app/data` | `mila.db`, `context_buffer.db`, FAISS `faiss_text.index`, `daily reports/`, `photos/`, `tdlib/` |
 | `mila_logs` | `/app/logs` | Логи пайплайна `pipeline_*.json`, `diary_logs/` |
 | `./models` (bind) | `/app/models:ro` | AI модели (BGE-reranker и др.) read-only |
-| `frontend_dist` | `/app/Mila_observatory/frontend/dist` | Собранный фронтенд (перекрывает COPY из образа) |
-| bind `.:/app` | `/app` | Код + `runtime_config.json` (мост bot ↔ observatory) |
+| bind `.:/app` | `/app` | Код + `runtime_config.json` (мост bot ↔ observatory) + собранный фронт `Mila_observatory/frontend/dist` |
 | `/etc/localtime`, `/etc/timezone` | `:ro` | Часовой пояс (для `LOCAL_TIMEZONE=""`) |
+
+> Раньше здесь был named volume `frontend_dist` на `.../frontend/dist` — он замораживал фронт на первой сборке: пересборка образа (`--build`) не меняла ничего, т.к. старый volume перекрывал свежий `dist`. Убран: фронт теперь всегда берётся из bind-mount (см. «Пересборка фронтенда»). Старый volume можно удалить: `docker volume rm mila_frontend_dist` (имя проверить через `docker volume ls`).
+
+## Пересборка фронтенда
+
+Бэкенд подхватывается живьём (bind + `--reload`), а фронт (Vite SPA) нужно собирать. Локальный node не обязателен — сборка one-shot контейнером:
+
+```bash
+docker run --rm -v "$(pwd)/Mila_observatory/frontend:/app" -w /app node:20-alpine sh -c "npm ci && npm run build"
+docker compose up -d observatory
+```
+
+(Windows PowerShell: замените `$(pwd)` на `${PWD}`.) После этого обновите страницу со сбросом кэша (Ctrl+F5) — имя бандла в `dist/assets` меняется при каждой сборке.
 
 ## Запуск
 

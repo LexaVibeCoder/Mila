@@ -14,6 +14,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 // ─── Dashboard ──────────────────────────────────────────────
 
+export interface PresenceInfo {
+  state: string;
+  focus_chat_id: string | null;
+  focus_user_name: string | null;
+  note: string;
+  updated_at: string | null;
+}
+
 export interface StatusData {
   status: string;
   uptime: number | null;
@@ -23,6 +31,7 @@ export interface StatusData {
   last_activity: string | null;
   sleep_mode: boolean;
   runtime_config_version: number;
+  presence: PresenceInfo | null;
 }
 
 export interface EventItem {
@@ -38,6 +47,7 @@ export interface DashboardData {
 
 export const getDashboard = () => request<DashboardData>('/dashboard');
 export const getStatus = () => request<StatusData>('/status');
+export const getPresence = () => request<PresenceInfo>('/presence');
 export const getEvents = (limit = 10) => request<EventItem[]>(`/events?limit=${limit}`);
 
 // ─── Model ──────────────────────────────────────────────────

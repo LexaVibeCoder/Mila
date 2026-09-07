@@ -4,6 +4,7 @@ import { NavLink } from 'react-router-dom';
 const navItems = [
   { path: '/', label: 'Dashboard', icon: '◉' },
   { path: '/pipeline', label: 'Pipeline', icon: '▷' },
+  { path: '/users', label: 'Users', icon: '☺' },
   { path: '/model', label: 'Model', icon: '◈' },
   { path: '/sleep', label: 'Sleep', icon: '◍' },
   { path: '/memory', label: 'Memory', icon: '▤' },

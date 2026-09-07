@@ -184,6 +184,91 @@ class PipelineLogDetailResponse(BaseModel):
     data: Dict[str, Any]
 
 
+# ─── Users ───────────────────────────────────────────────────
+
+class UserItem(BaseModel):
+    user_id: str
+    display_name: str = ""
+    user_name: Optional[str] = None
+    preferred_name: Optional[str] = None
+    relationship_type: str = "friend"
+    sentiment: float = 0.0
+    closeness: str = "neutral"
+    closeness_label: str = ""
+    appearance_description: Optional[str] = None
+    memories_count: int = 0
+    messages_count: int = 0
+    chats_count: int = 0
+    last_activity: Optional[str] = None
+
+
+class UserListResponse(BaseModel):
+    items: List[UserItem]
+    total: int
+
+
+class UserChatInfo(BaseModel):
+    chat_id: str
+    chat_name: str = ""
+    messages_count: int = 0
+    last_time: Optional[str] = None
+
+
+class UserMessageItem(BaseModel):
+    chunk_id: str = ""
+    chat_id: str = ""
+    chat_name: str = ""
+    content: str = ""
+    kind: str = "text"
+    time_start: Optional[str] = None
+
+
+class UserMessageListResponse(BaseModel):
+    items: List[UserMessageItem]
+    total: int
+    page: int
+    limit: int
+
+
+class UserDetailResponse(UserItem):
+    chats: List[UserChatInfo] = []
+    recent_memories: List[MemoryItem] = []
+    recent_messages: List[UserMessageItem] = []
+
+
+class UserUpdateRequest(BaseModel):
+    user_name: Optional[str] = None
+    preferred_name: Optional[str] = None
+    relationship_type: Optional[str] = None
+    sentiment: Optional[float] = None
+    appearance_description: Optional[str] = None
+
+
+class UserMemoryCreateRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=5000)
+    type: str = "fact"
+    tag: Optional[str] = None
+    importance: float = 0.5
+
+
+class AttitudePoint(BaseModel):
+    sentiment: float
+    relationship_type: str = ""
+    changed_by: str = "manual"
+    created_at: Optional[str] = None
+
+
+class AttitudeHistoryResponse(BaseModel):
+    items: List[AttitudePoint]
+    total: int
+
+
+class PortraitResponse(BaseModel):
+    portrait: str
+    model: str = ""
+    timing: str = ""
+
+
 # ─── Config ──────────────────────────────────────────────────
 
 class ConfigResponse(BaseModel):

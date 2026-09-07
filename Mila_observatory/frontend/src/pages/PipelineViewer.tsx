@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   getPipelineLogs,
   getPipelineLog,
@@ -98,6 +99,7 @@ function renderMessageContent(content: unknown): string {
 }
 
 export default function PipelineViewer() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [logs, setLogs] = useState<PipelineLogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -135,8 +137,16 @@ export default function PipelineViewer() {
     try {
       const r = await getPipelineLog(filename);
       setSelected({ filename: r.filename, data: r.data });
+      setSearchParams({ log: filename }, { replace: true });
     } catch (e) { console.error(e); }
   };
+
+  // Deep-link support: /pipeline?log=<filename> (e.g. from Users page)
+  useEffect(() => {
+    const f = searchParams.get('log');
+    if (f) handleView(f);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const totalPages = Math.ceil(total / limit);
   const activeChatInfo = chats.find(c => c.chat_id === activeChat);

@@ -10,12 +10,16 @@ import PipelineViewer from './pages/PipelineViewer';
 import ConfigPage from './pages/ConfigPage';
 import SleepControl from './pages/SleepControl';
 import StateAgentControl from './pages/StateAgentControl';
+import UsersList from './pages/UsersList';
+import UserDetail from './pages/UserDetail';
 
 export default function App() {
   return (
     <Layout>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/users" element={<UsersList />} />
+        <Route path="/users/:user_id" element={<UserDetail />} />
         <Route path="/model" element={<ModelControl />} />
         <Route path="/memory" element={<MemoryEditor />} />
         <Route path="/personality" element={<PersonalityEditor />} />

@@ -236,6 +236,112 @@ export const getPipelineChats = () =>
 export const getPipelineLog = (filename: string) =>
   request<{ filename: string; data: PipelineLogDetail }>(`/pipeline/logs/${filename}`);
 
+// ─── Users ──────────────────────────────────────────────────
+
+export interface UserItem {
+  user_id: string;
+  display_name: string;
+  user_name: string | null;
+  preferred_name: string | null;
+  relationship_type: string;
+  sentiment: number;
+  closeness: string;
+  closeness_label: string;
+  appearance_description: string | null;
+  memories_count: number;
+  messages_count: number;
+  chats_count: number;
+  last_activity: string | null;
+}
+
+export interface UserChatInfo {
+  chat_id: string;
+  chat_name: string;
+  messages_count: number;
+  last_time: string | null;
+}
+
+export interface UserMessageItem {
+  chunk_id: string;
+  chat_id: string;
+  chat_name: string;
+  content: string;
+  kind: string;
+  time_start: string | null;
+}
+
+export interface UserMessageList {
+  items: UserMessageItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface UserDetail extends UserItem {
+  chats: UserChatInfo[];
+  recent_memories: MemoryItem[];
+  recent_messages: UserMessageItem[];
+}
+
+export interface UserUpdate {
+  user_name?: string;
+  preferred_name?: string;
+  relationship_type?: string;
+  sentiment?: number;
+  appearance_description?: string;
+}
+
+export const getUsers = (search?: string, sort = 'last_activity') => {
+  const params = new URLSearchParams({ sort });
+  if (search) params.set('search', search);
+  return request<{ items: UserItem[]; total: number }>(`/users?${params}`);
+};
+
+export const getUser = (userId: string) =>
+  request<UserDetail>(`/users/${encodeURIComponent(userId)}`);
+
+export const updateUser = (userId: string, data: UserUpdate) =>
+  request<UserDetail>(`/users/${encodeURIComponent(userId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+
+export const getUserMemories = (userId: string, search?: string, page = 1, limit = 20) => {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  if (search) params.set('search', search);
+  return request<MemoryList>(`/users/${encodeURIComponent(userId)}/memories?${params}`);
+};
+
+export const createUserMemory = (userId: string, data: { content: string; type?: string; tag?: string; importance?: number }) =>
+  request<MemoryItem>(`/users/${encodeURIComponent(userId)}/memories`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+
+export const getUserMessages = (userId: string, page = 1, limit = 20) =>
+  request<UserMessageList>(`/users/${encodeURIComponent(userId)}/messages?page=${page}&limit=${limit}`);
+
+export interface AttitudePoint {
+  sentiment: number;
+  relationship_type: string;
+  changed_by: string;
+  created_at: string | null;
+}
+
+export const getAttitudeHistory = (userId: string) =>
+  request<{ items: AttitudePoint[]; total: number }>(
+    `/users/${encodeURIComponent(userId)}/attitude-history`
+  );
+
+export interface PortraitResult {
+  portrait: string;
+  model: string;
+  timing: string;
+}
+
+export const generatePortrait = (userId: string) =>
+  request<PortraitResult>(`/users/${encodeURIComponent(userId)}/portrait`, { method: 'POST' });
+
 // ─── Config ─────────────────────────────────────────────────
 
 export const getConfig = () => request<{ config: Record<string, unknown> }>('/config');

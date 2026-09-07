@@ -16,11 +16,12 @@ from contextlib import asynccontextmanager
 # Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
+from Mila_observatory.auth import is_auth_enabled, require_auth, resolve_host
 from Mila_observatory.runtime import runtime_config, RUNTIME_CONFIG_PATH
 from Mila_observatory.api.dashboard import router as dashboard_router
 from Mila_observatory.api.model import router as model_router
@@ -56,27 +57,30 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS — allow frontend dev server
+    # CORS — same-origin panel; no wildcard with credentials.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=[],
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
-    # Register API routers
-    app.include_router(dashboard_router)
-    app.include_router(model_router)
-    app.include_router(memory_router)
-    app.include_router(tools_router)
-    app.include_router(personality_router)
-    app.include_router(pipeline_router)
-    app.include_router(config_router)
-    app.include_router(sleep_router)
-    app.include_router(diary_router)
-    app.include_router(needs_router)
-    app.include_router(users_router)
+    # All API routers require Basic Auth when a password is configured.
+    # Health (/api/health) stays public for container checks.
+    auth_dep = [Depends(require_auth)]
+    app.include_router(dashboard_router, dependencies=auth_dep)
+    app.include_router(model_router, dependencies=auth_dep)
+    app.include_router(memory_router, dependencies=auth_dep)
+    app.include_router(tools_router, dependencies=auth_dep)
+    app.include_router(personality_router, dependencies=auth_dep)
+    app.include_router(pipeline_router, dependencies=auth_dep)
+    app.include_router(config_router, dependencies=auth_dep)
+    app.include_router(sleep_router, dependencies=auth_dep)
+    app.include_router(diary_router, dependencies=auth_dep)
+    app.include_router(needs_router, dependencies=auth_dep)
+    app.include_router(users_router, dependencies=auth_dep)
 
     # Health check
     @app.get("/api/health")
@@ -99,8 +103,10 @@ def create_app() -> FastAPI:
         if os.path.exists(icons_dir):
             app.mount("/icons", StaticFiles(directory=icons_dir), name="icons")
         
-        # SPA fallback: serve index.html for all non-API routes
-        @app.get("/{full_path:path}")
+        # SPA fallback: serve index.html for all non-API routes.
+        # Protected too — the browser shows the native Basic Auth prompt
+        # on page open, then reuses cached credentials for /api fetch().
+        @app.get("/{full_path:path}", dependencies=[Depends(require_auth)])
         async def spa_fallback(full_path: str):
             # Only serve frontend for paths that are NOT API routes
             if full_path.startswith("api/"):
@@ -121,9 +127,20 @@ app = create_app()
 def main():
     """Entry point for running the server."""
     port = runtime_config.get("system.observatory_port", 8080)
+    # Always 0.0.0.0 by default: inside Docker the container's 127.0.0.1
+    # is unreachable from the host even with a ports mapping.
+    # Localhost-only exposure is done via compose ports ("127.0.0.1:8080:8080").
+    host = resolve_host()
+    if not is_auth_enabled():
+        print(
+            "[Observatory] WARNING: no OBSERVATORY_PASSWORD set — anyone with "
+            "network access to this port controls the bot. Keep compose ports "
+            "as 127.0.0.1:8080:8080 or set a password."
+        )
+    print(f"[Observatory] Listening on {host}:{port} (auth={'on' if is_auth_enabled() else 'off'})")
     uvicorn.run(
         "Mila_observatory.server:app",
-        host="0.0.0.0",
+        host=host,
         port=port,
         reload=False,
         log_level="info",

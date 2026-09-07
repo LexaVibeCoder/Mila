@@ -38,7 +38,34 @@ try:
 except ImportError:
     HAS_OBSERVATORY = False
 
-MAX_THINK_ITERATIONS = 5
+MAX_THINK_ITERATIONS = 7
+
+
+def _max_iterations() -> int:
+    """Think-loop cap: Observatory knob wins, builtin default otherwise.
+
+    NOTE: runtime_config.json may still hold an older saved value (5) —
+    raise it in the panel (pipeline.max_think_iterations) if needed.
+    """
+    if HAS_OBSERVATORY:
+        try:
+            value = runtime_config.get(
+                "pipeline.max_think_iterations", MAX_THINK_ITERATIONS
+            )
+            if isinstance(value, int) and value > 0:
+                return value
+        except Exception:
+            pass
+    return MAX_THINK_ITERATIONS
+
+
+# System reminder appended when think() has no conversational outcome.
+# thoughts are private — without send_message/silence/search the turn says nothing.
+NO_OUTCOME_REMINDER = (
+    "ERROR: your think() had no send_message, silence or search_memory action. "
+    "'thoughts' is private and NEVER shown to the user — the user only ever sees "
+    "send_message.text. Decide now: reply (send_message) or stay silent (silence)."
+)
 
 
 class ThinkPipeline:
@@ -110,11 +137,12 @@ class ThinkPipeline:
             all_actions = []
             final_thoughts = ""
             iteration = 0
+            max_iterations = _max_iterations()
             raw_llm_responses = []  # Store full raw LLM responses from each iteration
 
-            while iteration < MAX_THINK_ITERATIONS:
+            while iteration < max_iterations:
                 iteration += 1
-                print(f"\n── Iteration {iteration}/{MAX_THINK_ITERATIONS} ──")
+                print(f"\n── Iteration {iteration}/{max_iterations} ──")
 
                 tool_choice = runtime_config.get("llm.tool_choice", "required") if HAS_OBSERVATORY else "required"
                 response = await self.main_llm.generate(
@@ -182,6 +210,10 @@ class ThinkPipeline:
                 # Parse actions from the think function call
                 actions_from_llm = await self._parse_think_call(tool_calls[0])
                 if not actions_from_llm:
+                    if iteration < max_iterations:
+                        print("  [Parse error → retry]")
+                        messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
+                        continue
                     print("  [Parse error]")
                     break
 
@@ -190,6 +222,7 @@ class ThinkPipeline:
 
                 # Execute actions
                 has_search = False
+                has_send = False
                 silence_detected = False
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
@@ -218,18 +251,43 @@ class ThinkPipeline:
                         print("  [Presence switched → re-calling]")
                         continue
 
-                    if executed.get("type") == "search_memory" and executed.get("status") == "searched":
+                    if executed.get("type") == "send_message" and executed.get("status") == "ready":
+                        if (executed.get("text") or "").strip():
+                            has_send = True
+                        continue
+
+                    if executed.get("type") == "search_memory":
                         has_search = True
-                        context_addon = executed.get("context_addon", "[No results found]")
-                        messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
-                        print("  [Search results → re-calling]")
+                        if executed.get("status") == "searched":
+                            context_addon = executed.get("context_addon", "[No results found]")
+                            messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
+                            print("  [Search results → re-calling]")
+                        else:
+                            messages.append({"role": "system", "content": (
+                                "Memory search failed "
+                                f"({executed.get('error', 'unknown error')}). "
+                                "Answer from the conversation context or stay silent."
+                            )})
+                            print("  [Search error → re-calling anyway]")
 
                 if silence_detected:
                     break
 
-                if not has_search:
+                if has_search:
+                    continue
+
+                if has_send:
                     print("  [Done]")
                     break
+
+                # think() with no conversational outcome (empty/unknown actions,
+                # diary-only, empty send text): force an explicit choice.
+                if iteration < max_iterations:
+                    print("  [No outcome → retry]")
+                    messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
+                    continue
+                print("  [Done]")
+                break
 
             # End of think loop
             s_time = time.time() - total_start
@@ -427,11 +485,12 @@ class ThinkPipeline:
             all_actions = []
             final_thoughts = ""
             iteration = 0
+            max_iterations = _max_iterations()
             raw_llm_responses = []
 
-            while iteration < MAX_THINK_ITERATIONS:
+            while iteration < max_iterations:
                 iteration += 1
-                print(f"\n── Iteration {iteration}/{MAX_THINK_ITERATIONS} [stream] ──")
+                print(f"\n── Iteration {iteration}/{max_iterations} [stream] ──")
 
                 tool_choice = runtime_config.get("llm.tool_choice", "required") if HAS_OBSERVATORY else "required"
                 response = await self.main_llm.generate(
@@ -488,6 +547,10 @@ class ThinkPipeline:
 
                 actions_from_llm = await self._parse_think_call(tool_calls[0])
                 if not actions_from_llm:
+                    if iteration < max_iterations:
+                        print("  [Parse error → retry]")
+                        messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
+                        continue
                     print("  [Parse error]")
                     break
 
@@ -497,6 +560,7 @@ class ThinkPipeline:
                 # Execute each action — send_message is yielded immediately
                 # with the full text, so the bot can send it right away
                 has_search = False
+                has_send = False
                 silence_detected = False
                 for action in actions_from_llm:
                     executed = await self._execute_single_action(action)
@@ -525,19 +589,43 @@ class ThinkPipeline:
                         print("  [Presence switched → re-calling]")
                         continue
 
-                    if executed.get("type") == "search_memory" and executed.get("status") == "searched":
+                    if executed.get("type") == "send_message" and executed.get("status") == "ready":
+                        if (executed.get("text") or "").strip():
+                            has_send = True
+                        continue
+
+                    if executed.get("type") == "search_memory":
                         has_search = True
-                        context_addon = executed.get("context_addon", "[No results found]")
-                        messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
-                        yield {"type": "search_result", "content": context_addon}
-                        print("  [Search results → re-calling]")
+                        if executed.get("status") == "searched":
+                            context_addon = executed.get("context_addon", "[No results found]")
+                            messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
+                            yield {"type": "search_result", "content": context_addon}
+                            print("  [Search results → re-calling]")
+                        else:
+                            messages.append({"role": "system", "content": (
+                                "Memory search failed "
+                                f"({executed.get('error', 'unknown error')}). "
+                                "Answer from the conversation context or stay silent."
+                            )})
+                            print("  [Search error → re-calling anyway]")
 
                 if silence_detected:
                     break
 
-                if not has_search:
+                if has_search:
+                    continue
+
+                if has_send:
                     print("  [Done]")
                     break
+
+                # think() with no conversational outcome: force an explicit choice.
+                if iteration < max_iterations:
+                    print("  [No outcome → retry]")
+                    messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
+                    continue
+                print("  [Done]")
+                break
 
             s_time = time.time() - total_start
 

@@ -123,7 +123,11 @@ async def rollback_all(session_id: str = None):
         conn.close()
 
     clear_staged_operations(session_id)
-    clear_diary()
+    # Always back up before clearing — a crash must not silently drop the diary.
+    if save_diary_to_logs():
+        clear_diary()
+    else:
+        print("[Rollback] WARNING: diary backup failed — keeping entries")
     set_state(SleepState.AWAKE)
     print(f"[Rollback] Complete")
 
@@ -142,18 +146,15 @@ async def commit_all(session_id: str) -> bool:
         mark_staged_applied(staging_ids)
         print(f"[Commit] {len(staging_ids)} operations marked as applied")
 
-    try:
-        from Mila_observatory.runtime import runtime_config
-        save_diary_enabled = runtime_config.get("diary.save_processed", False)
-    except ImportError:
-        save_diary_enabled = False
-
-    if save_diary_enabled:
-        save_diary_to_logs()
+    # Always back up before clearing. diary.save_processed is kept for API
+    # compatibility but no longer gates the backup — clearing without a
+    # backup is silent data loss.
+    if save_diary_to_logs():
         print("[Commit] Diary saved to logs")
-
-    clear_diary()
-    print("[Commit] Diary cleared")
+        clear_diary()
+        print("[Commit] Diary cleared")
+    else:
+        print("[Commit] WARNING: diary backup failed — keeping entries")
 
     set_state(SleepState.AWAKE)
 

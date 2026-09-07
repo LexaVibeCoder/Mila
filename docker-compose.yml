@@ -40,8 +40,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Localhost-only by default. To expose on LAN, replace with "8080:8080"
+    # AND set OBSERVATORY_PASSWORD in .env (HTTP Basic Auth).
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - .:/app:z
       - mila_data:/app/data
@@ -49,7 +51,9 @@ services:
       - ./models:/app/models:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-    command: uvicorn Mila_observatory.server:app --host 0.0.0.0 --port 8080 --reload
+    # Container must listen on 0.0.0.0 (its 127.0.0.1 is unreachable
+    # from the host); localhost restriction is the ports line above.
+    command: python -m Mila_observatory.server
     depends_on:
       - bot
     networks:

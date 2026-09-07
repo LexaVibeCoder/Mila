@@ -227,13 +227,22 @@ def clear_diary():
         conn.close()
 
 
-def save_diary_to_logs():
+def save_diary_to_logs() -> bool:
+    """Backup today's diary to logs/diary_logs/. Returns True when safe to clear.
+
+    True = diary was persisted or there was nothing to persist.
+    False = backup failed — caller must NOT clear the table.
+    """
     markdown = get_diary_markdown()
     if not markdown:
-        return
+        return True
 
     log_dir = os.path.join(settings.LOG_DIR, "diary_logs")
-    os.makedirs(log_dir, exist_ok=True)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError as e:
+        print(f"[Diary] Failed to create log dir: {e}")
+        return False
 
     filename = f"diary_{datetime.now().strftime('%Y%m%d')}.md"
     filepath = os.path.join(log_dir, filename)
@@ -242,8 +251,10 @@ def save_diary_to_logs():
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(markdown)
         print(f"[Diary] Saved to {filepath}")
+        return True
     except Exception as e:
         print(f"[Diary] Failed to save log: {e}")
+        return False
 
 
 def load_daily_report(date_str: str = None) -> str:

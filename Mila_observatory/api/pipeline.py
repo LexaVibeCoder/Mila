@@ -38,8 +38,9 @@ def _resolve_display_names(pairs: list) -> dict:
             db_path = os.path.join(root, db_path)
         if not os.path.exists(db_path):
             return {}
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=30.0)
         try:
+            conn.execute("PRAGMA busy_timeout=30000")
             cur = conn.cursor()
             chat_names = {str(r[0]): (r[1] or "") for r in cur.execute("SELECT chat_id, chat_name FROM chats")}
             user_names: dict = {}

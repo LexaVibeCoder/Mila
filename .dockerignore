@@ -43,3 +43,12 @@ docker-compose.yml
 # Session files
 *.session
 *.session-journal
+
+# Secrets — never bake into the image.
+# Provided at runtime via env_file / bind mount instead.
+.env
+.env.*
+runtime_config.json
+*.db
+*.sqlite
+*.index

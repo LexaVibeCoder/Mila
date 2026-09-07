@@ -106,7 +106,7 @@ class RuntimeConfig:
             # Pipeline
             "pipeline": {
                 "max_context_tokens": None,
-                "max_think_iterations": 5,
+                "max_think_iterations": 7,
                 "decay_lambda": None,
                 "forget_threshold": None,
                 "similarity_threshold": None,
@@ -146,10 +146,18 @@ class RuntimeConfig:
             return self._deep_get(self._config, key, default)
 
     def get_all(self) -> Dict[str, Any]:
-        """Get a deep copy of the entire config."""
+        """Get a deep copy of the entire config (INCLUDES secrets — internal use only)."""
         with self._lock:
             self._maybe_auto_reload()
             return deepcopy(self._config)
+
+    def get_public_copy(self) -> Dict[str, Any]:
+        """Get a deep copy safe for API responses (secrets masked)."""
+        from Mila_observatory.auth import mask_secrets_inplace
+
+        with self._lock:
+            self._maybe_auto_reload()
+            return mask_secrets_inplace(deepcopy(self._config))
 
     def set(self, key: str, value: Any, updated_by: str = "observatory") -> bool:
         """Set a config value by dot-notation key. Returns True if changed."""

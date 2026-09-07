@@ -3,7 +3,7 @@ from pytdbot import Client, types
 from config import settings
 from core.context.buffer import (
     push_summary, get_context_within_token_limit,
-    pop_oldest_messages_by_tokens,
+    peek_oldest_messages_by_tokens, delete_messages_by_ids,
     get_total_entries, get_total_message_tokens
 )
 from core.llm.embeddings import EmbeddingClient
@@ -42,6 +42,7 @@ class MilaUserbot:
         # Per-chat batching / debounce coordinator
         self.messages = MessageCoordinate(self)
         self._ready = asyncio.Event()
+        self._periodic_save_task: asyncio.Task | None = None
 
         register_auth_handlers(self.app, phone_hint=settings.PHONE_NUMBER or "")
 
@@ -119,15 +120,28 @@ class MilaUserbot:
             my_user_id=str(self.me.id)
         )
 
-        asyncio.create_task(self.periodic_save())
+        if settings.TD_DATABASE_ENCRYPTION_KEY == "mila-tdlib-key-change-me":
+            print(
+                "[Security] WARNING: using default TD_DATABASE_ENCRYPTION_KEY. "
+                "Set a unique value in .env (existing data/tdlib was encrypted "
+                "with the current key — change it only with a fresh data dir)."
+            )
+
+        self._periodic_save_task = asyncio.create_task(self.periodic_save())
 
         # Start auto-sleep scheduler
         start_auto_sleep_scheduler()
 
     async def periodic_save(self):
-        while True:
-            await asyncio.sleep(settings.FAISS_SAVE_INTERVAL_MIN * 60)
-            self.text_memory.save()
+        try:
+            while True:
+                await asyncio.sleep(settings.FAISS_SAVE_INTERVAL_MIN * 60)
+                try:
+                    self.text_memory.save()
+                except Exception as e:
+                    print(f"[Periodic Save Error] {e}")
+        except asyncio.CancelledError:
+            pass
 
     async def _ensure_summarizer(self):
         """Lazy init of cheap summarizer LLM for daytime context compression."""
@@ -153,8 +167,10 @@ class MilaUserbot:
         if total_message_tokens <= max_tokens:
             return  # No compression needed
 
-        # Pop the oldest message entries by token count
-        oldest_messages = pop_oldest_messages_by_tokens(chat_id, chunk_tokens)
+        # Peek (no deletion yet) — originals are removed only after the
+        # LLM summary succeeds. A failed summarization keeps history intact
+        # and retries on the next message instead of losing ~chunk_tokens.
+        oldest_messages = peek_oldest_messages_by_tokens(chat_id, chunk_tokens)
         if not oldest_messages:
             return
 
@@ -162,7 +178,7 @@ class MilaUserbot:
         texts_to_summarize = "\n".join(
             f"[{m.get('created_at', '')[:10]}] {m['content'][:500]}"
             for m in oldest_messages
-            if m['content'].strip()
+            if (m.get('content') or '').strip()
         )
 
         if not texts_to_summarize.strip():
@@ -182,15 +198,27 @@ class MilaUserbot:
                 max_tokens=300,
                 temperature=0.3,
             )
-            summary_text = response.get("thoughts", "").strip()
-            if not summary_text:
-                summary_text = "[Summary previous conversation]"
+            summary_text = (response.get("thoughts", "") or "").strip()
         except Exception as e:
-            print(f"[Context Compression Error] {e}")
-            summary_text = "[Summary previous conversation]"
+            print(f"[Context Compression Error] {e} — keeping original messages")
+            return
 
-        # Push the summary as a context buffer entry
-        push_summary(chat_id, summary_text)
+        if not summary_text:
+            print("[Context Compression] empty summary — keeping original messages")
+            return
+
+        # Push the summary FIRST, then delete originals: a crash in between
+        # duplicates context (safe) instead of losing it.
+        try:
+            push_summary(chat_id, summary_text)
+        except Exception as e:
+            print(f"[Context Compression Error] push_summary failed: {e}")
+            return
+        try:
+            delete_messages_by_ids(chat_id, [m["id"] for m in oldest_messages])
+        except Exception as e:
+            print(f"[Context Compression Error] delete failed after summary: {e}")
+            return
 
         # Log token-based stats
         remaining_tokens = get_total_message_tokens(chat_id)
@@ -260,5 +288,15 @@ class MilaUserbot:
         await self.messages.handle(client, message)
 
     async def stop(self):
-        self.text_memory.save()
+        if self._periodic_save_task is not None:
+            self._periodic_save_task.cancel()
+            try:
+                await self._periodic_save_task
+            except asyncio.CancelledError:
+                pass
+            self._periodic_save_task = None
+        try:
+            self.text_memory.save()
+        except Exception as e:
+            print(f"[Stop Save Error] {e}")
         await self.app.stop()

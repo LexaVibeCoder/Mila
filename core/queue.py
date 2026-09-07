@@ -9,6 +9,7 @@ interrupt a human mid-typing.
 
 import asyncio
 import random
+import re
 import time
 
 from pytdbot import types
@@ -25,6 +26,18 @@ from core.tg_adapter import (
     send_text, send_typing,
     parse_chat_action_update, is_typing_like_action, is_cancel_action,
 )
+
+
+# Model sometimes copies the "[YYYY-MM-DD HH:MM:SS]" metadata prefix from
+# history context into its reply. That prefix is system metadata, never speech.
+_LEADING_TIMESTAMP_RE = re.compile(
+    r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*"
+)
+
+
+def strip_leading_timestamp(text: str) -> str:
+    """Remove a leading '[date time]' copied from history context."""
+    return _LEADING_TIMESTAMP_RE.sub("", text or "", count=1)
 
 
 class MessageCoordinate:
@@ -286,6 +299,19 @@ class MessageCoordinate:
             return "typing"
         return None
 
+    def _restore_pending(self, chat_id: str, batch_text: str) -> None:
+        """Put a drained-but-undelivered batch back to the front of the queue.
+
+        Called when a run is aborted (new message / peer typing) after its
+        batch was already drained: without this the worker would restart
+        with an empty queue and the turn would be silently dropped.
+        Restarting is cheap — pre-drain checks return before any LLM call.
+        """
+        if not (batch_text or "").strip():
+            return
+        current = self._pending.get(chat_id) or []
+        self._pending[chat_id] = [batch_text] + current
+
     async def _generate_for_chat(self, client, chat_id: str) -> bool:
         """Send the accumulated batch to the pipeline.
 
@@ -365,12 +391,13 @@ class MessageCoordinate:
             ):
                 # If a new message arrived or the peer started typing
                 # mid-generation → stop and wait for their message.
+                # The batch was already drained: put it back if nothing was
+                # delivered yet, otherwise this turn would be silently lost.
                 reason = self._interrupted(chat_id, event)
-                if reason == "message":
-                    print("[Batch] New message during generation — cancelling run")
-                    return True
-                if reason == "typing":
-                    print("[Batch] Peer typing during generation — cancelling run")
+                if reason is not None:
+                    if not sent_any and not has_silence_action:
+                        self._restore_pending(chat_id, batch_text)
+                    print(f"[Batch] Interrupted during generation ({reason}) — batch restored")
                     return True
 
                 etype = gen_event.get("type")
@@ -383,13 +410,14 @@ class MessageCoordinate:
                         # Last-chance check right before sending: don't
                         # interrupt the user while they type.
                         pre_send = self._interrupted(chat_id, event)
-                        if pre_send == "message":
-                            print("[Batch] New message before send — cancelling run")
+                        if pre_send is not None:
+                            if not sent_any and not has_silence_action:
+                                self._restore_pending(chat_id, batch_text)
+                            print(f"[Batch] Interrupted before send ({pre_send}) — batch restored")
                             return True
-                        if pre_send == "typing":
-                            print("[Batch] Peer typing before send — cancelling run")
-                            return True
-                        send_text_content = action.get("text", "").strip()
+                        send_text_content = strip_leading_timestamp(
+                            action.get("text", "").strip()
+                        )
                         target_chat_id = action.get("chat_id", chat_id)
                         if send_text_content:
                             print(f"\n[SENDING] {send_text_content[:100]}...")
@@ -440,33 +468,22 @@ class MessageCoordinate:
                 elif etype == "error":
                     print(f"\n[Pipeline Error] {gen_event.get('error')}")
 
-            # ── Post-processing (fallback send / silent save) ──
-            # Don't fallback-send while the user is typing or a new message
-            # arrived — restart and wait for the full message instead.
+            # ── Post-processing (silent save) ──
+            # NOTE: there is intentionally NO fallback send of `thoughts`:
+            # thoughts are the private monologue and must never reach the chat.
+            # If the model wants the user to see text, it must use send_message.
+            # Don't do anything while the user is typing or a new message
+            # arrived — restore the batch and wait for the full message instead.
             post_reason = self._interrupted(chat_id, event)
             if post_reason is not None:
-                print(f"[Batch] Interrupted after generation ({post_reason}) — waiting for message")
+                if not sent_any and not has_silence_action:
+                    self._restore_pending(chat_id, batch_text)
+                print(f"[Batch] Interrupted after generation ({post_reason}) — batch restored")
                 return True
             if not sent_any and not has_silence_action and full_response:
-                stripped = full_response.strip()
-                if len(stripped) > 80:
-                    print("\n[⚠️ FALLBACK] No send_message — auto-sending...")
-                    try:
-                        await send_typing(client, int(chat_id))
-                    except Exception:
-                        pass
-                    await asyncio.sleep(random.uniform(0.5, 2.0))
-                    try:
-                        await send_text(client, int(chat_id), stripped)
-                        add_chunk(chat_id, str(bot.me.id), content=stripped,
-                                  llm_full_response=stripped, token_count=0, type='raw')
-                        push_message(chat_id, stripped, source_chunk_id=None, role="assistant")
-                        print("[✓] Fallback sent")
-                    except Exception as e:
-                        print(f"[✗ ERROR] Fallback send failed: {e}")
-                elif full_response:
-                    add_chunk(chat_id, str(bot.me.id), content="",
-                              llm_full_response=full_response, token_count=0, type='raw')
+                print("[Silent] No send_message action — staying silent (thoughts are private)")
+                add_chunk(chat_id, str(bot.me.id), content="",
+                          llm_full_response=full_response, token_count=0, type='raw')
             elif has_silence_action and full_response:
                 add_chunk(chat_id, str(bot.me.id), content="",
                           llm_full_response=full_response, token_count=0, type='raw')

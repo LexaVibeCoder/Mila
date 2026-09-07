@@ -34,9 +34,13 @@ def _get_conn():
     db_dir = os.path.dirname(CONTEXT_DB_PATH)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(CONTEXT_DB_PATH)
+    # timeout=30 + busy_timeout: bot and Observatory write from two
+    # processes — wait instead of failing with "database is locked".
+    conn = sqlite3.connect(CONTEXT_DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -195,7 +199,8 @@ def get_context_within_token_limit(chat_id: str, max_tokens: int) -> List[Dict]:
         conn.close()
 
 
-def pop_oldest_messages_by_tokens(chat_id: str, target_tokens: int) -> List[Dict]:
+def peek_oldest_messages_by_tokens(chat_id: str, target_tokens: int) -> List[Dict]:
+    """Read-only preview of the oldest messages (~target_tokens). No deletion."""
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     conn = _get_conn()
@@ -208,30 +213,46 @@ def pop_oldest_messages_by_tokens(chat_id: str, target_tokens: int) -> List[Dict
         if not all_messages:
             return []
 
-        to_remove = []
+        selected = []
         accumulated_tokens = 0
         for msg in all_messages:
             msg_tokens = msg.get("token_count", 0) or count_tokens(msg.get("content", ""))
-            to_remove.append(msg)
+            selected.append(msg)
             accumulated_tokens += msg_tokens
             if accumulated_tokens >= target_tokens:
                 break
 
-        if not to_remove:
-            return []
-
-        ids_to_remove = [r["id"] for r in to_remove]
-
-        placeholders = ",".join("?" for _ in ids_to_remove)
-        conn.execute(
-            f"DELETE FROM [{table}] WHERE id IN ({placeholders})",
-            ids_to_remove
-        )
-        conn.commit()
-
-        return to_remove
+        return selected
     finally:
         conn.close()
+
+
+def delete_messages_by_ids(chat_id: str, ids: List[int]) -> int:
+    """Delete messages by row ids. Returns the number of rows removed."""
+    if not ids:
+        return 0
+    ensure_chat_table(chat_id)
+    table = _table_name(chat_id)
+    conn = _get_conn()
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        cur = conn.execute(
+            f"DELETE FROM [{table}] WHERE id IN ({placeholders})",
+            ids,
+        )
+        conn.commit()
+        return cur.rowcount if cur.rowcount is not None else 0
+    finally:
+        conn.close()
+
+
+def pop_oldest_messages_by_tokens(chat_id: str, target_tokens: int) -> List[Dict]:
+    """Legacy atomic pop (peek + delete). Prefer peek → summarize → delete."""
+    selected = peek_oldest_messages_by_tokens(chat_id, target_tokens)
+    if not selected:
+        return []
+    delete_messages_by_ids(chat_id, [r["id"] for r in selected])
+    return selected
 
 
 def pop_oldest_messages(chat_id: str, count: int) -> List[Dict]:

@@ -93,6 +93,15 @@ class Settings(BaseSettings):
     # which works both inside Docker (when TZ is set) and on the host.
     LOCAL_TIMEZONE: str = ""
 
+    # Observatory web panel.
+    # If OBSERVATORY_PASSWORD is empty, auth is off: keep the panel
+    # localhost-only via compose ports ("127.0.0.1:8080:8080").
+    # The server itself always binds 0.0.0.0 (container loopback is
+    # unreachable from the host); OBSERVATORY_HOST overrides if needed.
+    OBSERVATORY_USERNAME: str = "admin"
+    OBSERVATORY_PASSWORD: str = ""
+    OBSERVATORY_HOST: str = ""
+
     # Message batching / debounce
     MESSAGE_DEBOUNCE_SECONDS: float = 2.0  # Wait window after the last message before responding
     # Full peer-typing support (TDLib updateChatAction):

@@ -15,7 +15,7 @@ from core.sleep.manager import (
     start_auto_sleep_scheduler
 )
 from core.queue import MessageCoordinate
-from core.tg_adapter import is_text_message, is_private_chat
+from core.tg_adapter import is_private_chat
 from core.tg_auth import register_auth_handlers
 
 
@@ -57,9 +57,10 @@ class MilaUserbot:
             # Skip our own outgoing messages to avoid self-loops.
             if message.is_outgoing:
                 return
-            # Replaces pyrogram `filters.text & filters.private`.
-            if not is_text_message(message):
-                return
+            # v1 presence model: every private message is a notification
+            # (text / photo / voice / ...). Classification happens in
+            # queue.handle() → tg_adapter.normalize_event(); nothing is
+            # dropped here except non-private chats.
             if not await is_private_chat(c, message.chat_id):
                 return
             await self.handle_text_message(c, message)

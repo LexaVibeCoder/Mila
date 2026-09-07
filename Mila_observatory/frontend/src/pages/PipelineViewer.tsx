@@ -75,6 +75,28 @@ function chatLabel(displayName: string | undefined, chatId: string): string {
   return shortChat(chatId);
 }
 
+// Multimodal messages arrive as OpenAI content blocks
+// ([{type:'text',text},{type:'image_url',...},{type:'input_audio',...}]).
+// No preview needed — short labels only. Never return an object
+// (React error #31: objects are not valid as a child).
+function renderMessageContent(content: unknown): string {
+  if (content === null || content === undefined) return '—';
+  if (typeof content === 'string') return content || '—';
+  const parts = Array.isArray(content) ? content : [content];
+  const out: string[] = [];
+  for (const p of parts) {
+    if (typeof p === 'string') { out.push(p); continue; }
+    if (typeof p !== 'object' || p === null) continue;
+    const t = (p as Record<string, unknown>).type;
+    if (t === 'text') out.push(String((p as Record<string, unknown>).text ?? ''));
+    else if (t === 'image_url') out.push('[фото]');
+    else if (t === 'input_audio') out.push('[голосовое сообщение]');
+    else if (typeof t === 'string' && t) out.push(`[${t}]`);
+  }
+  const s = out.filter(Boolean).join('\n');
+  return s || '—';
+}
+
 export default function PipelineViewer() {
   const [logs, setLogs] = useState<PipelineLogItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -156,7 +178,7 @@ export default function PipelineViewer() {
             <div key={i} style={styles.msgCard}>
               <span style={{ ...styles.roleBadge, ...roleStyle(m.role) }}>{m.role || 'unknown'}</span>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '8px' }}>#{i + 1}</span>
-              <div style={styles.msgBody}>{m.content}</div>
+              <div style={styles.msgBody}>{renderMessageContent(m.content)}</div>
             </div>
           ))}
 

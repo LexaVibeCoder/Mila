@@ -7,9 +7,13 @@ Python 3.11 compatible.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from typing import Optional
 
 from pytdbot import types
+
+from core.events import Notification
 
 
 @dataclass
@@ -90,6 +94,208 @@ async def send_typing(client, chat_id: int) -> None:
     if isinstance(res, types.Error):
         # Typing is best-effort; ignore rate limits / closed chats.
         pass
+
+
+# ------------------------------------------------------------------
+# Multimodal notifications (v1: text / photo / voice, rest as stub).
+#
+# Every incoming private message becomes a Notification, never dropped.
+# Media bytes are downloaded via downloadFile(synchronous=True) and passed
+# to the LLM natively; text pipeline keeps only placeholder_text().
+# ------------------------------------------------------------------
+
+def _content_attr(content, *names):
+    """Duck-typed getattr: works across pytdbot versions."""
+    for n in names:
+        v = getattr(content, n, None)
+        if v is not None:
+            return v
+    if isinstance(content, dict):
+        for n in names:
+            if n in content:
+                return content[n]
+    return None
+
+
+def _formatted_text_to_str(ft) -> str:
+    if ft is None:
+        return ""
+    if isinstance(ft, str):
+        return ft.strip()
+    t = getattr(ft, "text", None)
+    if isinstance(t, str):
+        return t.strip()
+    if isinstance(ft, dict):
+        return str(ft.get("text", "") or "").strip()
+    return ""
+
+
+def classify_message_content(message) -> tuple[str, str, Optional[int], str]:
+    """Return (kind, caption, file_id, extra_hint). Never raises."""
+    try:
+        content = getattr(message, "content", None)
+        if content is None:
+            return "unsupported", "", None, ""
+        cname = type(content).__name__
+        if isinstance(content, dict):
+            cname = str(content.get("@type", cname))
+        low = cname.lower()
+
+        # Plain text
+        if "messagetext" in low:
+            txt = getattr(message, "text", "") or _formatted_text_to_str(
+                _content_attr(content, "text"))
+            return "text", (txt or "").strip(), None, ""
+
+        # Photo: content.photo.sizes[-1].photo (File) + caption
+        if "messagephoto" in low:
+            photo = _content_attr(content, "photo")
+            caption = _formatted_text_to_str(_content_attr(content, "caption"))
+            fid = _pick_biggest_photo_file_id(photo)
+            return "photo", caption, fid, ""
+
+        # Voice note: content.voice_note.voice (File)
+        if "messagevoicenote" in low:
+            vn = _content_attr(content, "voice_note", "voiceNote", "voice")
+            caption = _formatted_text_to_str(_content_attr(content, "caption"))
+            fid = _extract_file_id(vn, ("voice", "file", "audio"))
+            return "voice", caption, fid, ""
+
+        # Video / video note — placeholder in v1
+        if "messagevideonote" in low:
+            return "video_note", "", None, ""
+        if "messagevideo" in low:
+            caption = _formatted_text_to_str(_content_attr(content, "caption"))
+            return "video", caption, None, ""
+        if "messagesticker" in low:
+            st = _content_attr(content, "sticker")
+            emoji = ""
+            set_name = ""
+            if st is not None:
+                emoji = getattr(st, "emoji", "") or (st.get("emoji", "") if isinstance(st, dict) else "")
+                set_name = getattr(st, "set_name", "") or (st.get("set_name", "") if isinstance(st, dict) else "")
+            hint = " ".join(x for x in [emoji, f"({set_name})" if set_name else ""] if x).strip()
+            return "sticker", "", None, hint
+        if "messageanimation" in low:
+            caption = _formatted_text_to_str(_content_attr(content, "caption"))
+            return "animation", caption, None, ""
+        if "messageaudio" in low:
+            caption = _formatted_text_to_str(_content_attr(content, "caption"))
+            return "audio", caption, None, ""
+        if "messagedocument" in low:
+            caption = _formatted_text_to_str(_content_attr(content, "caption"))
+            return "document", caption, None, ""
+        return "unsupported", "", None, ""
+    except Exception:
+        return "unsupported", "", None, ""
+
+
+def _pick_biggest_photo_file_id(photo) -> Optional[int]:
+    try:
+        if photo is None:
+            return None
+        sizes = getattr(photo, "sizes", None)
+        if isinstance(photo, dict):
+            sizes = photo.get("sizes", [])
+        if not sizes:
+            return None
+        biggest = max(sizes, key=lambda s: (
+            (getattr(s, "width", 0) or (s.get("width", 0) if isinstance(s, dict) else 0)) *
+            (getattr(s, "height", 0) or (s.get("height", 0) if isinstance(s, dict) else 0))
+        ))
+        inner = getattr(biggest, "photo", None)
+        if isinstance(biggest, dict):
+            inner = biggest.get("photo", {})
+        return _extract_file_id(inner, ("photo", "file"))
+    except Exception:
+        return None
+
+
+def _extract_file_id(obj, keys=("file",)) -> Optional[int]:
+    try:
+        if obj is None:
+            return None
+        if isinstance(obj, int):
+            return obj
+        for k in keys:
+            v = getattr(obj, k, None) if not isinstance(obj, dict) else obj.get(k)
+            if isinstance(v, int) and v:
+                return v
+            if v is not None and not isinstance(v, (str, bytes)):
+                fid = getattr(v, "id", None) if not isinstance(v, dict) else v.get("id")
+                if isinstance(fid, int) and fid:
+                    return fid
+        direct = getattr(obj, "id", None) if not isinstance(obj, dict) else obj.get("id")
+        if isinstance(direct, int) and direct:
+            return direct
+        return None
+    except Exception:
+        return None
+
+
+async def normalize_event(client, message) -> Notification:
+    """Build a Notification for ANY private message. Never drops, never raises."""
+    try:
+        sender_name = await resolve_sender_name(client, message)
+    except Exception:
+        sender_name = "Unknown"
+    try:
+        chat_name = await resolve_chat_name(client, message)
+    except Exception:
+        chat_name = "Личный чат"
+    kind, caption, file_id, hint = classify_message_content(message)
+    from_id = getattr(message, "from_id", None) or getattr(message, "sender_id", None)
+    if isinstance(from_id, dict):
+        from_id = from_id.get("user_id", getattr(message, "chat_id", 0))
+    try:
+        user_id = str(int(from_id)) if from_id else str(message.chat_id)
+    except (TypeError, ValueError):
+        user_id = str(getattr(message, "chat_id", "?"))
+    # Text fallback for caption-less text messages
+    if kind == "text" and not caption:
+        try:
+            caption = (getattr(message, "text", "") or "").strip()
+        except Exception:
+            caption = ""
+    return Notification(
+        kind=kind,
+        chat_id=str(getattr(message, "chat_id", "?")),
+        user_id=user_id,
+        text=caption,
+        message_id=int(getattr(message, "id", 0) or 0),
+        sender_name=sender_name,
+        chat_name=chat_name,
+        file_id=file_id,
+        extra_hint=hint,
+    )
+
+
+async def download_notification_media(client, notif: Notification,
+                                      max_mb: int = 20) -> Optional[str]:
+    """Download media for photo/voice via TDLib. Returns local path or None."""
+    if notif.kind not in ("photo", "voice") or not notif.file_id:
+        return None
+    try:
+        from config import settings
+        media_dir = getattr(settings, "MEDIA_DIR", "data/media")
+        os.makedirs(media_dir, exist_ok=True)
+        res = await client.downloadFile(
+            file_id=int(notif.file_id), priority=16, synchronous=True)
+        if isinstance(res, types.Error):
+            print(f"[Media] downloadFile failed: {res.code} {res.message}")
+            return None
+        local = getattr(getattr(res, "local", None), "path", None)
+        if isinstance(res, dict):
+            local = ((res.get("local") or {}).get("path"))
+        if not local or not os.path.isfile(local):
+            return None
+        if os.path.getsize(local) > max_mb * 1024 * 1024:
+            print(f"[Media] file too big, skipping: {local}")
+            return None
+        return local
+    except Exception as e:
+        print(f"[Media] download error: {e}")
+        return None
 
 
 # ------------------------------------------------------------------

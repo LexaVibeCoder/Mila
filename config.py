@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     # Data
     SQLITE_PATH: str = "data/mila.db"
     PHOTOS_DIR: str = "data/photos"
+    MEDIA_DIR: str = "data/media"
+    MAX_MEDIA_MB: int = 20
     DAILY_REPORTS: str = "data/daily reports"
 
     # Pipeline

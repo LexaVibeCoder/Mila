@@ -108,8 +108,14 @@ class NeedsTracker:
     def apply_action_effect(self, action_type: str):
         if action_type == "send_message":
             self._need_social_offset = max(self._need_social_offset - 0.15, -0.5)
+        elif action_type == "enter_dialog":
+            self._need_social_offset = max(self._need_social_offset - 0.1, -0.5)
         elif action_type == "silence":
             self._fatigue_offset = max(self._fatigue_offset - 0.05, -0.3)
+        elif action_type == "enter_rest":
+            self._fatigue_offset = max(self._fatigue_offset - 0.05, -0.3)
+        elif action_type == "start_sleep":
+            self._fatigue_offset = max(self._fatigue_offset - 0.1, -0.3)
         elif action_type == "search_memory":
             self._boredom_offset = max(self._boredom_offset - 0.1, -0.5)
         elif action_type == "write_diary":

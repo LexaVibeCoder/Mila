@@ -72,7 +72,8 @@ class ThinkPipeline:
         user_message: str,
         user_visible_history: List[Dict[str, str]],
         agent_internal_history: List[Dict[str, str]],
-        user_profile: Optional[Dict[str, Any]] = None
+        user_profile: Optional[Dict[str, Any]] = None,
+        media: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Main entry point. Process user message through single think stage.
@@ -102,6 +103,8 @@ class ThinkPipeline:
             # We do NOT append user_message again to avoid duplication,
             # and we do NOT truncate — the token limit is already applied.
             messages = list(agent_internal_history)
+            if media:
+                messages = self._attach_media(messages, media)
 
             # Run the think loop
             all_actions = []
@@ -197,6 +200,23 @@ class ThinkPipeline:
                         silence_detected = True
                         print("  [Silence → stopping pipeline]")
                         break
+
+                    if executed.get("type") == "start_sleep" and executed.get("status") == "sleeping":
+                        silence_detected = True
+                        print("  [Sleep started → stopping pipeline]")
+                        break
+
+                    if executed.get("type") in ("enter_dialog", "enter_rest", "enter_working") \
+                            and executed.get("status") == "switched":
+                        has_search = True
+                        messages.append({"role": "system", "content": (
+                            f"Presence switched: {executed.get('type')} → "
+                            f"{executed.get('chat_id', executed.get('state', ''))}. "
+                            f"Now decide what to do in the new state "
+                            f"(answer, stay silent, or switch again)."
+                        )})
+                        print("  [Presence switched → re-calling]")
+                        continue
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True
@@ -298,6 +318,41 @@ class ThinkPipeline:
         )
         return await executor.execute_action(action)
 
+    @staticmethod
+    def _attach_media(messages: List[Dict], media: Dict[str, Any]) -> List[Dict]:
+        """Attach native photo/audio to the LAST user message (current event).
+
+        History stays text-only (placeholders); only the current notification
+        carries bytes. Falls back to text-only if nothing usable.
+        """
+        try:
+            from core.media import build_multimodal_parts
+            image_urls = media.get("image_data_urls") or []
+            audio = media.get("audio")
+            event_line = media.get("event_line", "")
+            if not image_urls and audio is None:
+                if event_line:
+                    messages = list(messages)
+                    messages.append({"role": "system", "content": event_line})
+                return messages
+            messages = list(messages)
+            # Find last user message and enrich it
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    base = messages[i].get("content", "")
+                    if isinstance(base, list):
+                        # Already multimodal — leave as is
+                        break
+                    parts = build_multimodal_parts(str(base), image_urls, audio)
+                    messages[i] = {"role": "user", "content": parts}
+                    break
+            if event_line:
+                messages.append({"role": "system", "content": event_line})
+            return messages
+        except Exception as e:
+            print(f"[Pipeline] media attach failed, text-only: {e}")
+            return messages
+
     # ------------------------------------------------------------------
     # Detailed logging to file
     # ------------------------------------------------------------------
@@ -339,6 +394,7 @@ class ThinkPipeline:
         user_visible_history: List[Dict[str, str]],
         agent_internal_history: List[Dict[str, str]],
         user_profile: Optional[Dict[str, Any]] = None,
+        media: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Streaming version of process_message.
@@ -365,6 +421,8 @@ class ThinkPipeline:
             tool_definitions = get_tool_definitions()
 
             messages = list(agent_internal_history)
+            if media:
+                messages = self._attach_media(messages, media)
 
             all_actions = []
             final_thoughts = ""
@@ -450,6 +508,22 @@ class ThinkPipeline:
                         silence_detected = True
                         print("  [Silence → stopping pipeline]")
                         break
+
+                    if executed.get("type") == "start_sleep" and executed.get("status") == "sleeping":
+                        silence_detected = True
+                        print("  [Sleep started → stopping pipeline]")
+                        break
+
+                    if executed.get("type") in ("enter_dialog", "enter_rest", "enter_working") \
+                            and executed.get("status") == "switched":
+                        has_search = True
+                        messages.append({"role": "system", "content": (
+                            f"Presence switched: {executed.get('type')} → "
+                            f"{executed.get('chat_id', executed.get('state', ''))}. "
+                            f"Now decide what to do in the new state."
+                        )})
+                        print("  [Presence switched → re-calling]")
+                        continue
 
                     if executed.get("type") == "search_memory" and executed.get("status") == "searched":
                         has_search = True

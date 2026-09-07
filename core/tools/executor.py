@@ -11,12 +11,14 @@ def get_tool_definitions() -> List[Dict]:
         silence_enabled = tools_enabled.get("silence", True)
         diary_enabled = tools_enabled.get("write_diary", True)
         diary_update_enabled = tools_enabled.get("update_diary", True)
+        presence_enabled = tools_enabled.get("presence", True)
     except ImportError:
         search_enabled = True
         send_enabled = True
         silence_enabled = True
         diary_enabled = True
         diary_update_enabled = True
+        presence_enabled = True
 
     action_enum = []
     if send_enabled:
@@ -29,6 +31,8 @@ def get_tool_definitions() -> List[Dict]:
         action_enum.append("write_diary")
     if diary_update_enabled:
         action_enum.append("update_diary")
+    if presence_enabled:
+        action_enum.extend(["enter_dialog", "enter_rest", "enter_working", "start_sleep"])
 
     if not action_enum:
         action_enum.append("silence")
@@ -112,6 +116,16 @@ def get_tool_definitions() -> List[Dict]:
                                                 "type": "string",
                                                 "description": "ID of an existing diary entry to update (for update_diary only). "
                                                                "Take it from the diary block in the system prompt, e.g. '[ID: 2]'."
+                                            },
+                                            "duration_minutes": {
+                                                "type": "integer",
+                                                "description": "Sleep duration in minutes (for start_sleep only). "
+                                                               "Required — how long Mila wants to sleep."
+                                            },
+                                            "note": {
+                                                "type": "string",
+                                                "description": "Short note/reason for presence tools "
+                                                               "(enter_dialog / enter_rest / enter_working / start_sleep)."
                                             }
                                         }
                                     }
@@ -154,6 +168,14 @@ class ToolExecutor:
             return await self._handle_write_diary(params)
         elif action_type == "update_diary":
             return await self._handle_update_diary(params)
+        elif action_type == "enter_dialog":
+            return await self._handle_enter_dialog(params)
+        elif action_type == "enter_rest":
+            return await self._handle_enter_rest(params)
+        elif action_type == "enter_working":
+            return await self._handle_enter_working(params)
+        elif action_type == "start_sleep":
+            return await self._handle_start_sleep(params)
         else:
             return {
                 "type": action_type,
@@ -299,3 +321,60 @@ class ToolExecutor:
             "entry_id": entry_id,
             "status": "updated"
         }
+
+    # ------------------------------------------------------------------
+    # Presence tools — Mila switches her own state.
+    # ------------------------------------------------------------------
+
+    async def _handle_enter_dialog(self, params: Dict) -> Dict:
+        from core.presence import enter_dialog
+        from core.db import get_user_display_name
+        chat_id = str(params.get("chat_id", self.chat_id or "")).strip()
+        if not chat_id:
+            return {"type": "enter_dialog", "status": "error",
+                    "error": "Missing chat_id"}
+        note = str(params.get("note", "") or "")
+        try:
+            user_name = get_user_display_name(chat_id)
+        except Exception:
+            user_name = chat_id
+        state = enter_dialog(chat_id, user_name, note)
+        print(f"[Presence] → dialog with {user_name} (chat {chat_id})")
+        return {"type": "enter_dialog", "chat_id": chat_id,
+                "user_name": user_name, "state": state, "status": "switched"}
+
+    async def _handle_enter_rest(self, params: Dict) -> Dict:
+        from core.presence import enter_rest
+        note = str(params.get("note", "") or "")
+        state = enter_rest(note)
+        print("[Presence] → rest")
+        return {"type": "enter_rest", "state": state, "status": "switched"}
+
+    async def _handle_enter_working(self, params: Dict) -> Dict:
+        from core.presence import enter_working
+        note = str(params.get("note", "") or "")
+        state = enter_working(note)
+        print(f"[Presence] → working ({note[:60]})")
+        return {"type": "enter_working", "state": state, "status": "switched"}
+
+    async def _handle_start_sleep(self, params: Dict) -> Dict:
+        from core.presence import enter_sleep_note
+        try:
+            duration = int(params.get("duration_minutes", 0) or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration <= 0:
+            return {"type": "start_sleep", "status": "error",
+                    "error": "Missing duration_minutes (how long to sleep)"}
+        duration = max(1, min(duration, 12 * 60))
+        note = str(params.get("note", "") or "")
+        enter_sleep_note(note or f"{duration} min")
+        try:
+            from core.sleep.manager import start_sleep
+            result = await start_sleep(duration_minutes=duration,
+                                       triggered_by="mila_tool")
+        except Exception as e:
+            return {"type": "start_sleep", "status": "error", "error": str(e)}
+        print(f"[Presence] → sleep for {duration} min")
+        return {"type": "start_sleep", "duration_minutes": duration,
+                "sleep_result": result, "status": "sleeping"}

@@ -1,15 +1,10 @@
 """
-Per-chat message batching with debounce + peer typing awareness.
+Per-chat notification worker with wake-on-every-event + peer typing awareness.
 
-Each chat gets a single worker that:
-
-1. Collects messages pushed to the context buffer during a quiet window.
-2. Restarts the window whenever a new message arrives (debounce).
-3. If the peer is typing (TDLib updateChatAction) — stops and waits until
-   they send the message, stop typing (+grace), or max wait expires.
-4. Sends the accumulated messages to the LLM once.
-5. If a new message arrives OR typing starts DURING generation — cancels
-   the LLM run (and any pending send) and restarts the cycle.
+v1 presence model: every incoming message is a NOTIFICATION, not an order.
+Each notification wakes the LLM once (no debounce — Mila herself decides:
+answer, switch state, or stay silent). Typing-wait is kept so we don't
+interrupt a human mid-typing.
 """
 
 import asyncio
@@ -20,12 +15,14 @@ from pytdbot import types
 
 from config import settings
 from core.db import (
-    ensure_user_exists, ensure_chat_exists, add_chunk, get_user_info
+    ensure_user_exists, ensure_chat_exists, add_chunk, get_user_info,
+    get_user_display_name, log_media,
 )
 from core.context.buffer import push_message
 from core.needs.tracker import get_tracker as get_needs_tracker
 from core.tg_adapter import (
-    normalize_message, send_text, send_typing,
+    normalize_event, download_notification_media,
+    send_text, send_typing,
     parse_chat_action_update, is_typing_like_action, is_cancel_action,
 )
 
@@ -41,6 +38,8 @@ class MessageCoordinate:
         self._events = {}      # chat_id -> asyncio.Event (wake-up signal)
         self._pending = {}     # chat_id -> list[str] (text accumulated this batch)
         self._tasks = {}       # chat_id -> asyncio.Task
+        self._chat_user = {}   # chat_id -> sender user_id (for persona/pipeline)
+        self._batch_media = {}  # chat_id -> {"image_data_urls": [...], "audio": (b64, fmt)|None}
         # Peer typing state: chat_id -> monotonic timestamp of last
         # non-cancel updateChatAction. Expires via TYPING_FRESHNESS_SECONDS.
         self._typing_last: dict[str, float] = {}
@@ -100,28 +99,66 @@ class MessageCoordinate:
     # ------------------------------------------------------------------
 
     async def handle(self, client, message: types.Message):
-        nm = await normalize_message(client, message)
-        user_id = nm.user_id
-        chat_id = nm.chat_id
-        text = nm.text
+        notif = await normalize_event(client, message)
+        user_id = notif.user_id
+        chat_id = notif.chat_id
+        placeholder = notif.placeholder_text()
+        if not placeholder.strip():
+            placeholder = f"[{notif.kind}]"
 
         # Always save to canonical storage immediately.
-        ensure_user_exists(user_id, nm.sender_name)
-        ensure_chat_exists(chat_id, nm.chat_name)
-        chunk_id = add_chunk(chat_id, user_id, text, token_count=0, type='raw')
+        ensure_user_exists(user_id, notif.sender_name)
+        ensure_chat_exists(chat_id, notif.chat_name)
+
+        # Download photo/voice for native LLM input (best-effort).
+        local_path = None
+        if notif.kind in ("photo", "voice"):
+            try:
+                local_path = await download_notification_media(
+                    client, notif, max_mb=getattr(settings, "MAX_MEDIA_MB", 20))
+            except Exception as e:
+                print(f"[Media] download skipped: {e}")
+            if local_path:
+                notif.local_path = local_path
+                try:
+                    log_media(chat_id, user_id, local_path, placeholder[:200])
+                except Exception:
+                    pass
 
         # If Mila is sleeping — just queue the message, no batching.
         from core.sleep.manager import is_sleeping, queue_incoming_message
         if is_sleeping():
-            queue_incoming_message(chat_id, user_id, text)
+            queue_incoming_message(chat_id, user_id, placeholder)
             print(f"[Sleep] Message queued from {user_id[:8]}... in {chat_id[:8]}...")
             return
 
+        chunk_id = add_chunk(chat_id, user_id, placeholder, token_count=0,
+                             type='raw', kind=notif.kind, media_path=local_path)
+
         # Push to working memory now so it appears in the pending batch.
-        push_message(chat_id, text, source_chunk_id=chunk_id)
+        push_message(chat_id, placeholder, source_chunk_id=chunk_id,
+                     kind=notif.kind)
 
         # Accumulate text for this batch.
-        self._pending.setdefault(chat_id, []).append(text)
+        self._pending.setdefault(chat_id, []).append(placeholder)
+        self._chat_user[chat_id] = user_id
+
+        # Accumulate native media for the current batch.
+        if local_path:
+            try:
+                from core.media import encode_image_for_llm, encode_audio_for_llm
+                slot = self._batch_media.setdefault(
+                    chat_id, {"image_data_urls": [], "audio": None})
+                if notif.kind == "photo":
+                    url = encode_image_for_llm(local_path)
+                    if url:
+                        slot["image_data_urls"].append(url)
+                elif notif.kind == "voice":
+                    audio = encode_audio_for_llm(local_path)
+                    if audio:
+                        slot["audio"] = audio
+            except Exception as e:
+                print(f"[Media] encode skipped: {e}")
 
         # Wake the worker (or start one if none running).
         event = self._events.setdefault(chat_id, asyncio.Event())
@@ -140,7 +177,9 @@ class MessageCoordinate:
     async def _worker(self, client, chat_id: str):
         try:
             while True:
-                # 1. Debounce — wait until the user goes quiet.
+                # 1. Wake-on-every-notification (v1): no debounce — Mila herself
+                #    decides on each event. Just yield once so a photo+caption
+                #    arriving in the same tick coalesce.
                 await self._debounce(chat_id)
 
                 # 2. If the peer is typing — stop and wait for their message.
@@ -175,16 +214,15 @@ class MessageCoordinate:
             raise
 
     async def _debounce(self, chat_id: str):
-        """Wait until no new message arrives for MESSAGE_DEBOUNCE_SECONDS."""
+        """Wake-on-every-notification: return on next tick (no quiet window).
+
+        Typing-wait below still protects against interrupting the human.
+        MESSAGE_DEBOUNCE_SECONDS is intentionally ignored in v1 presence model.
+        """
         event = self._events[chat_id]
-        while True:
-            event.clear()
-            try:
-                await asyncio.wait_for(event.wait(), settings.MESSAGE_DEBOUNCE_SECONDS)
-                # New message arrived during the window → restart the timer.
-                continue
-            except asyncio.TimeoutError:
-                return
+        event.clear()
+        await asyncio.sleep(0)
+        return
 
     async def _wait_typing(self, chat_id: str, client):
         """
@@ -272,8 +310,14 @@ class MessageCoordinate:
         if not batch_text.strip():
             return False
 
+        media = self._batch_media.pop(chat_id, None)
+        if media and not media.get("image_data_urls") and media.get("audio") is None:
+            media = None
+
         bot = self.bot
-        user_id = bot.pipeline.user_id
+        # Actual sender (fixes old bug where pipeline.user_id stayed "system",
+        # so Mila never saw the user's name).
+        user_id = self._chat_user.get(chat_id, bot.pipeline.user_id)
 
         # Compress context before processing (oldest messages → summary).
         await bot._compress_context(chat_id)
@@ -294,18 +338,10 @@ class MessageCoordinate:
             get_needs_tracker().apply_action_effect("silence")
             return False
 
-        # ── Typing indicator — runs only while the pipeline is processing ──
-        stop_typing = asyncio.Event()
-        async def typing_loop():
-            chat_int = int(chat_id)
-            while not stop_typing.is_set():
-                try:
-                    await send_typing(client, chat_int)
-                except Exception:
-                    pass
-                await asyncio.sleep(4)
-        typing_task = asyncio.create_task(typing_loop())
-
+        # NOTE: no typing indicator during the decision phase on purpose.
+        # The notification is not an order — Mila may stay silent or switch
+        # state. "Typing..." is shown only right before an actual send,
+        # so Telegram never shows her typing while she is merely deciding.
         try:
             # Build subject histories from the context buffer.
             raw_user_visible, raw_internal = bot._build_histories(chat_id)
@@ -324,7 +360,8 @@ class MessageCoordinate:
                 user_message=batch_text,
                 user_visible_history=user_visible_history,
                 agent_internal_history=agent_internal_history,
-                user_profile=get_user_info(user_id)
+                user_profile=get_user_info(user_id),
+                media=media,
             ):
                 # If a new message arrived or the peer started typing
                 # mid-generation → stop and wait for their message.
@@ -356,6 +393,10 @@ class MessageCoordinate:
                         target_chat_id = action.get("chat_id", chat_id)
                         if send_text_content:
                             print(f"\n[SENDING] {send_text_content[:100]}...")
+                            try:
+                                await send_typing(client, int(target_chat_id))
+                            except Exception:
+                                pass
                             await asyncio.sleep(random.uniform(0.3, 1.0))
                             try:
                                 await send_text(
@@ -380,6 +421,11 @@ class MessageCoordinate:
                     elif action.get("type") == "silence":
                         has_silence_action = True
                         print(f"\n[Silence Mode] No response. Reason: {action.get('reason', '')}")
+                    elif action.get("type") in ("enter_dialog", "enter_rest", "enter_working"):
+                        print(f"\n[Presence] {action.get('type')} → {action.get('chat_id', action.get('state', ''))}")
+                    elif action.get("type") == "start_sleep":
+                        has_silence_action = True
+                        print(f"\n[Sleep] Started for {action.get('duration_minutes')} min")
                     elif action.get("type") == "search_memory":
                         print(f"[Memory] Search: '{action.get('query', '')}'")
                     elif action.get("type") == "write_diary":
@@ -405,6 +451,10 @@ class MessageCoordinate:
                 stripped = full_response.strip()
                 if len(stripped) > 80:
                     print("\n[⚠️ FALLBACK] No send_message — auto-sending...")
+                    try:
+                        await send_typing(client, int(chat_id))
+                    except Exception:
+                        pass
                     await asyncio.sleep(random.uniform(0.5, 2.0))
                     try:
                         await send_text(client, int(chat_id), stripped)
@@ -429,6 +479,3 @@ class MessageCoordinate:
             print("[❌ CRITICAL ERROR] Unhandled batch exception:")
             traceback.print_exc()
             return False
-        finally:
-            stop_typing.set()
-            typing_task.cancel()

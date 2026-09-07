@@ -89,6 +89,7 @@ class LLMClient:
             kwargs["tool_choice"] = tool_choice
 
         last_error = None
+        audio_stripped = False
         for attempt in range(1, max_retries + 1):
             try:
                 start_time = time.time()
@@ -96,6 +97,14 @@ class LLMClient:
                 elapsed = time.time() - start_time
                 print(f"  [LLM] Response in {elapsed:.2f}s")
             except Exception as e:
+                # Fallback: if the model/gateway rejects native audio, retry
+                # text-only (placeholder stays in history) instead of failing.
+                if not audio_stripped and _contains_audio_part(kwargs.get("messages")):
+                    print(f"  [LLM] Audio rejected ({e}), retrying text-only...")
+                    audio_stripped = True
+                    kwargs["messages"] = _strip_audio_parts(kwargs.get("messages"))
+                    await asyncio.sleep(1.0)
+                    continue
                 print(f"  [LLM] API Error (attempt {attempt}): {e}")
                 last_error = e
 
@@ -141,6 +150,35 @@ class LLMClient:
             }
 
         raise last_error or Exception("Empty response from LLM API")
+
+
+def _contains_audio_part(messages) -> bool:
+    try:
+        for m in messages or []:
+            c = (m or {}).get("content")
+            if isinstance(c, list):
+                for p in c:
+                    if isinstance(p, dict) and p.get("type") == "input_audio":
+                        return True
+    except Exception:
+        pass
+    return False
+
+
+def _strip_audio_parts(messages):
+    out = []
+    for m in messages or []:
+        c = (m or {}).get("content")
+        if isinstance(c, list):
+            kept = [p for p in c
+                    if not (isinstance(p, dict) and p.get("type") == "input_audio")]
+            if not kept:
+                kept = [{"type": "text", "text": "[голосовое сообщение (аудио не поддерживается моделью)]"}]
+            elif all(isinstance(p, dict) and p.get("type") != "text" for p in kept):
+                kept = [{"type": "text", "text": "[вложение]"}] + kept
+            m = {**m, "content": kept}
+        out.append(m)
+    return out
 
     async def generate_stream(
         self,

@@ -164,6 +164,16 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
 
     parts = [header, static_prefix, relationship_block, needs_block]
 
+    # Presence block — Mila explicitly sees her state + who writes (name, not id).
+    try:
+        from core.presence import format_state_block
+        parts.append(format_state_block(
+            current_chat_id=str(chat_id) if chat_id else None,
+            current_user_name=user_name,
+        ))
+    except Exception:
+        pass
+
     diary_context = get_today_diary_context()
     if diary_context:
         parts.append(_load_prompt("DIARY_BLOCK").replace("{diary_context}", diary_context))

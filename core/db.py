@@ -87,7 +87,24 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    # Lightweight migrations for multimodality (safe on existing DBs).
+    _migrate_multimedia()
     print("Database initialized.")
+
+
+def _migrate_multimedia():
+    conn = get_conn()
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+        if "kind" not in cols:
+            conn.execute("ALTER TABLE chunks ADD COLUMN kind TEXT DEFAULT 'text'")
+        if "media_path" not in cols:
+            conn.execute("ALTER TABLE chunks ADD COLUMN media_path TEXT")
+        conn.commit()
+    except Exception as e:
+        print(f"[DB migrate] multimedia columns: {e}")
+    finally:
+        conn.close()
 
 def ensure_user_exists(user_id: str, user_name: str = None):
     conn = get_conn()
@@ -117,15 +134,22 @@ def ensure_chat_exists(chat_id: str, chat_name: str = None):
     finally:
         conn.close()
 
-def add_chunk(chat_id: str, user_id: str, content: str, token_count: int = 0, type: str = 'raw', llm_full_response: str = None):
+def add_chunk(chat_id: str, user_id: str, content: str, token_count: int = 0, type: str = 'raw', llm_full_response: str = None, kind: str = "text", media_path: str = None):
     chunk_id = str(uuid.uuid4())
     time_now = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
     try:
-        conn.execute(
-            "INSERT INTO chunks (chunk_id, chat_id, user_id, content, llm_full_response, type, token_count, time_start) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (chunk_id, chat_id, user_id, content, llm_full_response, type, token_count, time_now)
-        )
+        # Backward compatible: older DBs may lack kind/media_path until migrate runs.
+        try:
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, chat_id, user_id, content, llm_full_response, type, token_count, time_start, kind, media_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (chunk_id, chat_id, user_id, content, llm_full_response, type, token_count, time_now, kind, media_path)
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, chat_id, user_id, content, llm_full_response, type, token_count, time_start) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (chunk_id, chat_id, user_id, content, llm_full_response, type, token_count, time_now)
+            )
         conn.commit()
         return chunk_id
     finally:
@@ -152,6 +176,32 @@ def get_user_info(user_id: str) -> dict:
         cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
         row = cur.fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_user_display_name(user_id: str) -> str:
+    """Display name for prompts: preferred_name > user_name > short id."""
+    info = get_user_info(user_id)
+    if not info:
+        return f"user {str(user_id)[:8]}"
+    return info.get("preferred_name") or info.get("user_name") or f"user {str(user_id)[:8]}"
+
+
+def log_media(chat_id: str, user_id: str, file_path: str, description: str = ""):
+    """Record a media file in media_logs (best-effort)."""
+    import uuid as _uuid
+    media_id = str(_uuid.uuid4())
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO media_logs (media_id, chat_id, user_id, file_path, vlm_description) VALUES (?, ?, ?, ?, ?)",
+            (media_id, chat_id, user_id, file_path, description),
+        )
+        conn.commit()
+        return media_id
+    except Exception:
+        return None
     finally:
         conn.close()
 

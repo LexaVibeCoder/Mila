@@ -2,31 +2,22 @@
 
 **Файл**: `core/llm/client.py`
 
-OpenAI-совместимая обёртка для работы с LLM. Поддерживает горячую реконфигурацию, стриминг, ретраи с экспоненциальной задержкой.
+OpenAI-совместимая обёртка для работы с LLM. Поддерживает горячую реконфигурацию, стриминг, ретраи с экспоненциальной задержкой. Базовый URL нормализуется `normalize_api_base()` (достройка `/v1`).
 
 ## Класс LLMClient
 
 ```python
 class LLMClient:
-    def __init__(self, model, api_base, api_key, temperature=0.7, max_tokens=4096)
+    def __init__(self, model=None, api_base=None, api_key=None,
+                 max_tokens=None, temperature=None,
+                 top_p=None, frequency_penalty=None, presence_penalty=None)
 ```
 
-Создаёт `openai.AsyncOpenAI` внутри.
-
-### Параметры
-
-| Параметр | Описание |
-|----------|----------|
-| `model` | Название модели (например, `gpt-4`, `llama3`) |
-| `api_base` | Базовый URL (должен заканчиваться на `/v1`) |
-| `api_key` | API ключ |
-| `temperature` | Температура генерации |
-| `max_tokens` | Максимальное количество токенов в ответе |
-| `tool_choice` | По умолчанию `"auto"` |
+Создаёт `openai.AsyncOpenAI` внутри. `None`-параметры берутся из `config.py`: `LLM_API_BASE / LLM_API_KEY / MAIN_LLM_MODEL / MAIN_LLM_MAX_TOKENS (2048) / MAIN_LLM_TEMPERATURE (0.7)`; `top_p/frequency_penalty/presence_penalty` по умолчанию `None` (не отправляются, пока не заданы).
 
 ### Методы
 
-#### `generate(messages, tools, tool_choice, system_prompt, max_retries)`
+#### `generate(messages, tools, tool_choice, system_prompt, max_retries, ...)`
 
 Не-стрим вызов:
 
@@ -39,31 +30,35 @@ result = await client.generate(
 )
 ```
 
+`system_prompt` (если задан) просто препендится как `{"role": "system", ...}` к messages. `tools/tool_choice` отправляются только если передан `tools`.
+
 **Возвращает**:
 ```python
 {
     "role": "assistant",
-    "content": "...",          # текстовый ответ (если есть)
-    "tool_calls": [...],       # вызовы функций
+    "thoughts": "...",           # message.content (поле называется thoughts, не content!)
+    "tool_calls": [...],         # вызовы функций или None
     "finish_reason": "tool_calls" | "stop" | "length"
 }
 ```
 
-**Ретраи**: до 3 попыток с экспоненциальным backoff (5s, 25s, 125s).
+**Ретраи**: до 3 попыток, задержка `retry_delay * 2^(attempt-1)` (по умолчанию `retry_delay=2.0` → 2с, 4с). Ретраятся: исключения API, пустые `choices`, пустой контент без tool_calls. Отдельный фолбэк: если гейтвей отверг нативный аудио-вход (`input_audio`) — один ретрай текстом без аудио-партов (плейсхолдер в истории остаётся), затем обычные ретраи.
 
 #### `generate_stream(messages, tools, tool_choice, system_prompt)`
 
-Стрим-вызов — возвращает AsyncGenerator, yield-ит токены.
+Стрим-вызов — AsyncGenerator строк:
 
 ```python
 async for token in client.generate_stream(...):
-    if token == "__tool_call__:<json>":
-        # модель решила вызвать функцию
+    if token.startswith("__tool_call__:"):
+        tool_calls = json.loads(token[len("__tool_call__:"):])
     else:
-        # обычный токен текста
+        # обычный текстовый токен (content по мере генерации)
 ```
 
-При ошибке стриминга — fallback на не-стрим версию.
+Дельты tool_call склеиваются по `index` (`id/name/arguments` конкатенируются), в конце yield'ится один маркер `__tool_call__:<json>`. При ошибке стрима — **fallback на не-стрим `generate()`** (с тем же system_prompt) и yield его результата в том же формате.
+
+> Пайплайн (`ThinkPipeline`) использует только `generate()`; `generate_stream` — для будущих/внешних потребителей.
 
 ### Реконфигурация
 
@@ -77,7 +72,7 @@ client.reconfigure(
 )
 ```
 
-Позволяет менять любой параметр на ходу. Создаёт новый `AsyncOpenAI` клиент внутри.
+Меняет только переданные (`not None`) параметры. Смена `api_base` и/или `api_key` пересоздаёт внутренний `AsyncOpenAI` (base через `normalize_api_base`).
 
 ## LLMManager
 
@@ -87,45 +82,60 @@ client.reconfigure(
 
 ```python
 class LLMManager:
-    def get_main_client() -> LLMClient       # с runtime overrides
-    def get_main_params() -> dict
-    def configure_main(params: dict)         # runtime config + reconfigure
-    def test_query(prompt, client_type, params) -> dict  # тестовый запрос
+    def get_main_client() -> LLMClient       # + runtime overrides на каждый вызов
+    def get_main_params() -> dict            # main + runtime merge (ключ маскирован)
+    def get_night_params() -> dict           # только runtime night_llm (ключ маскирован)
+    def configure_main(params: dict)         # runtime set + reconfigure (кроме tool_choice)
+    def configure_night(params: dict)        # только runtime set (подхват без рестарта)
+    async def test_query(prompt, client_type="main", params=None) -> dict
 ```
+
+Допустимые поля обоих `configure_*`: `model/api_base/api_key/temperature/max_tokens/top_p/frequency_penalty/presence_penalty/tool_choice` (`tool_choice` хранится в runtime, но в `LLMClient` не пробрасывается).
 
 ### Runtime overrides
 
-При каждом вызове `get_main_client()`:
+При каждом `get_main_client()`:
 
-1. Читает `runtime_config.get("llm")` и `runtime_config.get("night_llm")`
-2. Создаёт или реконфигурит `LLMClient` с переопределёнными параметрами
-3. Если runtime-параметры не заданы — использует статичные из `config.py`
+1. Читает `runtime_config.get("llm.{model,api_base,api_key,temperature,max_tokens,top_p,frequency_penalty,presence_penalty}")`
+2. Не-`None` значения применяются через `client.reconfigure()`
+3. `None` → остаётся значение из `config.py`
+
+### test_query (playground)
+
+Всегда идёт через **main-клиент** (`client_type` игнорируется для выбора клиента, возвращается в ответе), `max_retries=1`, дефолт `max_tokens=500`:
+
+```python
+{"success": True, "response": thoughts, "timing": "1.23s", "model": ..., "client_type": ...}
+# или {"success": False, "error": ..., "timing": ..., "model": ..., "client_type": ...}
+```
 
 ## Интеграция с пайплайном
 
 ```
 ThinkPipeline
     │
-    ├── LLMClient.generate(..., tool_choice="required")
-    │   └── модель ОБЯЗАНА вызвать think()
+    ├── tool_choice = runtime_config.get("llm.tool_choice", "required")
+    ├── LLMClient.generate(..., tool_choice)
+    │   └── модель должна вызвать think(thoughts, actions)
     │
-    ├── парсинг tool_call → actions
+    ├── парсинг tool_call → actions (1 ретрай на 1-й итерации)
     │
-    ├── экзекуция тулзов
+    ├── экзекуция тулзов + NeedsTracker.apply_action_effect()
     │
-    └── если search_memory → повтор с обогащённым контекстом
+    └── если search_memory(searched) → повтор с обогащённым контекстом
 ```
 
 ## Дневной суммаризатор
 
-В `_ensure_summarizer()` создаётся отдельный `LLMClient` с более дешёвой моделью (можно настроить через runtime config) для сжатия контекста днём.
+`MilaUserbot._ensure_summarizer()` лениво создаёт обычный `LLMClient` на `MAIN_LLM_MODEL / LLM_API_BASE / LLM_API_KEY` (отдельной настраиваемой «дешёвой» модели **нет**). Используется для сжатия контекста: `temperature=0.3, max_tokens=300`, промпт «Summarize ... 2-3 sentences, only facts».
 
 ## Обработка ошибок
 
-- 3 ретрая с экспоненциальной задержкой
+- 3 ретрая с экспоненциальной задержкой (2с → 4с)
+- Пустые ответы (нет choices / нет контента и нет tool_calls) ретрятся так же
 - При стриме: fallback на не-стрим при ошибке
-- Валидация вызова `think()` — если LLM не вызвала функцию, повтор с явным указанием
-- Все ошибки логируются в `add_event()` Observatory
+- Валидация вызова `think()` — system-ошибка в messages + 1 ретрай на первой итерации
+- Все ошибки логируются в консоль и в `logs/pipeline_*.json` (`success: false, error, traceback`)
 
 ## Конфигурация
 
@@ -134,17 +144,21 @@ ThinkPipeline
 LLM_API_BASE = "http://..."
 LLM_API_KEY = "..."
 MAIN_LLM_MODEL = "model-name"
-MAIN_TEMPERATURE = 0.7
-MAIN_MAX_TOKENS = 4096
+MAIN_LLM_TEMPERATURE = 0.7
+MAIN_LLM_MAX_TOKENS = 2048
 ```
 
-**Динамическая** (runtime_config.json):
+**Динамическая** (`./runtime_config.json`, сидируется из статичной):
 ```json
 {
   "llm": {
     "model": "override-model",
     "api_base": "http://override-url/v1",
-    "temperature": 0.5
-  }
+    "api_key": "...",
+    "temperature": 0.5,
+    "max_tokens": 2048,
+    "tool_choice": "auto"
+  },
+  "night_llm": { "model": "...", "temperature": 0.3, "max_tokens": 4096, "tool_choice": "required" }
 }
 ```

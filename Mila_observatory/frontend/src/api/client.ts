@@ -183,7 +183,11 @@ export interface PipelineChats {
 
 export interface PipelineMessage {
   role: string;
-  content: string;
+  // Plain text for text-only turns; OpenAI content blocks
+  // ([{type:'text',...},{type:'image_url',...},...]) for multimodal ones.
+  // The backend sanitizes these to short labels, but the type stays loose
+  // so the UI never crashes on unserializable shapes (React error #31).
+  content: unknown;
 }
 
 export interface PipelineRawResponse {

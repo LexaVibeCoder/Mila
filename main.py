@@ -6,6 +6,7 @@ from core.bot import MilaUserbot
 
 async def main():
     os.makedirs(settings.PHOTOS_DIR, exist_ok=True)
+    os.makedirs(getattr(settings, "MEDIA_DIR", "data/media"), exist_ok=True)
     os.makedirs(settings.DAILY_REPORTS, exist_ok=True)
     os.makedirs(settings.LOG_DIR, exist_ok=True)
 

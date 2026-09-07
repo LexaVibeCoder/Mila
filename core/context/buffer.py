@@ -57,6 +57,7 @@ def ensure_chat_table(chat_id: str):
                 source_chunk_id TEXT,
                 token_count INTEGER DEFAULT 0,
                 role TEXT NOT NULL DEFAULT '',
+                kind TEXT DEFAULT 'text',
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
@@ -68,22 +69,33 @@ def ensure_chat_table(chat_id: str):
             conn.execute(f"ALTER TABLE [{table}] ADD COLUMN role TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute(f"ALTER TABLE [{table}] ADD COLUMN kind TEXT DEFAULT 'text'")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
 
 
-def push_message(chat_id: str, content: str, source_chunk_id: str = None, role: str = "user"):
+def push_message(chat_id: str, content: str, source_chunk_id: str = None, role: str = "user", kind: str = "text"):
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     token_count = count_tokens(content)
     ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     try:
-        conn.execute(
-            f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count, role, created_at) VALUES (?, 'message', ?, ?, ?, ?)",
-            (content, source_chunk_id, token_count, role, ts)
-        )
+        try:
+            conn.execute(
+                f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count, role, kind, created_at) VALUES (?, 'message', ?, ?, ?, ?, ?)",
+                (content, source_chunk_id, token_count, role, kind, ts)
+            )
+        except sqlite3.OperationalError:
+            # Old table without kind column
+            conn.execute(
+                f"INSERT INTO [{table}] (content, type, source_chunk_id, token_count, role, created_at) VALUES (?, 'message', ?, ?, ?, ?)",
+                (content, source_chunk_id, token_count, role, ts)
+            )
         conn.commit()
     finally:
         conn.close()

@@ -139,6 +139,9 @@ class PipelineLogItem(BaseModel):
     filename: str
     timestamp: str
     user_message: str = ""
+    chat_id: str = ""
+    display_name: str = ""
+    user_id: str = ""
     success: bool = True
     error: Optional[str] = None
     timing: Optional[Dict[str, Any]] = None
@@ -151,6 +154,20 @@ class PipelineLogListResponse(BaseModel):
     total: int
     page: int
     limit: int
+
+
+class PipelineChatItem(BaseModel):
+    chat_id: str
+    display_name: str = ""
+    user_id: str = ""
+    count: int = 0
+    last_timestamp: str = ""
+    last_message: str = ""
+
+
+class PipelineChatsResponse(BaseModel):
+    items: List[PipelineChatItem]
+    total: int
 
 
 class PipelineLogDetailResponse(BaseModel):

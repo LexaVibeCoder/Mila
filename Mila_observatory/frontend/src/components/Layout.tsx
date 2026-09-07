@@ -3,14 +3,14 @@ import { NavLink } from 'react-router-dom';
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: '◉' },
-  { path: '/sleep', label: 'Sleep', icon: '💤' },
-  { path: '/model', label: 'Model', icon: '⚙' },
-  { path: '/memory', label: 'Memory', icon: '◈' },
-  { path: '/personality', label: 'Personality', icon: '♡' },
-  { path: '/tools', label: 'Tools', icon: '⊞' },
   { path: '/pipeline', label: 'Pipeline', icon: '▷' },
-  { path: '/config', label: 'Runtime State', icon: '⚡' },
-  { path: '/state-agent', label: 'State Agent', icon: '🧠' },
+  { path: '/model', label: 'Model', icon: '◈' },
+  { path: '/sleep', label: 'Sleep', icon: '◍' },
+  { path: '/memory', label: 'Memory', icon: '▤' },
+  { path: '/config', label: 'Runtime State', icon: '▦' },
+  { path: '/tools', label: 'Tools', icon: '⊞' },
+  { path: '/personality', label: 'Personality', icon: '◇' },
+  { path: '/state-agent', label: 'State Agent', icon: '◔' },
 ];
 
 const styles: Record<string, React.CSSProperties> = {

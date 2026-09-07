@@ -150,6 +150,9 @@ export interface PipelineLogItem {
   filename: string;
   timestamp: string;
   user_message: string;
+  chat_id: string;
+  display_name: string;
+  user_id: string;
   success: boolean;
   error?: string;
   timing?: Record<string, string>;
@@ -164,14 +167,60 @@ export interface PipelineLogList {
   limit: number;
 }
 
-export const getPipelineLogs = (page = 1, limit = 20, successOnly?: boolean) => {
+export interface PipelineChatItem {
+  chat_id: string;
+  display_name: string;
+  user_id: string;
+  count: number;
+  last_timestamp: string;
+  last_message: string;
+}
+
+export interface PipelineChats {
+  items: PipelineChatItem[];
+  total: number;
+}
+
+export interface PipelineMessage {
+  role: string;
+  content: string;
+}
+
+export interface PipelineRawResponse {
+  iteration: number;
+  thoughts: string;
+  tool_calls: { name: string; arguments: string }[];
+  finish_reason?: string;
+}
+
+export interface PipelineLogDetail {
+  timestamp: string;
+  user_id: string;
+  chat_id: string;
+  user_message: string;
+  system_prompt: string;
+  llm_messages: PipelineMessage[];
+  thoughts: string;
+  actions: Record<string, unknown>[];
+  raw_llm_responses: PipelineRawResponse[];
+  success: boolean;
+  error?: string | null;
+  timing?: Record<string, unknown>;
+  traceback?: string | null;
+}
+
+export const getPipelineLogs = (page = 1, limit = 20, successOnly?: boolean, chatId?: string) => {
   const params = new URLSearchParams({ page: String(page), limit: String(limit) });
   if (successOnly !== undefined) params.set('success_only', String(successOnly));
+  if (chatId) params.set('chat_id', chatId);
   return request<PipelineLogList>(`/pipeline/logs?${params}`);
 };
 
+export const getPipelineChats = () =>
+  request<PipelineChats>('/pipeline/chats');
+
 export const getPipelineLog = (filename: string) =>
-  request<{ filename: string; data: Record<string, unknown> }>(`/pipeline/logs/${filename}`);
+  request<{ filename: string; data: PipelineLogDetail }>(`/pipeline/logs/${filename}`);
 
 // ─── Config ─────────────────────────────────────────────────
 

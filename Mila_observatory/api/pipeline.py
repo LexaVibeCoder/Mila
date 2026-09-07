@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from fastapi import APIRouter, Query, HTTPException
 from Mila_observatory.models import (
-    PipelineLogItem, PipelineLogListResponse, PipelineLogDetailResponse
+    PipelineLogItem, PipelineLogListResponse, PipelineLogDetailResponse,
+    PipelineChatItem, PipelineChatsResponse
 )
 from config import settings
 
@@ -22,11 +23,50 @@ router = APIRouter(tags=["pipeline"])
 LOG_DIR = settings.LOG_DIR
 
 
+def _resolve_display_names(pairs: list) -> dict:
+    """Map chat_id -> human-readable name as shown in Telegram.
+
+    Reads chats.chat_name (written by core/queue.py from Telegram chat
+    titles / sender names), falling back to users.preferred_name/user_name
+    by user_id. Never raises — returns {} if the DB is unavailable.
+    """
+    try:
+        import sqlite3
+        db_path = settings.SQLITE_PATH
+        if not os.path.isabs(db_path):
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            db_path = os.path.join(root, db_path)
+        if not os.path.exists(db_path):
+            return {}
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            chat_names = {str(r[0]): (r[1] or "") for r in cur.execute("SELECT chat_id, chat_name FROM chats")}
+            user_names: dict = {}
+            try:
+                for uid, pref, uname in cur.execute("SELECT user_id, preferred_name, user_name FROM users"):
+                    user_names[str(uid)] = pref or uname or ""
+            except Exception:
+                pass
+        finally:
+            conn.close()
+        out: dict = {}
+        for chat_id, user_id in pairs:
+            name = chat_names.get(str(chat_id), "") or ""
+            if not name and user_id:
+                name = user_names.get(str(user_id), "") or ""
+            out[str(chat_id)] = name
+        return out
+    except Exception:
+        return {}
+
+
 @router.get("/api/pipeline/logs", response_model=PipelineLogListResponse)
 async def list_pipeline_logs(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     success_only: Optional[bool] = Query(None, description="Filter by success"),
+    chat_id: Optional[str] = Query(None, description="Filter by chat_id"),
 ):
     """List pipeline execution logs."""
     # Find all pipeline log files
@@ -34,19 +74,20 @@ async def list_pipeline_logs(
     all_files = glob.glob(pattern)
     all_files.sort(reverse=True)  # newest first
 
-    total = len(all_files)
-    offset = (page - 1) * limit
-    page_files = all_files[offset:offset + limit]
-
-    items = []
-    for filepath in page_files:
+    items_all = []
+    for filepath in all_files:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # Apply filter
+            # Apply filters
             if success_only is not None:
                 if data.get("success", True) != success_only:
+                    continue
+
+            file_chat_id = str(data.get("chat_id", "") or "")
+            if chat_id is not None and chat_id != "":
+                if file_chat_id != chat_id:
                     continue
 
             filename = os.path.basename(filepath)
@@ -63,18 +104,33 @@ async def list_pipeline_logs(
                 except (ValueError, TypeError):
                     iterations = 0
 
-            items.append(PipelineLogItem(
-                filename=filename,
-                timestamp=timestamp,
-                user_message=user_message[:200] if user_message else "",
-                success=success,
-                error=error,
-                timing=timing,
-                actions_count=len(actions),
-                iterations=iterations,
-            ))
+            items_all.append({
+                "filename": filename,
+                "timestamp": timestamp,
+                "user_message": user_message[:200] if user_message else "",
+                "chat_id": file_chat_id,
+                "user_id": str(data.get("user_id", "") or ""),
+                "success": success,
+                "error": error,
+                "timing": timing,
+                "actions_count": len(actions),
+                "iterations": iterations,
+            })
         except (json.JSONDecodeError, IOError) as e:
             continue
+
+    # Resolve human-readable chat names (as shown in Telegram) in one DB pass
+    display_names = _resolve_display_names(
+        [(it["chat_id"], it["user_id"]) for it in items_all]
+    )
+    items_page = []
+    for it in items_all:
+        it["display_name"] = display_names.get(it["chat_id"], "")
+        items_page.append(PipelineLogItem(**it))
+
+    total = len(items_page)
+    offset = (page - 1) * limit
+    items = items_page[offset:offset + limit]
 
     return PipelineLogListResponse(
         items=items,
@@ -82,6 +138,53 @@ async def list_pipeline_logs(
         page=page,
         limit=limit,
     )
+
+
+@router.get("/api/pipeline/chats", response_model=PipelineChatsResponse)
+async def list_pipeline_chats():
+    """List chats that have pipeline logs, with message counts."""
+    pattern = os.path.join(LOG_DIR, "pipeline_*.json")
+    all_files = glob.glob(pattern)
+    all_files.sort(reverse=True)  # newest first
+
+    chats: dict[str, dict] = {}
+    for filepath in all_files:
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            file_chat_id = str(data.get("chat_id", "") or "")
+            if not file_chat_id:
+                file_chat_id = "(unknown)"
+            timestamp = str(data.get("timestamp", "") or "")
+            user_message = str(data.get("user_message", "") or "")
+            user_id = str(data.get("user_id", "") or "")
+            entry = chats.get(file_chat_id)
+            if entry is None:
+                chats[file_chat_id] = {
+                    "chat_id": file_chat_id,
+                    "user_id": user_id,
+                    "count": 1,
+                    "last_timestamp": timestamp,
+                    "last_message": user_message[:120],
+                }
+            else:
+                entry["count"] += 1
+                # files are sorted newest first, so first seen is the latest
+                if not entry.get("user_id") and user_id:
+                    entry["user_id"] = user_id
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    items = [PipelineChatItem(**v) for v in chats.values()]
+    # newest first
+    items.sort(key=lambda x: x.last_timestamp, reverse=True)
+    # Resolve human-readable chat names (as shown in Telegram) in one DB pass
+    display_names = _resolve_display_names(
+        [(c.chat_id, c.user_id) for c in items]
+    )
+    for c in items:
+        c.display_name = display_names.get(c.chat_id, "")
+    return PipelineChatsResponse(items=items, total=len(items))
 
 
 @router.get("/api/pipeline/logs/{filename}", response_model=PipelineLogDetailResponse)

@@ -28,9 +28,21 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
   },
   logo: {
-    padding: '0 20px 20px',
+    padding: '20px 20px',
     borderBottom: '1px solid var(--border)',
     marginBottom: '10px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    textAlign: 'center' as const,
+    gap: '10px',
+  },
+  logoImg: {
+    width: '64px',
+    height: '64px',
+    borderRadius: '18px',
+    flexShrink: 0,
+    boxShadow: '0 0 24px rgba(108, 92, 231, 0.55)',
   },
   logoTitle: {
     color: 'var(--accent)',
@@ -81,8 +93,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div style={styles.container}>
       <aside style={styles.sidebar}>
         <div style={styles.logo}>
-          <div style={styles.logoTitle}>Mila Observatory</div>
-          <div style={styles.logoSub}>Consciousness Lab</div>
+          <img src="/icons/observatory-logo.png" alt="Mila Observatory" style={styles.logoImg} />
+          <div>
+            <div style={styles.logoTitle}>Mila Observatory</div>
+            <div style={styles.logoSub}>Consciousness Lab</div>
+          </div>
         </div>
         <nav style={styles.nav}>
           {navItems.map(item => (

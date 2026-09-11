@@ -1,16 +1,17 @@
 """
-Direct-tool reasoning pipeline (no Think wrapper).
+Direct-tool reasoning pipeline.
 
-New scheme:
+Scheme:
   rest/working --notification(last + 5-10 prev)--> enter_dialog -->
-  dialog --[search_memory/diary directly]--> reply in `content`.
+  dialog --[search_memory/diary directly]--> JSON {"messages": [...]}.
 
-- tool_choice is always "auto": the model herself decides when a normal
-  tool is needed. Forcing "required" would break content-replies.
-- In dialog: reply = `content`, send_message does NOT exist.
-- In rest/working: full reply ONLY after enter_dialog; single brush-off
-  via send_message tool; empty content + no tools = silence.
-- Silence is empty content, NOT a tool (silent-token pattern).
+- tool_choice is always "auto": the model herself decides when a tool
+  is needed.
+- dialog replies are strict JSON with 0-3 message bubbles; empty array
+  means no answer. response_format json_schema is requested when the
+  provider supports it, otherwise prompt + parser + retry enforce it.
+- rest/working replies only via enter_dialog (full) or send_message
+  (one short note); empty reply with no tools means no answer.
 
 Each turn produces a detailed JSON log saved to LOG_DIR.
 """
@@ -89,14 +90,90 @@ def _get_presence_state() -> dict:
                 "focus_user_name": None, "note": "", "updated_at": None}
 
 
-# Reminder when rest/working returns bare content without entering dialog.
+# Reminder when rest/working returns text without entering dialog.
 REST_CONTENT_REMINDER = (
-    "PROTOCOL: you are in rest/working. Bare text in `content` is IGNORED here. "
-    "To answer fully, call enter_dialog with the notification chat_id first "
-    "(you will be called again in dialog, then answer in `content`). "
-    "For a one-line brush-off use the send_message tool once. "
-    "To stay silent return empty content with no tool calls."
+    "PROTOCOL: you are in rest/working. Text replies from here are IGNORED. "
+    "To talk, call enter_dialog with the notification chat_id first "
+    "(you will be called again in dialog, then answer there). "
+    "For a one-line note use the send_message tool once. "
+    "To skip, return an empty reply with no tool calls."
 )
+
+# Strict reply shape in dialog (also requested via API response_format).
+CHAT_MESSAGES_SCHEMA: Dict[str, Any] = {
+    "name": "chat_messages",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "messages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}},
+                    "required": ["content"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["messages"],
+        "additionalProperties": False,
+    },
+}
+
+DIALOG_JSON_REMINDER = (
+    "PROTOCOL: in dialog return ONLY one JSON object, no text around it: "
+    '{"messages": [{"content": "..."}]} (1-3 short bubbles) '
+    'or {"messages": []} to skip. No code fences.'
+)
+
+MAX_BUBBLES = 3
+
+
+def _strip_leading_timestamp(text: str) -> str:
+    import re
+    return re.sub(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*", "", text or "", count=1)
+
+
+def parse_chat_messages(raw: str) -> tuple[list[str] | None, str]:
+    """Parse dialog JSON into bubble texts.
+
+    Returns (bubbles, error). bubbles=None means parse/validation failed
+    (caller retries). Empty list is valid and means no answer.
+    """
+    import re as _re
+    if raw is None:
+        return None, "empty reply"
+    text = raw.strip()
+    if not text:
+        return None, "empty reply"
+    # Tolerate code fences and surrounding text: extract first {...} block.
+    fence = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    elif not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        return None, f"invalid JSON ({e})"
+    if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+        return None, 'expected {"messages": [...]}'
+    bubbles: list[str] = []
+    for item in data["messages"][:MAX_BUBBLES]:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content", "")
+        if not isinstance(content, str):
+            continue
+        cleaned = _strip_leading_timestamp(content.strip())
+        if cleaned:
+            bubbles.append(cleaned)
+    # More than MAX_BUBBLES requested: extra ones are dropped (logged by caller).
+    return bubbles, ""
 
 
 class ThinkPipeline:
@@ -158,9 +235,7 @@ class ThinkPipeline:
         return (
             f"[уведомление] новый текст из чата {self.chat_id}:\n"
             f"{last}\n"
-            f"(выше в истории — предыдущие ~5-10 сообщений этого чата для контекста. "
-            f"Ты в {state}: полноценный ответ только через enter_dialog, "
-            f"разовая отмашка через send_message, молчание — пустой content.)"
+            f"(выше в истории — предыдущие сообщения этого чата для контекста.)"
         )
 
     @staticmethod
@@ -251,7 +326,7 @@ class ThinkPipeline:
         Yields internal dicts:
           {"kind": "llm", "content": str, "tool_calls": [...], "finish_reason": str}
           {"kind": "action", "action": executed_dict}
-          {"kind": "reply_content", "text": str, "target_chat_id": str}
+          {"kind": "reply_bubbles", "texts": [...], "target_chat_id": str}
           {"kind": "reply_tool", "action": executed send_message dict}
           {"kind": "silence", "reason": str}
         """
@@ -265,28 +340,50 @@ class ThinkPipeline:
         max_iterations = _max_iterations()
         choice = _tool_choice()
         iteration = 0
+        use_response_format = True  # dialog JSON; disabled on provider error
 
         while iteration < max_iterations:
             iteration += 1
-            print(f"\n── Iteration {iteration}/{max_iterations} [direct] ──")
+            presence = _get_presence_state()
+            state = presence.get("state", "rest")
+            print(f"\n── Iteration {iteration}/{max_iterations} [{state}] ──")
 
             # Presence may have changed mid-loop (enter_dialog etc.) —
             # rebuild prompt + tools every iteration so rules match state.
-            presence = _get_presence_state()
-            state = presence.get("state", "rest")
             main_system_prompt = build_main_llm_system_prompt(
                 self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
             )
             tool_definitions = self._current_tool_defs()
+            want_json = state == "dialog"
+            fmt = None
+            if want_json and use_response_format:
+                fmt = {"type": "json_schema", "json_schema": CHAT_MESSAGES_SCHEMA}
 
-            response = await self.main_llm.generate(
-                messages=messages,
-                system_prompt=main_system_prompt,
-                tools=tool_definitions if tool_definitions else None,
-                tool_choice=choice if tool_definitions else "none",
-                max_tokens=2048,
-                temperature=self.main_llm.default_temperature,
-            )
+            try:
+                response = await self.main_llm.generate(
+                    messages=messages,
+                    system_prompt=main_system_prompt,
+                    tools=tool_definitions if tool_definitions else None,
+                    tool_choice=choice if tool_definitions else "none",
+                    max_tokens=2048,
+                    temperature=self.main_llm.default_temperature,
+                    response_format=fmt,
+                )
+            except Exception as e:
+                # Provider without json_schema support: retry prompt-only once.
+                if want_json and use_response_format and "response_format" in str(e).lower():
+                    print(f"  [Pipeline] response_format rejected ({e}), retrying prompt-only")
+                    use_response_format = False
+                    response = await self.main_llm.generate(
+                        messages=messages,
+                        system_prompt=main_system_prompt,
+                        tools=tool_definitions if tool_definitions else None,
+                        tool_choice=choice if tool_definitions else "none",
+                        max_tokens=2048,
+                        temperature=self.main_llm.default_temperature,
+                    )
+                else:
+                    raise
 
             content = (response.get("thoughts", "") or "")
             tool_calls = response.get("tool_calls", None)
@@ -311,30 +408,41 @@ class ThinkPipeline:
 
             actions = self._tool_calls_to_actions(tool_calls)
 
-            # ---- No tools: content is the verdict ----
+            # ---- No tools: verdict depends on state ----
             if not actions:
-                text = content.strip()
-                if not text:
-                    yield {"kind": "silence", "reason": "empty content, no tools"}
-                    return
                 if state == "dialog":
+                    bubbles, err = parse_chat_messages(content)
+                    if bubbles is None:
+                        print(f"  [Dialog JSON invalid → retry: {err}]")
+                        messages.append({"role": "system", "content": DIALOG_JSON_REMINDER})
+                        if content.strip():
+                            messages.append({"role": "assistant", "content": content})
+                        if iteration >= max_iterations:
+                            yield {"kind": "silence", "reason": f"bad dialog JSON: {err}"}
+                            return
+                        continue
+                    if not bubbles:
+                        yield {"kind": "silence", "reason": "empty messages array"}
+                        return
                     target = str(presence.get("focus_chat_id") or self.chat_id)
-                    yield {"kind": "reply_content", "text": text,
+                    yield {"kind": "reply_bubbles", "texts": bubbles,
                            "target_chat_id": target}
                     return
-                # rest/working + bare content = protocol violation -> retry
-                print("  [Protocol: bare content in rest/working → reminder]")
+                text = content.strip()
+                if not text:
+                    yield {"kind": "silence", "reason": "empty reply, no tools"}
+                    return
+                # rest/working + text = protocol violation -> retry
+                print("  [Protocol: text reply in rest/working → reminder]")
                 messages.append({"role": "system", "content": REST_CONTENT_REMINDER})
-                # Keep the model's text for logs but do NOT send it.
                 messages.append({"role": "assistant", "content": content})
                 if iteration >= max_iterations:
                     yield {"kind": "silence",
-                           "reason": "bare content in rest without enter_dialog"}
+                           "reason": "text reply in rest without enter_dialog"}
                     return
                 continue
 
             # ---- Tools present: content this turn is NOT sent ----
-            # (When the model calls tools, content is reasoning/draft.)
             if content.strip():
                 messages.append({"role": "assistant", "content": content})
 
@@ -351,12 +459,6 @@ class ThinkPipeline:
                 atype = executed.get("type")
                 status = executed.get("status")
 
-                if atype == "silence":
-                    # Backward compat: old silence tool if model somehow calls it.
-                    yield {"kind": "silence",
-                           "reason": executed.get("reason", "silence tool")}
-                    return
-
                 if atype == "start_sleep" and status == "sleeping":
                     sleep_started = True
                     break
@@ -367,8 +469,7 @@ class ThinkPipeline:
                     messages.append({"role": "system", "content": (
                         f"Presence switched: {atype} → "
                         f"{executed.get('chat_id', executed.get('state', ''))}. "
-                        f"Now decide what to do in the new state: answer in "
-                        f"`content` (dialog) or stay silent (empty content)."
+                        f"Decide in the new state now."
                     )})
                     print("  [Presence switched → re-calling]")
                     continue
@@ -389,7 +490,7 @@ class ThinkPipeline:
                         messages.append({"role": "system", "content": (
                             "Memory search failed "
                             f"({executed.get('error', 'unknown error')}). "
-                            "Answer from the conversation context or stay silent."
+                            "Answer from the conversation context or skip."
                         )})
                         print("  [Search error → re-calling anyway]")
                     continue
@@ -397,13 +498,12 @@ class ThinkPipeline:
                 if atype in ("write_diary", "update_diary"):
                     if status in ("written", "updated"):
                         messages.append({"role": "system", "content": (
-                            f"Diary {atype} done ({status}). "
-                            f"Now answer in `content` or stay silent."
+                            f"Diary {atype} done ({status}). Answer now."
                         )})
                     else:
                         messages.append({"role": "system", "content": (
                             f"Diary {atype} failed ({executed.get('error', status)}). "
-                            f"Answer from context or stay silent."
+                            f"Answer from context or skip."
                         )})
                     continue
 
@@ -412,34 +512,21 @@ class ThinkPipeline:
                 return
 
             if send_tool_reply is not None and not has_search and not presence_switched:
-                # Single brush-off in rest/working — final, no re-call.
+                # Single note in rest/working — final, no re-call.
                 yield {"kind": "reply_tool", "action": send_tool_reply}
                 return
 
             if has_search or presence_switched:
                 continue
 
-            # Only diary tools (+ draft content ignored): re-call for final verdict,
-            # unless model already gave content alongside diary calls.
-            if content.strip():
-                text = content.strip()
-                presence2 = _get_presence_state()
-                if presence2.get("state") == "dialog":
-                    target = str(presence2.get("focus_chat_id") or self.chat_id)
-                    yield {"kind": "reply_content", "text": text,
-                           "target_chat_id": target}
-                    return
-                # rest + diary + content but no enter_dialog -> still violation
-                messages.append({"role": "system", "content": REST_CONTENT_REMINDER})
-                continue
-
-            # Tools with no outcome (e.g. diary error + empty content): re-call.
+            # Diary-only turn with no verdict yet: re-call.
             if iteration >= max_iterations:
                 yield {"kind": "silence", "reason": "tools with no reply"}
                 return
             messages.append({"role": "system", "content": (
-                "No reply yet. Answer in `content` now or stay silent "
-                "(empty content, no tools)."
+                "No answer yet. "
+                + (DIALOG_JSON_REMINDER if _get_presence_state().get("state") == "dialog"
+                   else "Answer via tools or skip with an empty reply.")
             )})
 
         yield {"kind": "silence", "reason": "max iterations reached"}
@@ -460,6 +547,7 @@ class ThinkPipeline:
         try:
             all_actions: List[Dict] = []
             raw_llm_responses: List[Dict] = []
+            reply_texts: List[str] = []
             reply_text = ""
             reply_via = ""
             reply_chat_id = ""
@@ -478,10 +566,11 @@ class ThinkPipeline:
                     })
                 elif kind == "action":
                     all_actions.append(step["action"])
-                elif kind == "reply_content":
-                    reply_text = step["text"]
+                elif kind == "reply_bubbles":
+                    reply_texts = list(step["texts"])
+                    reply_text = "\n".join(reply_texts)
                     reply_chat_id = step["target_chat_id"]
-                    reply_via = "content"
+                    reply_via = "bubbles"
                     get_needs_tracker().apply_action_effect("send_message")
                     break
                 elif kind == "reply_tool":
@@ -503,6 +592,7 @@ class ThinkPipeline:
                 "actions": all_actions,
                 "thoughts": reply_text,
                 "reply_text": reply_text,
+                "reply_texts": reply_texts,
                 "reply_via": reply_via,
                 "reply_chat_id": reply_chat_id,
                 "silence_reason": silence_reason,
@@ -544,6 +634,7 @@ class ThinkPipeline:
             "llm_messages": result.get("llm_messages", []),
             "thoughts": result.get("thoughts", ""),
             "reply_text": result.get("reply_text", ""),
+            "reply_texts": result.get("reply_texts", []),
             "reply_via": result.get("reply_via", ""),
             "reply_chat_id": result.get("reply_chat_id", ""),
             "silence_reason": result.get("silence_reason", ""),
@@ -579,7 +670,7 @@ class ThinkPipeline:
           {"type": "thought", "thoughts": str}
           {"type": "action", "action": Dict}
           {"type": "search_result", "content": str}
-          {"type": "reply", "text": str, "chat_id": str, "via": str}
+          {"type": "reply", "texts": [...], "chat_id": str, "via": str}
           {"type": "silence", "reason": str}
           {"type": "done", "result": Dict}
           {"type": "error", "error": str}
@@ -588,6 +679,7 @@ class ThinkPipeline:
         try:
             all_actions: List[Dict] = []
             raw_llm_responses: List[Dict] = []
+            reply_texts: List[str] = []
             reply_text = ""
             reply_via = ""
             reply_chat_id = ""
@@ -613,22 +705,24 @@ class ThinkPipeline:
                     if action.get("type") == "search_memory" and action.get("status") == "searched":
                         yield {"type": "search_result",
                                "content": action.get("context_addon", "")}
-                elif kind == "reply_content":
-                    reply_text = step["text"]
+                elif kind == "reply_bubbles":
+                    reply_texts = list(step["texts"])
+                    reply_text = "\n".join(reply_texts)
                     reply_chat_id = step["target_chat_id"]
-                    reply_via = "content"
+                    reply_via = "bubbles"
                     get_needs_tracker().apply_action_effect("send_message")
-                    yield {"type": "reply", "text": reply_text,
-                           "chat_id": reply_chat_id, "via": "content"}
+                    yield {"type": "reply", "texts": reply_texts, "text": reply_text,
+                           "chat_id": reply_chat_id, "via": "bubbles"}
                     break
                 elif kind == "reply_tool":
                     a = step["action"]
                     # _run_stream already applied needs effect; avoid double count
                     # for the action itself (applied inside _run_stream), so just yield.
                     reply_text = (a.get("text") or "").strip()
+                    reply_texts = [reply_text] if reply_text else []
                     reply_chat_id = str(a.get("chat_id", self.chat_id))
                     reply_via = "send_message_brush_off"
-                    yield {"type": "reply", "text": reply_text,
+                    yield {"type": "reply", "texts": reply_texts, "text": reply_text,
                            "chat_id": reply_chat_id, "via": "send_message_brush_off"}
                     break
                 elif kind == "silence":
@@ -643,6 +737,7 @@ class ThinkPipeline:
                 "actions": all_actions,
                 "thoughts": reply_text,
                 "reply_text": reply_text,
+                "reply_texts": reply_texts,
                 "reply_via": reply_via,
                 "reply_chat_id": reply_chat_id,
                 "silence_reason": silence_reason,

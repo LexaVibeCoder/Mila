@@ -1,35 +1,16 @@
 """System prompt assembly for Mila.
 
-No prompt/instruction text lives here. All fragments are stored as
-Markdown files in ``core/llm/prompts/`` and this module only loads
-them and assembles the final system prompt with runtime context
-(user profile, needs, diary, session state).
+Prompt text lives in ``core/llm/prompts/`` grouped by folders:
+- persona/      — who Mila is, always included (static, cacheable)
+- relationship/ — tier line for the current user (dynamic)
+- context/      — header, needs, diary block, session, history note
+- diary/        — diary guide (static)
+- states/       — behavior for the CURRENT presence state only
+  (rest.md / dialog.md / working.md — exactly one is included)
 
-Static blocks (joined with ``---``), in order:
-
-- MILA_PREFERENCES — base voice
-- MILA_BIO — bio section (includes its header)
-- IDENTITY — stable core identity
-- CLOSENESS_TIERS — distance tiers + examples
-- VOICE_MECHANICS — voice mechanics
-- BANNED_AI_ISMS — banned AI-isms
-- MEMORY_HONESTY — memory honesty
-- SILENT_MODE — silent mode in history
-- STYLE_STABILITY — style stability rule
-- NO_ROLEPLAY — no role-play / acting
-- DIARY_GUIDE — diary guide (static instructions)
-
-Dynamic templates (``{placeholders}`` filled at runtime):
-
-- HEADER — intro with ``{now}``, ``{user_name}``, ``{chat_id}``
-- RELATIONSHIP_BLOCK — wrapper with ``{relationship}``
-- RELATIONSHIP_{FRIEND,ACQUAINTANCE_WARM,STRANGER_COLD,ACQUAINTANCE_COLD,NEUTRAL}
-  — relationship line variants with ``{user_name}``, picked by sentiment
-- NEEDS_BLOCK — wrapper with ``{needs_summary}``
-- DIARY_BLOCK — wrapper with ``{diary_context}``
-- SESSION_BLOCK — wrapper with ``{session_time}``
-- SESSION_TIME — ``User responded after {formatted}``
-- FUNCTION_CALLING — direct-tool protocol (content = reply, empty = silence) with ``{chat_id}``
+Rule: the model sees only what she needs right now. Rest never sees
+dialog JSON rules; dialog never sees rest transition rules beyond
+the foreign-notification case.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -42,27 +23,75 @@ from core.needs.tracker import get_tracker as get_needs_tracker
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
-_STATIC_PARTS = [
-    "MILA_PREFERENCES",
-    "MILA_BIO",
-    "IDENTITY",
-    "CLOSENESS_TIERS",
-    "VOICE_MECHANICS",
-    "BANNED_AI_ISMS",
-    "MEMORY_HONESTY",
-    "SILENT_MODE",
-    "STYLE_STABILITY",
-    "NO_ROLEPLAY",
-    "DIARY_GUIDE",
-]
 
+def _load(name: str) -> str:
+    """Load a prompt fragment by relative path without extension.
 
-@lru_cache(maxsize=None)
-def _load_prompt(name: str) -> str:
+    e.g. _load("persona/voice") -> prompts/persona/voice.md.
+    Falls back to the old flat layout for backward compat.
+    """
     path = PROMPTS_DIR / f"{name}.md"
     if not path.is_file():
-        raise FileNotFoundError(f"Prompt fragment not found: {path}")
+        flat = PROMPTS_DIR / f"{name.upper()}.md"
+        if flat.is_file():
+            path = flat
+        else:
+            raise FileNotFoundError(f"Prompt fragment not found: {name}")
     return path.read_text(encoding="utf-8").strip()
+
+
+# Static persona blocks — always included, order matters (stable first).
+_STATIC_PERSONA = [
+    "persona/prefs",
+    "persona/bio",
+    "persona/identity",
+    "persona/closeness",
+    "persona/voice",
+    "persona/banned",
+    "persona/memory",
+    "persona/style",
+    "persona/no_roleplay",
+    "diary/guide",
+]
+
+# Mapping of old flat names -> new paths (for custom_persona checks etc.)
+LEGACY_MAP = {
+    "MILA_PREFERENCES": "persona/prefs",
+    "MILA_BIO": "persona/bio",
+    "IDENTITY": "persona/identity",
+    "CLOSENESS_TIERS": "persona/closeness",
+    "VOICE_MECHANICS": "persona/voice",
+    "BANNED_AI_ISMS": "persona/banned",
+    "MEMORY_HONESTY": "persona/memory",
+    "STYLE_STABILITY": "persona/style",
+    "NO_ROLEPLAY": "persona/no_roleplay",
+    "DIARY_GUIDE": "diary/guide",
+    "SILENT_MODE": "context/history_note",
+    "HEADER": "context/header",
+    "NEEDS_BLOCK": "context/needs",
+    "DIARY_BLOCK": "context/diary_block",
+    "SESSION_BLOCK": "context/session",
+    "SESSION_TIME": "context/session_time",
+    "RELATIONSHIP_BLOCK": "relationship/block",
+    "RELATIONSHIP_FRIEND": "relationship/friend",
+    "RELATIONSHIP_ACQUAINTANCE_WARM": "relationship/acq_warm",
+    "RELATIONSHIP_ACQUAINTANCE_COLD": "relationship/acq_cold",
+    "RELATIONSHIP_STRANGER_COLD": "relationship/stranger",
+    "RELATIONSHIP_NEUTRAL": "relationship/neutral",
+}
+
+REL_MAP = {
+    "RELATIONSHIP_FRIEND": "relationship/friend",
+    "RELATIONSHIP_ACQUAINTANCE_WARM": "relationship/acq_warm",
+    "RELATIONSHIP_ACQUAINTANCE_COLD": "relationship/acq_cold",
+    "RELATIONSHIP_STRANGER_COLD": "relationship/stranger",
+    "RELATIONSHIP_NEUTRAL": "relationship/neutral",
+}
+
+
+def load_prompt(name: str) -> str:
+    """Public loader with legacy-name support."""
+    return _load(LEGACY_MAP.get(name, name))
 
 
 def _format_time_delta(delta: timedelta) -> str:
@@ -90,16 +119,16 @@ def _get_profile_context(user_id: str) -> tuple[str, str, str]:
     # sentiment maps to closeness tier: друг / знакомый / чужой.
     # history length refines it in the prompt (just met -> чужой even if sentiment neutral).
     if sentiment > 0.6:
-        template = "RELATIONSHIP_FRIEND"
+        template = "relationship/friend"
     elif sentiment > 0.2:
-        template = "RELATIONSHIP_ACQUAINTANCE_WARM"
+        template = "relationship/acq_warm"
     elif sentiment < -0.6:
-        template = "RELATIONSHIP_STRANGER_COLD"
+        template = "relationship/stranger"
     elif sentiment < -0.2:
-        template = "RELATIONSHIP_ACQUAINTANCE_COLD"
+        template = "relationship/acq_cold"
     else:
-        template = "RELATIONSHIP_NEUTRAL"
-    relationship = _load_prompt(template).replace("{user_name}", user_name)
+        template = "relationship/neutral"
+    relationship = _load(template).replace("{user_name}", user_name)
     return user_name, relationship, now
 
 
@@ -124,15 +153,30 @@ def _get_session_time_info(chat_id: str, my_user_id: str) -> str:
                 if total_seconds < 30:
                     return ""
                 formatted = _format_time_delta(delta)
-                return _load_prompt("SESSION_TIME").replace("{formatted}", formatted)
+                return _load("context/session_time").replace("{formatted}", formatted)
             except (ValueError, TypeError):
                 continue
     return ""
 
 
+def _get_presence_state_name() -> str:
+    try:
+        from core.presence import get_presence
+        return get_presence().get("state", "rest")
+    except Exception:
+        return "rest"
+
+
 @lru_cache(maxsize=1)
 def _get_static_prompt_prefix() -> str:
-    return "\n\n---\n\n".join(_load_prompt(name) for name in _STATIC_PARTS)
+    return "\n\n---\n\n".join(_load(name) for name in _STATIC_PERSONA)
+
+
+def _load_state_block(state: str, chat_id: str | None = None) -> str:
+    """Exactly one state file. Unknown states fall back to rest."""
+    name = state if state in ("rest", "dialog", "working") else "rest"
+    text = _load(f"states/{name}")
+    return text.replace("{chat_id}", str(chat_id or ""))
 
 
 def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: str = None) -> str:
@@ -154,17 +198,19 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
         pass
 
     header = (
-        _load_prompt("HEADER")
+        _load("context/header")
         .replace("{now}", now)
         .replace("{user_name}", user_name)
         .replace("{chat_id}", str(chat_id))
     )
-    relationship_block = _load_prompt("RELATIONSHIP_BLOCK").replace("{relationship}", relationship)
-    needs_block = _load_prompt("NEEDS_BLOCK").replace("{needs_summary}", needs_summary)
+    relationship_block = _load("relationship/block").replace("{relationship}", relationship)
+    needs_block = _load("context/needs").replace("{needs_summary}", needs_summary)
+    history_note = _load("context/history_note")
 
-    parts = [header, static_prefix, relationship_block, needs_block]
+    parts = [header, static_prefix, relationship_block, needs_block, history_note]
 
-    # Presence block — Mila explicitly sees her state + who writes (name, not id).
+    # Presence block — location only (where am I + who writes).
+    # Behavior rules live in states/{state}.md, not here.
     try:
         from core.presence import format_state_block
         parts.append(format_state_block(
@@ -176,13 +222,15 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
 
     diary_context = get_today_diary_context()
     if diary_context:
-        parts.append(_load_prompt("DIARY_BLOCK").replace("{diary_context}", diary_context))
+        parts.append(_load("context/diary_block").replace("{diary_context}", diary_context))
 
     if chat_id and my_user_id:
         session_time = _get_session_time_info(chat_id, my_user_id)
         if session_time:
-            parts.append(_load_prompt("SESSION_BLOCK").replace("{session_time}", session_time))
+            parts.append(_load("context/session").replace("{session_time}", session_time))
 
-    parts.append(_load_prompt("FUNCTION_CALLING").replace("{chat_id}", str(chat_id)))
+    # State behavior — exactly one file, only what is needed now.
+    state = _get_presence_state_name()
+    parts.append(_load_state_block(state, chat_id))
 
     return "\n\n".join(parts).strip()

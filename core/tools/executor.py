@@ -3,21 +3,14 @@ from typing import List, Dict, Any, Optional
 
 
 def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
-    """Direct tool definitions (no Think wrapper).
+    """Direct tools for the current state only.
 
-    New scheme:
-    - dialog: reply = `content`, NO send_message. Tools called directly.
-    - rest/working: to start a full dialogue you MUST call enter_dialog first.
-      send_message exists ONLY for a single brush-off
-      ("я занята, давай позже") without entering dialog.
-    - silence: NO tool. Empty `content` + no tool calls = stay silent.
-      (Best practice for tool_choice=auto: model answers in content or
-      calls a tool; forcing a silence tool wastes a turn and causes
-      hallucinations under tool_choice=required. See DiscussLLM silent-token
-      pattern + OpenAI auto vs required docs.)
-
-    presence_state filters send_message availability so the model cannot
-    bypass dialog via send_message while in dialog.
+    - rest: enter_dialog (answer), send_message (one brush-off),
+      enter_working, start_sleep.
+    - working: enter_dialog, send_message, enter_rest, start_sleep.
+    - dialog: search_memory, write_diary, update_diary, enter_dialog (switch),
+      enter_rest, enter_working, start_sleep.
+    - sleep: start_sleep only (pipeline rarely runs here).
     """
     try:
         from Mila_observatory.runtime import runtime_config
@@ -34,176 +27,204 @@ def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
         diary_update_enabled = True
         presence_enabled = True
 
-    # NOTE: tools.silence is intentionally ignored — silence is empty content,
-    # not a tool. Kept in runtime JSON for backward compat, has no effect.
-
+    state = presence_state or "rest"
     defs: List[Dict] = []
 
-    if search_enabled:
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "search_memory",
-                "description": "Search long-term memory for facts about the user. "
-                               "Call directly when you need context. Results come back "
-                               "as a system message, then answer in `content`.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "What to look for in memory",
-                        }
+    if state == "dialog":
+        if search_enabled:
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "search_memory",
+                    "description": "Find facts about the person in long-term memory. "
+                                   "Results return as a system message.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "What to find"},
+                        },
+                        "required": ["query"],
                     },
-                    "required": ["query"],
                 },
-            },
-        })
-
-    # send_message ONLY outside dialog — single brush-off, never a dialogue.
-    if send_enabled and presence_state in ("rest", "working"):
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "send_message",
-                "description": "Send ONE single brush-off message WITHOUT entering dialog. "
-                               "Use ONLY in rest/working when you are busy and want to send "
-                               "a one-liner like 'я занята, давай позже'. "
-                               "NEVER use for a full dialogue — for dialogue call "
-                               "enter_dialog first and then answer in `content`. "
-                               "Not available in dialog state.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "chat_id": {
-                            "type": "string",
-                            "description": "Target chat ID (defaults to current notification chat)",
+            })
+        if diary_enabled:
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "write_diary",
+                    "description": "Save a meaningful moment or feeling to today's diary.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entry": {"type": "string", "description": "1-3 short sentences, first person"},
+                            "category": {
+                                "type": "string",
+                                "enum": ["day_entries", "reflection_entries"],
+                                "description": "day_entries: events. reflection_entries: feelings",
+                            },
                         },
-                        "text": {
-                            "type": "string",
-                            "description": "One short brush-off line in Mila's voice",
-                        },
+                        "required": ["entry"],
                     },
-                    "required": ["text"],
                 },
-            },
-        })
-
-    if diary_enabled:
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "write_diary",
-                "description": "Write a diary entry (1-3 short sentences, first person). "
-                               "Call directly, then continue with your reply in `content`.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "entry": {
-                            "type": "string",
-                            "description": "Diary entry text",
+            })
+        if diary_update_enabled:
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "update_diary",
+                    "description": "Extend an existing diary entry (ID from the diary block).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entry": {"type": "string", "description": "New text"},
+                            "entry_id": {"type": "string", "description": "Entry ID, e.g. '2'"},
+                            "category": {
+                                "type": "string",
+                                "enum": ["day_entries", "reflection_entries"],
+                            },
                         },
-                        "category": {
-                            "type": "string",
-                            "enum": ["day_entries", "reflection_entries"],
-                            "description": "'day_entries' — events, 'reflection_entries' — thoughts/feelings",
-                        },
+                        "required": ["entry", "entry_id"],
                     },
-                    "required": ["entry"],
                 },
-            },
-        })
-
-    if diary_update_enabled:
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "update_diary",
-                "description": "Update an existing diary entry by ID (take ID from diary block).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "entry": {
-                            "type": "string",
-                            "description": "New entry text",
+            })
+        if presence_enabled:
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "enter_dialog",
+                    "description": "Switch to a different chat (its ID from the notification).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "string", "description": "Chat to switch to"},
+                            "note": {"type": "string", "description": "Optional reason"},
                         },
-                        "entry_id": {
-                            "type": "string",
-                            "description": "ID from diary block, e.g. '2'",
-                        },
-                        "category": {
-                            "type": "string",
-                            "enum": ["day_entries", "reflection_entries"],
+                        "required": ["chat_id"],
+                    },
+                },
+            })
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "enter_rest",
+                    "description": "Finish the dialogue and rest.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "note": {"type": "string", "description": "Optional reason"},
                         },
                     },
-                    "required": ["entry", "entry_id"],
                 },
-            },
-        })
+            })
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "enter_working",
+                    "description": "Pause the dialogue and do your own work.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "note": {"type": "string", "description": "What you work on"},
+                        },
+                    },
+                },
+            })
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "start_sleep",
+                    "description": "Go to sleep for a while.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "duration_minutes": {
+                                "type": "integer",
+                                "description": "Minutes of sleep, e.g. 480",
+                            },
+                            "note": {"type": "string", "description": "Optional note"},
+                        },
+                        "required": ["duration_minutes"],
+                    },
+                },
+            })
+        return defs
 
+    # rest / working / sleep and fallback
     if presence_enabled:
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "enter_dialog",
-                "description": "Move into dialog with a specific chat. REQUIRED in rest/working "
-                               "before answering a notification with a full reply. "
-                               "After the switch you will be called again in dialog state — "
-                               "then answer in `content`.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "chat_id": {
-                            "type": "string",
-                            "description": "Chat to talk to (take from the notification)",
+        if state in ("rest", "working", "sleep"):
+            target_desc = "this chat (ID from the notification)"
+            if state == "working":
+                target_desc = "this chat (ID from the notification)"
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "enter_dialog",
+                    "description": f"Start talking to {target_desc}.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "string", "description": "Chat from the notification"},
+                            "note": {"type": "string", "description": "Optional reason"},
                         },
-                        "note": {
-                            "type": "string",
-                            "description": "Why you enter dialog (optional)",
+                        "required": ["chat_id"],
+                    },
+                },
+            })
+        if send_enabled and state in ("rest", "working"):
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "description": "Send one short note without starting a conversation.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "string", "description": "Target chat"},
+                            "text": {"type": "string", "description": "One short line in your voice"},
+                        },
+                        "required": ["text"],
+                    },
+                },
+            })
+        if state == "working":
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "enter_rest",
+                    "description": "Stop working and rest.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "note": {"type": "string", "description": "Optional reason"},
                         },
                     },
-                    "required": ["chat_id"],
                 },
-            },
-        })
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "enter_rest",
-                "description": "Return to rest (default state) when dialogue is over and there is nothing to do.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note": {"type": "string", "description": "Optional reason"},
+            })
+        if state == "rest":
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "enter_working",
+                    "description": "Do your own work for a while.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "note": {"type": "string", "description": "What you work on"},
+                        },
                     },
                 },
-            },
-        })
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "enter_working",
-                "description": "Get busy with your own stuff (texts for publishing house). "
-                               "Same notification visibility as rest in v1.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note": {"type": "string", "description": "What you are working on"},
-                    },
-                },
-            },
-        })
+            })
         defs.append({
             "type": "function",
             "function": {
                 "name": "start_sleep",
-                "description": "Go to sleep and start the night cycle (reflection, memorization).",
+                "description": "Go to sleep for a while.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "duration_minutes": {
                             "type": "integer",
-                            "description": "How long to sleep in minutes, e.g. 480",
+                            "description": "Minutes of sleep, e.g. 480",
                         },
                         "note": {"type": "string", "description": "Optional note"},
                     },
@@ -212,9 +233,6 @@ def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
             },
         })
 
-    # Always return at least one tool so tool_choice=auto works;
-    # if everything is disabled the model just answers in content / stays silent.
-    # (Old fallback that forced a `silence` enum entry is removed with Think.)
     return defs
 
 

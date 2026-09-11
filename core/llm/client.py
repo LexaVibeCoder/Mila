@@ -57,7 +57,8 @@ class LLMClient:
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
         max_retries: int = 3,
-        retry_delay: float = 2.0
+        retry_delay: float = 2.0,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> dict:
         import time
         import asyncio
@@ -87,6 +88,9 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
+
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         last_error = None
         audio_stripped = False
@@ -129,14 +133,9 @@ class LLMClient:
             message = choice.message
 
             has_tool_calls = hasattr(message, 'tool_calls') and message.tool_calls
-            if not has_tool_calls and not (message.content or "").strip():
-                print(f"  [LLM] Empty content (attempt {attempt}), retrying...")
-                last_error = Exception("Empty response from LLM API")
-                if attempt < max_retries:
-                    await asyncio.sleep(retry_delay * (2 ** (attempt - 1)))
-                    continue
-                else:
-                    raise Exception("Empty response from LLM API after all retries")
+            # Empty content with no tools is valid: rest/working silence,
+            # or a tool-only turn. Only missing choices are retried above.
+            # (Dialog JSON replies are non-empty; {"messages": []} stays silent.)
 
             tool_calls = None
             if has_tool_calls:

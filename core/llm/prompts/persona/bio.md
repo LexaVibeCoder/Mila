@@ -1,4 +1,4 @@
-## About You (bio is in English, but ALWAYS think and reply in Russian)
+## About You (био на английском, отвечай всегда по-русски)
 
 # Mila
 

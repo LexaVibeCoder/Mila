@@ -110,6 +110,119 @@ def is_in_dialog_with(chat_id: str) -> bool:
     return p["state"] == "dialog" and str(p.get("focus_chat_id")) == str(chat_id)
 
 
+def get_focus_last_activity_seconds() -> float | None:
+    """Seconds since the last chunk (any side) in the focus chat.
+
+    Returns None when not in dialog, no focus, or no history yet.
+    """
+    p = get_presence()
+    if p.get("state") != "dialog" or not p.get("focus_chat_id"):
+        return None
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT time_start FROM chunks WHERE chat_id=? ORDER BY time_start DESC LIMIT 1",
+            (str(p["focus_chat_id"]),),
+        )
+        row = cur.fetchone()
+        if row is None or not row["time_start"]:
+            return None
+        try:
+            last = datetime.fromisoformat(row["time_start"])
+        except (ValueError, TypeError):
+            return None
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last).total_seconds()
+    finally:
+        conn.close()
+
+
+def check_dialog_idle(timeout_seconds: float | None = None) -> dict | None:
+    """Exit dialog → rest if focus chat is silent longer than timeout.
+
+    Returns the new presence dict when a transition happened, else None.
+    Never raises; sleeping states are left alone (sleep manager owns them).
+    """
+    if timeout_seconds is None:
+        try:
+            from config import settings
+            timeout_seconds = float(getattr(settings, "DIALOG_IDLE_TIMEOUT_SECONDS", 300.0))
+        except Exception:
+            timeout_seconds = 300.0
+    try:
+        p = get_presence()
+        if p.get("state") != "dialog" or not p.get("focus_chat_id"):
+            return None
+        idle = get_focus_last_activity_seconds()
+        if idle is None:
+            return None
+        if idle < timeout_seconds:
+            return None
+        # Don't kick her out while the peer is actively typing.
+        try:
+            if _typing_checker is not None and _typing_checker(str(p["focus_chat_id"])):
+                return None
+        except Exception:
+            pass
+        focus = p.get("focus_user_name") or p.get("focus_chat_id")
+        state = enter_rest(f"auto: тишина в диалоге с {focus} более {int(timeout_seconds // 60)} мин")
+        try:
+            from core.needs.tracker import get_tracker as _get_needs
+            _get_needs().apply_action_effect("enter_rest")
+        except Exception:
+            pass
+        try:
+            from Mila_observatory.api.dashboard import add_event
+            add_event("presence", f"Auto-rest: диалог с {focus} завершен после {idle:.0f}с тишины")
+        except Exception:
+            pass
+        print(f"[Presence] auto-rest: диалог с {focus} завершен после {idle:.0f}с тишины")
+        return state
+    except Exception as e:
+        print(f"[Presence] idle check failed: {e}")
+        return None
+
+
+# Background watcher: ticks every N seconds, calls check_dialog_idle().
+_auto_rest_task = None
+_typing_checker = None
+
+
+async def _auto_rest_loop(interval_seconds: float = 30.0) -> None:
+    import asyncio
+    while True:
+        try:
+            check_dialog_idle()
+        except Exception as e:
+            print(f"[Presence] auto-rest loop error: {e}")
+        await asyncio.sleep(interval_seconds)
+
+
+def start_auto_rest_scheduler(typing_checker=None) -> None:
+    """Start the dialog-idle watcher. typing_checker(chat_id) -> bool."""
+    global _auto_rest_task, _typing_checker
+    if typing_checker is not None:
+        _typing_checker = typing_checker
+    if _auto_rest_task is not None and not _auto_rest_task.done():
+        return
+    try:
+        from config import settings
+        interval = float(getattr(settings, "DIALOG_IDLE_CHECK_INTERVAL_SECONDS", 30.0))
+    except Exception:
+        interval = 30.0
+    import asyncio
+    _auto_rest_task = asyncio.create_task(_auto_rest_loop(interval))
+    print(f"[Presence] Auto-rest watcher started (timeout check every {interval:.0f}s)")
+
+
+def stop_auto_rest_scheduler() -> None:
+    global _auto_rest_task
+    if _auto_rest_task is not None and not _auto_rest_task.done():
+        _auto_rest_task.cancel()
+    _auto_rest_task = None
+
+
 def format_state_block(current_chat_id: str | None = None,
                        current_user_name: str | None = None) -> str:
     """Location block for the system prompt (no behavior rules here).

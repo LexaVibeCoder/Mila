@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     TYPING_GRACE_SECONDS: float = 2.0      # Wait after typing stops for the message to arrive
     TYPING_ABORT_GENERATION: bool = True   # Cancel LLM run/send if peer starts typing
 
+    # Presence: auto-exit from dialog to rest after silence in focus chat.
+    DIALOG_IDLE_TIMEOUT_SECONDS: float = 300.0  # 5 min without messages in focus chat → rest
+    DIALOG_IDLE_CHECK_INTERVAL_SECONDS: float = 30.0  # how often the watcher ticks
+
     class Config:
         env_file = ".env"
         extra = "allow"  # Allow extra fields from .env (night_llm, sleep, etc.) to be used by runtime_config

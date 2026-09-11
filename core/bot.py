@@ -14,6 +14,7 @@ from core.sleep.manager import (
     recover_from_crash,
     start_auto_sleep_scheduler
 )
+from core.presence import start_auto_rest_scheduler, stop_auto_rest_scheduler
 from core.queue import MessageCoordinate
 from core.tg_adapter import is_private_chat
 from core.tg_auth import register_auth_handlers
@@ -133,6 +134,11 @@ class MilaUserbot:
 
         # Start auto-sleep scheduler
         start_auto_sleep_scheduler()
+        # Auto-exit dialog → rest after 5 min of silence in focus chat.
+        # Typing check prevents kicking her out mid-typing.
+        start_auto_rest_scheduler(
+            typing_checker=lambda chat_id: self.messages.is_user_typing(chat_id)
+        )
 
     async def _heartbeat_loop(self):
         """Fresh data/bot_heartbeat = healthy for compose healthcheck."""
@@ -335,6 +341,10 @@ class MilaUserbot:
             from core.sleep.manager import _auto_sleep_task
             if _auto_sleep_task is not None and not _auto_sleep_task.done():
                 _auto_sleep_task.cancel()
+        except Exception:
+            pass
+        try:
+            stop_auto_rest_scheduler()
         except Exception:
             pass
         try:

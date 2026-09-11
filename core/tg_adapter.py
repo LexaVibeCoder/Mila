@@ -34,11 +34,39 @@ def is_text_message(message: types.Message) -> bool:
 
 
 async def is_private_chat(client, chat_id: int) -> bool:
-    """True if the chat is a 1-1 user chat (replaces filters.private)."""
-    chat = await client.getChat(chat_id=chat_id)
-    if isinstance(chat, types.Error):
-        return False
-    return isinstance(chat.type, types.ChatTypePrivate)
+    """True if the chat is a 1-1 user chat (replaces filters.private).
+
+    Transient TDLib errors are retried once so one network blip doesn't
+    silently drop a message. Persistent errors still return False (fail
+    closed — don't treat unknown chats as private).
+    """
+    import asyncio
+    last_err = None
+    for attempt in range(2):
+        try:
+            chat = await client.getChat(chat_id=chat_id)
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+                continue
+            print(f"[TG] getChat failed for {chat_id}: {e}")
+            return False
+        if isinstance(chat, types.Error):
+            # Rate-limited / transient: retry once.
+            msg = f"{chat.code} {chat.message}".lower()
+            transient = chat.code == 429 or "timeout" in msg or "temporary" in msg or "flood" in msg
+            if transient and attempt == 0:
+                await asyncio.sleep(1.5)
+                continue
+            if attempt == 0 and chat.code not in (404, 400):
+                # Unknown error shape — one retry before failing closed.
+                await asyncio.sleep(1.0)
+                continue
+            return False
+        return isinstance(chat.type, types.ChatTypePrivate)
+    print(f"[TG] getChat failed for {chat_id}: {last_err}")
+    return False
 
 
 async def resolve_sender_name(client, message: types.Message) -> str:
@@ -80,10 +108,34 @@ async def normalize_message(client, message: types.Message) -> NormalizedMessage
 
 
 async def send_text(client, chat_id: int, text: str) -> None:
-    """Send a text message, raising on TDLib error."""
-    res = await client.sendTextMessage(chat_id=chat_id, text=text)
-    if isinstance(res, types.Error):
-        raise RuntimeError(f"TDLib sendTextMessage failed: {res.code} {res.message}")
+    """Send a text message with one retry on 429/flood, raising on failure."""
+    import asyncio
+    import random
+    last_error: Exception | None = None
+    for attempt in range(3):
+        res = await client.sendTextMessage(chat_id=chat_id, text=text)
+        if not isinstance(res, types.Error):
+            return
+        msg = f"{res.code} {res.message}"
+        low = msg.lower()
+        last_error = RuntimeError(f"TDLib sendTextMessage failed: {msg}")
+        retryable = res.code == 429 or "flood" in low or "retry" in low or "timeout" in low or "temporary" in low or res.code >= 500
+        if retryable and attempt < 2:
+            # Honor flood wait when TDLib reports it (e.g. "retry after 3").
+            wait = 1.5 * (2 ** attempt) + random.uniform(0, 0.5)
+            try:
+                import re
+                m = re.search(r"retry after (\d+)", low)
+                if m:
+                    wait = min(max(int(m.group(1)), 1), 30) + random.uniform(0, 0.5)
+            except Exception:
+                pass
+            print(f"[TG] send retry in {wait:.1f}s ({msg})")
+            await asyncio.sleep(wait)
+            continue
+        raise last_error
+    if last_error:
+        raise last_error
 
 
 async def send_typing(client, chat_id: int) -> None:

@@ -29,6 +29,7 @@ class EmbeddingClient:
             self._openai_client = openai.AsyncOpenAI(
                 base_url=normalize_api_base(settings.EMBED_API_BASE),
                 api_key=self.api_key or "",
+                timeout=60.0,
             )
         return self._openai_client
 
@@ -55,16 +56,27 @@ class EmbeddingClient:
         )
 
     async def _embed_openai(self, texts: List[str]) -> np.ndarray:
+        import asyncio
         client = self._get_openai_client()
-        response = await client.embeddings.create(
-            model=self.model,
-            input=texts,
-        )
-        vectors = [
-            data.embedding
-            for data in sorted(response.data, key=lambda x: x.index)
-        ]
-        return np.array(vectors, dtype=np.float32)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = await client.embeddings.create(
+                    model=self.model,
+                    input=texts,
+                )
+                vectors = [
+                    data.embedding
+                    for data in sorted(response.data, key=lambda x: x.index)
+                ]
+                return np.array(vectors, dtype=np.float32)
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    await asyncio.sleep(1.0 * (2 ** (attempt - 1)))
+                    continue
+                raise
+        raise last_error or RuntimeError("Embedding failed")
 
     async def _embed_ollama(self, texts: List[str]) -> np.ndarray:
         async with httpx.AsyncClient(timeout=120.0) as client:

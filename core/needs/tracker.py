@@ -71,12 +71,17 @@ class NeedsTracker:
             "actions": ACTIONS,
         }
 
-    def get_needs(self, force: bool = False) -> dict:
+    def get_needs(self, force: bool = False, chat_id: str | None = None) -> dict:
+        # Per-chat cache key: activity in chat A must not mask fatigue/social
+        # for chat B. Offsets stay global (Mila has one body), but
+        # seconds_since_last_msg / in_active_dialog are per-chat when chat_id given.
         now = time.time()
-        if not force and self._cached_needs and (now - self._cache_time) < self._cache_ttl:
+        cache_key = (chat_id or "", now // self._cache_ttl)
+        if not force and self._cached_needs and getattr(self, "_cache_key", None) == cache_key and (now - self._cache_time) < self._cache_ttl:
             return self._cached_needs
-        self._cached_needs = self._compute_needs()
+        self._cached_needs = self._compute_needs(chat_id=chat_id)
         self._cache_time = now
+        self._cache_key = cache_key
         return self._cached_needs
 
     def get_needs_summary(self, force: bool = False) -> str:
@@ -131,11 +136,11 @@ class NeedsTracker:
         self._boredom_offset = 0.0
         self._cached_needs = None
 
-    def _compute_needs(self) -> dict:
+    def _compute_needs(self, chat_id: str | None = None) -> dict:
         now = datetime.now()
         current_hour = now.hour
 
-        seconds_since_last_msg = self._get_seconds_since_last_msg()
+        seconds_since_last_msg = self._get_seconds_since_last_msg(chat_id=chat_id)
         in_active_dialog = seconds_since_last_msg < 300
 
         fatigue = self._compute_fatigue(current_hour, seconds_since_last_msg, in_active_dialog)
@@ -216,14 +221,20 @@ class NeedsTracker:
             "fallback": True,
         }
 
-    def _get_seconds_since_last_msg(self) -> float:
+    def _get_seconds_since_last_msg(self, chat_id: str | None = None) -> float:
         try:
             from core.db import get_conn
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute(
-                "SELECT time_start FROM chunks ORDER BY time_start DESC LIMIT 1"
-            )
+            if chat_id is not None:
+                cur.execute(
+                    "SELECT time_start FROM chunks WHERE chat_id=? ORDER BY time_start DESC LIMIT 1",
+                    (str(chat_id),),
+                )
+            else:
+                cur.execute(
+                    "SELECT time_start FROM chunks ORDER BY time_start DESC LIMIT 1"
+                )
             row = cur.fetchone()
             conn.close()
             if row and row["time_start"]:

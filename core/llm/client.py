@@ -1,17 +1,53 @@
 import openai
-import json
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, Any, Optional
 from config import settings, normalize_api_base
+
+
+def _retry_wait(exc: Exception, attempt: int, base_delay: float) -> float:
+    """Backoff with Retry-After support for 429/5xx/timeouts."""
+    import random
+    default = base_delay * (2 ** (attempt - 1))
+    try:
+        status = getattr(exc, "status_code", None)
+        msg = str(exc).lower()
+        retryable = (
+            (isinstance(status, int) and (status == 429 or 500 <= status <= 599))
+            or "429" in msg or "rate limit" in msg or "retry" in msg
+            or "timeout" in msg or "temporar" in msg or "5xx" in msg
+            or "overloaded" in msg or "try again" in msg
+        )
+        if not retryable and attempt == 1:
+            # Unknown errors still get one fast retry; backoff grows anyway.
+            pass
+        # Honor Retry-After header when the SDK exposes it.
+        retry_after = None
+        resp = getattr(exc, "response", None)
+        headers = getattr(resp, "headers", None) if resp is not None else None
+        if headers:
+            try:
+                ra = headers.get("retry-after") or headers.get("Retry-After")
+                if ra:
+                    retry_after = float(str(ra).split(",")[0].strip())
+            except (TypeError, ValueError):
+                retry_after = None
+        if retry_after is not None:
+            return min(max(retry_after, 1.0), 60.0) + random.uniform(0, 0.5)
+    except Exception:
+        pass
+    import random as _r
+    return default + _r.uniform(0, 0.5)
+
 
 class LLMClient:
     def __init__(self, model: str = None, api_base: str = None, api_key: str = None,
                  max_tokens: int = None, temperature: float = None,
                  top_p: float = None, frequency_penalty: float = None,
-                 presence_penalty: float = None):
+                 presence_penalty: float = None, timeout: float = 90.0):
         base = api_base or settings.LLM_API_BASE
         self.client = openai.AsyncOpenAI(
             base_url=normalize_api_base(base),
-            api_key=api_key or settings.LLM_API_KEY
+            api_key=api_key or settings.LLM_API_KEY,
+            timeout=timeout,
         )
         self.model = model or settings.MAIN_LLM_MODEL
         self.default_max_tokens = max_tokens or settings.MAIN_LLM_MAX_TOKENS
@@ -19,22 +55,27 @@ class LLMClient:
         self.default_top_p = top_p
         self.default_frequency_penalty = frequency_penalty
         self.default_presence_penalty = presence_penalty
+        self.timeout = timeout
 
     def reconfigure(self, model: str = None, api_base: str = None, api_key: str = None,
                     max_tokens: int = None, temperature: float = None,
                     top_p: float = None, frequency_penalty: float = None,
-                    presence_penalty: float = None):
+                    presence_penalty: float = None, timeout: float | None = None):
+        if timeout is not None:
+            self.timeout = timeout
         if model is not None:
             self.model = model
         if api_base is not None:
             self.client = openai.AsyncOpenAI(
                 base_url=normalize_api_base(api_base),
-                api_key=api_key or settings.LLM_API_KEY
+                api_key=api_key or settings.LLM_API_KEY,
+                timeout=self.timeout,
             )
         if api_key is not None:
             self.client = openai.AsyncOpenAI(
                 base_url=normalize_api_base(api_base or settings.LLM_API_BASE),
-                api_key=api_key
+                api_key=api_key,
+                timeout=self.timeout,
             )
         if max_tokens is not None:
             self.default_max_tokens = max_tokens
@@ -113,7 +154,7 @@ class LLMClient:
                 last_error = e
 
                 if attempt < max_retries:
-                    wait = retry_delay * (2 ** (attempt - 1))
+                    wait = _retry_wait(e, attempt, retry_delay)
                     print(f"  [LLM] Retry in {wait:.1f}s...")
                     await asyncio.sleep(wait)
                     continue
@@ -178,114 +219,3 @@ def _strip_audio_parts(messages):
             m = {**m, "content": kept}
         out.append(m)
     return out
-
-    async def generate_stream(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict]] = None,
-        tool_choice: str = "auto",
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        system_prompt: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
-        if max_tokens is None:
-            max_tokens = self.default_max_tokens
-        if temperature is None:
-            temperature = self.default_temperature
-
-        if system_prompt:
-            messages = [{"role": "system", "content": system_prompt}] + messages
-
-        kwargs = dict(
-            model=self.model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=True,
-            stream_options={"include_usage": False},
-        )
-
-        if self.default_top_p is not None:
-            kwargs["top_p"] = self.default_top_p
-        if self.default_frequency_penalty is not None:
-            kwargs["frequency_penalty"] = self.default_frequency_penalty
-        if self.default_presence_penalty is not None:
-            kwargs["presence_penalty"] = self.default_presence_penalty
-
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-
-        collected_content = ""
-        collected_tool_calls = {}
-
-        try:
-            stream = await self.client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if not delta:
-                    continue
-
-                if delta.content:
-                    collected_content += delta.content
-                    yield delta.content
-
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in collected_tool_calls:
-                            collected_tool_calls[idx] = {
-                                "id": "",
-                                "function": {"name": "", "arguments": ""}
-                            }
-                        if tc_delta.id:
-                            collected_tool_calls[idx]["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                collected_tool_calls[idx]["function"]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                collected_tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
-
-            if collected_tool_calls:
-                tool_calls_list = []
-                for idx in sorted(collected_tool_calls.keys()):
-                    tc = collected_tool_calls[idx]
-                    tool_calls_list.append({
-                        "index": idx,
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": tc["function"]["arguments"]
-                        }
-                    })
-                yield f"__tool_call__:{json.dumps(tool_calls_list)}"
-
-        except Exception as e:
-            print(f"  [LLM Stream Error] {e}")
-            response = await self.generate(
-                messages=messages if not system_prompt else [{"role": "system", "content": system_prompt}] + messages,
-                tools=tools,
-                tool_choice=tool_choice,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system_prompt=None,
-            )
-            thoughts = response.get("thoughts", "")
-            if thoughts:
-                yield thoughts
-            tool_calls = response.get("tool_calls")
-            if tool_calls:
-                tc_list = [
-                    {
-                        "index": i,
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for i, tc in enumerate(tool_calls)
-                ]
-                yield f"__tool_call__:{json.dumps(tc_list)}"

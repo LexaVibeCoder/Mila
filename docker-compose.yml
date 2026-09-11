@@ -24,6 +24,13 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     command: python main.py
+    healthcheck:
+      # Bot has no HTTP port: healthy = main.py alive + heartbeat fresh (<120s).
+      test: ["CMD-SHELL", "python -c \"import os,time,sys; p='data/bot_heartbeat'; sys.exit(0 if (os.path.exists(p) and time.time()-os.path.getmtime(p)<120) else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - mila_network
 
@@ -54,6 +61,12 @@ services:
     # Container must listen on 0.0.0.0 (its 127.0.0.1 is unreachable
     # from the host); localhost restriction is the ports line above.
     command: python -m Mila_observatory.server
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     depends_on:
       - bot
     networks:

@@ -29,10 +29,16 @@ _auto_sleep_task = None
 
 
 async def recover_from_crash() -> bool:
+    global _current_session_id, _sleep_in_progress, _sleep_start_time
     _ensure_sleep_tables()
     current = get_current_state()
     state = current.get("state", "awake")
     session_id = current.get("session_id")
+    # Restore in-memory session so queue_incoming_message doesn't drop
+    # messages right after a restart while DB still says sleeping.
+    if state == "sleeping" and session_id:
+        _current_session_id = session_id
+        _sleep_in_progress = True
 
     if state == "awake":
         return False
@@ -319,6 +325,12 @@ async def wake_up() -> Dict[str, Any]:
 
     current_state = get_state()
     session_id = _current_session_id
+    if not session_id:
+        try:
+            session_id = get_current_state().get("session_id")
+            _current_session_id = session_id
+        except Exception:
+            session_id = None
 
     if current_state == SleepState.AWAKE:
         return {"success": True, "message": "Mila is already awake"}
@@ -434,11 +446,35 @@ def start_auto_sleep_scheduler():
 
 
 def queue_incoming_message(chat_id: str, user_id: str, content: str):
+    global _current_session_id
     if not _current_session_id:
+        # After a restart in-memory session is None while DB still says
+        # sleeping — recover it instead of silently dropping the message.
+        try:
+            current = get_current_state()
+            recovered = current.get("session_id")
+            if recovered:
+                _current_session_id = recovered
+                print(f"[SleepQueue] Recovered session {recovered[:8]}... after restart")
+        except Exception:
+            pass
+    if not _current_session_id:
+        print("[SleepQueue] WARNING: sleeping but no session — message kept in chunks/buffer, not in sleep queue")
         return
 
     queue_message(_current_session_id, chat_id, user_id, content)
     print(f"[SleepQueue] Message queued from {user_id[:8]}... in {chat_id[:8]}...")
+
+
+def take_unprocessed_sleep_queue(session_id: str | None = None) -> list[dict]:
+    """Drain helper for startup/replay: returns unprocessed rows without marking.
+
+    Caller re-injects them into MessageCoordinate then marks processed.
+    """
+    try:
+        return get_queued_messages(session_id)
+    except Exception:
+        return []
 
 
 def get_pending_messages_count() -> int:

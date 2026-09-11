@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libc6-dev \
     ffmpeg \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -37,7 +38,8 @@ COPY . .
 COPY --from=frontend-builder /app/dist Mila_observatory/frontend/dist
 
 # Create data directories (will be mounted as volumes in production)
-RUN mkdir -p data/photos data/daily_reports logs models
+# NOTE: DAILY_REPORTS path contains a space by design (config.py DAILY_REPORTS).
+RUN mkdir -p "data/photos" "data/daily reports" "data/media" "data/tdlib" logs models
 
 # Expose observatory port
 EXPOSE 8080

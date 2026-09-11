@@ -305,7 +305,12 @@ class ToolExecutor:
             context_addon = "[Nothing found in memory]"
 
             if valid_indices:
-                memories = search_memories_by_faiss_ids(valid_indices)
+                # Per-user isolation: never surface another user's facts.
+                # Legacy rows with NULL user_id are visible to everyone only
+                # when no per-user rows matched (backward compat).
+                memories = search_memories_by_faiss_ids(valid_indices, user_id=self.current_user_id)
+                if not memories:
+                    memories = [m for m in search_memories_by_faiss_ids(valid_indices) if not m.get("user_id")]
                 if memories:
                     reranker = RerankerClient()
                     documents = [m.get("content", "") for m in memories]

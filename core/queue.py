@@ -147,11 +147,21 @@ class MessageCoordinate:
                 except Exception:
                     pass
 
-        # If Mila is sleeping — just queue the message, no batching.
+        # If Mila is sleeping — save first (so sleep summarizers see it),
+        # then queue for replay after wake. Previously this returned before
+        # add_chunk/push_message and dropped the session when
+        # _current_session_id was None after restart.
         from core.sleep.manager import is_sleeping, queue_incoming_message
         if is_sleeping():
+            chunk_id = add_chunk(chat_id, user_id, placeholder, token_count=0,
+                                 type='raw', kind=notif.kind, media_path=local_path)
+            try:
+                push_message(chat_id, placeholder, source_chunk_id=chunk_id,
+                             kind=notif.kind)
+            except Exception:
+                pass
             queue_incoming_message(chat_id, user_id, placeholder)
-            print(f"[Sleep] Message queued from {user_id[:8]}... in {chat_id[:8]}...")
+            print(f"[Sleep] Message saved+queued from {user_id[:8]}... in {chat_id[:8]}...")
             return
 
         chunk_id = add_chunk(chat_id, user_id, placeholder, token_count=0,
@@ -388,8 +398,10 @@ class MessageCoordinate:
         # Compress context before processing (oldest messages → summary).
         await bot._compress_context(chat_id)
 
-        # ── Needs pre-filter (once per batch) ──
-        needs = get_needs_tracker().get_needs()
+        # ── Needs pre-filter (once per batch, per-chat activity) ──
+        # Global offsets (one body) stay, but seconds_since_last_msg must be
+        # per-chat: otherwise user A resets fatigue/social for user B.
+        needs = get_needs_tracker().get_needs(chat_id=chat_id)
         hour = needs["current_hour"]
         is_night = hour >= 22 or hour <= 7
         if needs["fatigue"] > 0.85 and is_night:
@@ -414,9 +426,13 @@ class MessageCoordinate:
             user_visible_history = bot._resolve_roles_in_histories(raw_user_visible, chat_id)
             agent_internal_history = bot._resolve_roles_in_histories(raw_internal, chat_id)
 
-            # Pin the pipeline to this chat/user.
+            # Pin the pipeline to this chat/user (legacy mutable fields kept
+            # for observatory compat) + snapshot explicitly for this turn so a
+            # parallel chat can't hijack routing mid-generation.
             bot.pipeline.user_id = user_id
             bot.pipeline.chat_id = chat_id
+            request_user_id = user_id
+            request_chat_id = chat_id
 
             full_response = ""
             has_silence_action = False
@@ -477,6 +493,8 @@ class MessageCoordinate:
                 agent_internal_history=agent_internal_history,
                 user_profile=get_user_info(user_id),
                 media=media,
+                request_user_id=request_user_id,
+                request_chat_id=request_chat_id,
             ):
                 # If a new message arrived or the peer started typing
                 # mid-generation → stop and wait for their message.

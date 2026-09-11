@@ -25,6 +25,23 @@ AGENTS.md
 
 # Logs
 logs/
+logs/*.json
+logs/pipeline_*.json
+logs/diary_logs/
+
+# Frontend build artifacts (built in Dockerfile stage 1, never commit)
+Mila_observatory/frontend/node_modules/
+Mila_observatory/frontend/dist/
+**/node_modules/
+**/dist/
+
+# One-shot / local artifacts
+state_agent/venv/
+state_agent/__pycache__/
+state_agent/*.pt
+state_agent/dataset.json
+Mila_observatory/frontend/*.log
+npm-debug.log*
 
 # IDE
 .vscode/

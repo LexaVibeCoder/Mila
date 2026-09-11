@@ -271,6 +271,8 @@ def add_memory(user_id: str, content: str, importance: float = 0.5, tags: list[s
         conn.close()
 
 def search_memories_by_ids(mem_ids: list[str]) -> list[dict]:
+    if not mem_ids:
+        return []
     conn = get_conn()
     try:
         placeholders = ','.join('?' for _ in mem_ids)
@@ -281,15 +283,25 @@ def search_memories_by_ids(mem_ids: list[str]) -> list[dict]:
     finally:
         conn.close()
 
-def search_memories_by_faiss_ids(faiss_ids: list[int]) -> list[dict]:
-    """Search memories by FAISS integer IDs."""
+def search_memories_by_faiss_ids(faiss_ids: list[int], user_id: str | None = None) -> list[dict]:
+    """Search memories by FAISS integer IDs, optionally scoped to one user.
+
+    user_id filter is required for multi-user isolation: without it a vector
+    hit for user A can surface user B's fact in the prompt.
+    """
     if not faiss_ids:
         return []
     conn = get_conn()
     try:
         placeholders = ','.join('?' for _ in faiss_ids)
         cur = conn.cursor()
-        cur.execute(f"SELECT * FROM memories WHERE faiss_id IN ({placeholders})", faiss_ids)
+        if user_id is not None:
+            cur.execute(
+                f"SELECT * FROM memories WHERE faiss_id IN ({placeholders}) AND user_id=?",
+                (*faiss_ids, str(user_id)),
+            )
+        else:
+            cur.execute(f"SELECT * FROM memories WHERE faiss_id IN ({placeholders})", faiss_ids)
         rows = cur.fetchall()
         return [dict(row) for row in rows]
     finally:

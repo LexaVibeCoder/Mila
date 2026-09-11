@@ -217,7 +217,7 @@ class ThinkPipeline:
             # Old signature fallback (should not happen after migration).
             return get_tool_definitions()
 
-    def _build_notification_block(self, batch_text: str) -> Optional[str]:
+    def _build_notification_block(self, batch_text: str, chat_id: str | None = None) -> Optional[str]:
         """Explicit notification wrapper for rest/working.
 
         History (agent_internal_history) already carries 5-10+ previous
@@ -233,7 +233,7 @@ class ThinkPipeline:
         if not last:
             return None
         return (
-            f"[уведомление] новый текст из чата {self.chat_id}:\n"
+            f"[уведомление] новый текст из чата {chat_id or self.chat_id}:\n"
             f"{last}\n"
             f"(выше в истории — предыдущие сообщения этого чата для контекста.)"
         )
@@ -266,13 +266,17 @@ class ThinkPipeline:
                 print(f"[Pipeline] tool_call convert error: {e}")
         return actions
 
-    async def _execute_single_action(self, action: Dict) -> Dict:
-        """Execute a single direct-tool action."""
+    async def _execute_single_action(self, action: Dict, user_id: str | None = None, chat_id: str | None = None) -> Dict:
+        """Execute a single direct-tool action with an explicit request context.
+
+        user_id/chat_id are snapshotted per-turn by the caller so two parallel
+        chats can't overwrite each other's Tools via self.user_id mutation.
+        """
         executor = ToolExecutor(
             text_memory=self.text_memory,
             embedding_client=self.emb_client,
-            current_user_id=self.user_id,
-            chat_id=self.chat_id,
+            current_user_id=user_id or self.user_id,
+            chat_id=chat_id or self.chat_id,
         )
         return await executor.execute_action(action)
 
@@ -449,8 +453,14 @@ class ThinkPipeline:
         user_message: str,
         agent_internal_history: List[Dict[str, str]],
         media: Optional[Dict[str, Any]],
+        request_user_id: str | None = None,
+        request_chat_id: str | None = None,
     ):
         """Yield low-level step dicts; caller translates to public events.
+
+        request_user_id/request_chat_id snapshot the turn: parallel chats
+        mutate self.user_id/self.chat_id (queue pinning), so the loop must
+        never read self.* mid-flight — only these locals.
 
         Yields internal dicts:
           {"kind": "llm", "content": str, "tool_calls": [...], "finish_reason": str}
@@ -459,13 +469,15 @@ class ThinkPipeline:
           {"kind": "reply_tool", "action": executed send_message dict}
           {"kind": "silence", "reason": str}
         """
+        req_user = request_user_id or self.user_id
+        req_chat = request_chat_id or self.chat_id
         messages = list(agent_internal_history)
-        notif_block = self._build_notification_block(user_message or "")
+        notif_block = self._build_notification_block(user_message or "", chat_id=req_chat)
         if notif_block:
             messages.append({"role": "system", "content": notif_block})
         # Always attach: history media (last 3 photos + 2 audios) must load
-        # even on text-only turns (media=None). chat_id fallback = self.chat_id.
-        messages = self._attach_media(messages, media or {}, default_chat_id=self.chat_id)
+        # even on text-only turns (media=None). chat_id fallback = req_chat.
+        messages = self._attach_media(messages, media or {}, default_chat_id=req_chat)
 
         max_iterations = _max_iterations()
         choice = _tool_choice()
@@ -481,7 +493,7 @@ class ThinkPipeline:
             # Presence may have changed mid-loop (enter_dialog etc.) —
             # rebuild prompt + tools every iteration so rules match state.
             main_system_prompt = build_main_llm_system_prompt(
-                self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
+                req_user, chat_id=req_chat, my_user_id=self.my_user_id
             )
             tool_definitions = self._current_tool_defs()
             want_json = state == "dialog"
@@ -554,7 +566,7 @@ class ThinkPipeline:
                     if not bubbles:
                         yield {"kind": "silence", "reason": "empty messages array"}
                         return
-                    target = str(presence.get("focus_chat_id") or self.chat_id)
+                    target = str(presence.get("focus_chat_id") or req_chat)
                     yield {"kind": "reply_bubbles", "texts": bubbles,
                            "target_chat_id": target}
                     return
@@ -582,7 +594,7 @@ class ThinkPipeline:
             sleep_started = False
 
             for action in actions:
-                executed = await self._execute_single_action(action)
+                executed = await self._execute_single_action(action, user_id=req_user, chat_id=req_chat)
                 get_needs_tracker().apply_action_effect(action.get("action_type"))
                 yield {"kind": "action", "action": executed}
 
@@ -672,8 +684,12 @@ class ThinkPipeline:
         agent_internal_history: List[Dict[str, str]],
         user_profile: Optional[Dict[str, Any]] = None,
         media: Optional[Dict[str, Any]] = None,
+        request_user_id: str | None = None,
+        request_chat_id: str | None = None,
     ) -> Dict[str, Any]:
         total_start = time.time()
+        req_user = request_user_id or self.user_id
+        req_chat = request_chat_id or self.chat_id
         try:
             all_actions: List[Dict] = []
             raw_llm_responses: List[Dict] = []
@@ -684,7 +700,7 @@ class ThinkPipeline:
             silence_reason = ""
             iterations = 0
 
-            async for step in self._run_stream(user_message, agent_internal_history, media):
+            async for step in self._run_stream(user_message, agent_internal_history, media, request_user_id=req_user, request_chat_id=req_chat):
                 kind = step.get("kind")
                 if kind == "llm":
                     iterations = step.get("iteration", iterations)
@@ -706,7 +722,7 @@ class ThinkPipeline:
                 elif kind == "reply_tool":
                     a = step["action"]
                     reply_text = (a.get("text") or "").strip()
-                    reply_chat_id = str(a.get("chat_id", self.chat_id))
+                    reply_chat_id = str(a.get("chat_id", req_chat))
                     reply_via = "send_message_brush_off"
                     all_actions.append(a) if a not in all_actions else None
                     break
@@ -732,7 +748,7 @@ class ThinkPipeline:
                 "raw_llm_responses": raw_llm_responses,
                 "timing": {"total": f"{s_time:.2f}s", "iterations": iterations},
             }
-            await self._save_log(result, user_message)
+            await self._save_log(result, user_message, request_user_id=req_user, request_chat_id=req_chat)
             return result
         except Exception as e:
             total_time = time.time() - total_start
@@ -747,18 +763,30 @@ class ThinkPipeline:
                 "error": str(e),
                 "timing": {"total": f"{total_time:.2f}s"},
             }
-            await self._save_log({**error_result, "traceback": tb}, user_message)
+            await self._save_log({**error_result, "traceback": tb}, user_message, request_user_id=request_user_id, request_chat_id=request_chat_id)
             return error_result
 
-    async def _save_log(self, result: Dict, user_message: str):
-        """Save a detailed JSON log of the pipeline run."""
+    async def _save_log(self, result: Dict, user_message: str, request_user_id: str | None = None, request_chat_id: str | None = None):
+        """Save a detailed JSON log of the pipeline run (rotated, max 200 files)."""
         log_dir = settings.LOG_DIR
         os.makedirs(log_dir, exist_ok=True)
+        try:
+            # Best-effort rotation: keep newest 200 pipeline_*.json
+            import glob
+            files = sorted(glob.glob(os.path.join(log_dir, "pipeline_*.json")))
+            if len(files) > 200:
+                for old in files[:len(files) - 200]:
+                    try:
+                        os.unlink(old)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
 
         log_entry = {
             "timestamp": datetime.now().isoformat(),
-            "user_id": self.user_id,
-            "chat_id": self.chat_id,
+            "user_id": request_user_id or self.user_id,
+            "chat_id": request_chat_id or self.chat_id,
             "user_message": user_message,
             "system_prompt": result.get("system_prompt", ""),
             "llm_messages": result.get("llm_messages", []),
@@ -793,6 +821,8 @@ class ThinkPipeline:
         agent_internal_history: List[Dict[str, str]],
         user_profile: Optional[Dict[str, Any]] = None,
         media: Optional[Dict[str, Any]] = None,
+        request_user_id: str | None = None,
+        request_chat_id: str | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Streaming version consumed by core/queue.py.
 
@@ -806,6 +836,8 @@ class ThinkPipeline:
           {"type": "error", "error": str}
         """
         total_start = time.time()
+        req_user = request_user_id or self.user_id
+        req_chat = request_chat_id or self.chat_id
         try:
             all_actions: List[Dict] = []
             raw_llm_responses: List[Dict] = []
@@ -816,7 +848,7 @@ class ThinkPipeline:
             silence_reason = ""
             iteration = 0
 
-            async for step in self._run_stream(user_message, agent_internal_history, media):
+            async for step in self._run_stream(user_message, agent_internal_history, media, request_user_id=req_user, request_chat_id=req_chat):
                 kind = step.get("kind")
                 if kind == "llm":
                     iteration = step.get("iteration", iteration)
@@ -850,7 +882,7 @@ class ThinkPipeline:
                     # for the action itself (applied inside _run_stream), so just yield.
                     reply_text = (a.get("text") or "").strip()
                     reply_texts = [reply_text] if reply_text else []
-                    reply_chat_id = str(a.get("chat_id", self.chat_id))
+                    reply_chat_id = str(a.get("chat_id", req_chat))
                     reply_via = "send_message_brush_off"
                     yield {"type": "reply", "texts": reply_texts, "text": reply_text,
                            "chat_id": reply_chat_id, "via": "send_message_brush_off"}
@@ -877,7 +909,7 @@ class ThinkPipeline:
                 "raw_llm_responses": raw_llm_responses,
                 "timing": {"total": f"{s_time:.2f}s", "iterations": iteration},
             }
-            await self._save_log(result, user_message)
+            await self._save_log(result, user_message, request_user_id=req_user, request_chat_id=req_chat)
             yield {"type": "done", "result": result}
         except Exception as e:
             import traceback
@@ -891,7 +923,7 @@ class ThinkPipeline:
                 "error": str(e),
                 "timing": {"total": f"{time.time() - total_start:.2f}s"},
             }
-            await self._save_log({**error_result, "traceback": tb}, user_message)
+            await self._save_log({**error_result, "traceback": tb}, user_message, request_user_id=request_user_id, request_chat_id=request_chat_id)
             yield {"type": "error", "error": str(e)}
 
 

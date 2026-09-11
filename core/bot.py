@@ -43,6 +43,7 @@ class MilaUserbot:
         self.messages = MessageCoordinate(self)
         self._ready = asyncio.Event()
         self._periodic_save_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
 
         register_auth_handlers(self.app, phone_hint=settings.PHONE_NUMBER or "")
 
@@ -128,9 +129,26 @@ class MilaUserbot:
             )
 
         self._periodic_save_task = asyncio.create_task(self.periodic_save())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
         # Start auto-sleep scheduler
         start_auto_sleep_scheduler()
+
+    async def _heartbeat_loop(self):
+        """Fresh data/bot_heartbeat = healthy for compose healthcheck."""
+        import os
+        import time
+        try:
+            while True:
+                try:
+                    os.makedirs("data", exist_ok=True)
+                    with open("data/bot_heartbeat", "w", encoding="utf-8") as f:
+                        f.write(str(time.time()))
+                except Exception:
+                    pass
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            pass
 
     async def periodic_save(self):
         try:
@@ -288,13 +306,37 @@ class MilaUserbot:
         await self.messages.handle(client, message)
 
     async def stop(self):
-        if self._periodic_save_task is not None:
-            self._periodic_save_task.cancel()
-            try:
-                await self._periodic_save_task
-            except asyncio.CancelledError:
-                pass
-            self._periodic_save_task = None
+        for attr in ("_periodic_save_task", "_heartbeat_task"):
+            task = getattr(self, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, attr, None)
+        # Cancel per-chat workers so docker stop doesn't strand a turn mid-LLM.
+        try:
+            tasks = list(getattr(self.messages, "_tasks", {}).values())
+            for t in tasks:
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
+            for t in tasks:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        except Exception:
+            pass
+        # Stop auto-sleep scheduler.
+        try:
+            from core.sleep.manager import _auto_sleep_task
+            if _auto_sleep_task is not None and not _auto_sleep_task.done():
+                _auto_sleep_task.cancel()
+        except Exception:
+            pass
         try:
             self.text_memory.save()
         except Exception as e:

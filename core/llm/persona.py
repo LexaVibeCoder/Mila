@@ -206,8 +206,14 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     relationship_block = _load("relationship/block").replace("{relationship}", relationship)
     needs_block = _load("context/needs").replace("{needs_summary}", needs_summary)
     history_note = _load("context/history_note")
+    try:
+        media_note = _load("context/media_note")
+    except Exception:
+        media_note = ""
 
     parts = [header, static_prefix, relationship_block, needs_block, history_note]
+    if media_note:
+        parts.append(media_note)
 
     # Presence block — location only (where am I + who writes).
     # Behavior rules live in states/{state}.md, not here.

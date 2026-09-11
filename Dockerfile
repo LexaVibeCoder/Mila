@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     git \
     libc6-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching

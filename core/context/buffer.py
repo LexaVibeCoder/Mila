@@ -128,10 +128,16 @@ def get_context(chat_id: str, limit: int = None) -> List[Dict]:
     table = _table_name(chat_id)
     conn = _get_conn()
     try:
-        cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] ORDER BY id DESC LIMIT ?",
-            (limit,)
-        )
+        try:
+            cur = conn.execute(
+                f"SELECT id, content, type, source_chunk_id, token_count, role, kind, created_at FROM [{table}] ORDER BY id DESC LIMIT ?",
+                (limit,)
+            )
+        except Exception:
+            cur = conn.execute(
+                f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] ORDER BY id DESC LIMIT ?",
+                (limit,)
+            )
         rows = [dict(r) for r in cur.fetchall()]
         rows.reverse()
         return rows
@@ -170,9 +176,14 @@ def get_context_within_token_limit(chat_id: str, max_tokens: int) -> List[Dict]:
     table = _table_name(chat_id)
     conn = _get_conn()
     try:
-        cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] ORDER BY id ASC"
-        )
+        try:
+            cur = conn.execute(
+                f"SELECT id, content, type, source_chunk_id, token_count, role, kind, created_at FROM [{table}] ORDER BY id ASC"
+            )
+        except Exception:
+            cur = conn.execute(
+                f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] ORDER BY id ASC"
+            )
         all_entries = [dict(r) for r in cur.fetchall()]
 
         summaries = [e for e in all_entries if e["type"] == "summary"]

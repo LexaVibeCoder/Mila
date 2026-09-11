@@ -208,6 +208,45 @@ def log_media(chat_id: str, user_id: str, file_path: str, description: str = "")
     finally:
         conn.close()
 
+
+def get_recent_media(chat_id: str, kinds: list[str] | tuple[str, ...] = ("photo", "voice"),
+                     limit: int = 5) -> list[dict]:
+    """Return recent chunks with media files for a chat, newest last.
+
+    Used to re-attach recent photos/audios to history so the model still
+    sees them a few turns later (not only when they are the last message).
+    Skips rows whose file no longer exists on disk.
+    """
+    if not kinds:
+        return []
+    conn = get_conn()
+    try:
+        try:
+            placeholders = ",".join("?" for _ in kinds)
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT chunk_id, user_id, content, kind, media_path, time_start "
+                f"FROM chunks WHERE chat_id=? AND kind IN ({placeholders}) "
+                f"AND media_path IS NOT NULL AND media_path != '' "
+                f"ORDER BY time_start DESC LIMIT ?",
+                (chat_id, *kinds, limit * 3),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+        import os as _os
+        out = []
+        for r in rows:
+            p = r.get("media_path") or ""
+            if p and _os.path.isfile(p):
+                out.append(r)
+            if len(out) >= limit:
+                break
+        out.reverse()  # chronological
+        return out
+    finally:
+        conn.close()
+
 def update_user_name(user_id: str, user_name: str):
     conn = get_conn()
     try:

@@ -277,35 +277,164 @@ class ThinkPipeline:
         return await executor.execute_action(action)
 
     @staticmethod
-    def _attach_media(messages: List[Dict], media: Dict[str, Any]) -> List[Dict]:
-        """Attach native photo/audio to the LAST user message (current event).
+    def _attach_media(messages: List[Dict], media: Dict[str, Any],
+                      default_chat_id: str = "") -> List[Dict]:
+        """Attach native photo/audio to history + current event.
 
-        History stays text-only (placeholders); only the current notification
-        carries bytes. Falls back to text-only if nothing usable.
+        - Current batch bytes go to the LAST user message (as before).
+        - Recent history bytes (last 3 photos + last 2 audios from
+          chunks.media_path) are re-attached to their own user messages,
+          so the model still sees a photo a few turns later.
+        Falls back to text-only if nothing usable.
         """
         try:
-            from core.media import build_multimodal_parts
-            image_urls = media.get("image_data_urls") or []
-            audio = media.get("audio")
+            from core.media import (
+                build_multimodal_parts,
+                encode_image_for_llm,
+                encode_audio_for_llm,
+                MAX_HISTORY_IMAGES,
+                MAX_HISTORY_AUDIOS,
+            )
+            media = media or {}
+            image_urls = list(media.get("image_data_urls") or [])
+            audios: list = list(media.get("audios") or [])
+            if media.get("audio"):
+                audios.append(media.get("audio"))
             event_line = media.get("event_line", "")
-            if not image_urls and audio is None:
+            chat_id = str(media.get("chat_id") or default_chat_id or "")
+
+            current_image_paths = list(media.get("image_paths") or [])
+            current_audio_paths = list(media.get("audio_paths") or [])
+
+            # --- History re-attach -------------------------------------
+            hist_image_urls: list[tuple] = []  # (url, path)
+            hist_audios: list[tuple] = []  # ((b64,fmt), path)
+            if chat_id:
+                try:
+                    from core.db import get_recent_media
+                    recent = get_recent_media(
+                        chat_id, kinds=("photo", "voice"),
+                        limit=MAX_HISTORY_IMAGES + MAX_HISTORY_AUDIOS)
+                    cur_img = set(current_image_paths)
+                    cur_aud = set(current_audio_paths)
+                    need_img = max(0, MAX_HISTORY_IMAGES - len(image_urls))
+                    need_aud = max(0, MAX_HISTORY_AUDIOS - len(audios))
+                    for r in reversed(recent):
+                        kind = r.get("kind")
+                        mp = r.get("media_path") or ""
+                        if not mp or mp in cur_img or mp in cur_aud:
+                            continue
+                        if kind == "photo" and need_img > 0:
+                            url = encode_image_for_llm(mp)
+                            if url:
+                                hist_image_urls.append((url, mp))
+                                need_img -= 1
+                        elif kind == "voice" and need_aud > 0:
+                            au = encode_audio_for_llm(mp)
+                            if au:
+                                hist_audios.append((au, mp))
+                                need_aud -= 1
+                        if need_img <= 0 and need_aud <= 0:
+                            break
+                except Exception as e:
+                    print(f"[Pipeline] history media lookup failed: {e}")
+
+            if not image_urls and not audios and not hist_image_urls and not hist_audios:
                 if event_line:
                     messages = list(messages)
                     messages.append({"role": "system", "content": event_line})
                 return messages
+
             messages = list(messages)
-            # Find last user message and enrich it
+
+            # Attach history media to their own messages: walk from the end,
+            # find text-only user messages with matching placeholders.
+            # Last message is reserved for current-batch media.
+            hist_img_rev = list(reversed(hist_image_urls))
+            hist_aud_rev = list(reversed(hist_audios))
+            last_user_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+            for i in range(len(messages) - 1, -1, -1):
+                if not hist_img_rev and not hist_aud_rev:
+                    break
+                if i == last_user_idx:
+                    continue
+                m = messages[i]
+                if m.get("role") != "user":
+                    continue
+                base = m.get("content", "")
+                if isinstance(base, list):
+                    continue
+                txt = str(base)
+                want_img = "[фото" in txt and hist_img_rev
+                want_aud = ("[голосовое" in txt or "[аудио" in txt) and hist_aud_rev
+                if not want_img and not want_aud:
+                    continue
+                imgs: list = []
+                auds: list = []
+                if want_img:
+                    url, _p = hist_img_rev.pop(0)
+                    imgs.append(url)
+                if want_aud:
+                    (au, _p) = hist_aud_rev.pop(0)
+                    auds.append(au)
+                parts = build_multimodal_parts(txt, imgs or None, auds or None)
+                messages[i] = {"role": "user", "content": parts}
+
+            # History media whose placeholder wasn't found (summarized away):
+            # fold into the last user message so bytes aren't silently lost.
+            leftover_imgs = [u for u, _p in hist_img_rev]
+            leftover_auds = [a for a, _p in hist_aud_rev]
+            if (leftover_imgs or leftover_auds) and last_user_idx is not None:
+                base = messages[last_user_idx].get("content", "")
+                if not isinstance(base, list):
+                    note = str(base)
+                    if leftover_imgs:
+                        note += f"\n[ранее в диалоге было фото — смотри прикреплённое, всего {len(leftover_imgs)}]"
+                    parts = build_multimodal_parts(note, leftover_imgs or None,
+                                                   leftover_auds or None)
+                    messages[last_user_idx] = {"role": "user", "content": parts}
+                    leftover_imgs, leftover_auds = [], []
+
+            # Enrich last user message with current-batch media
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
                     base = messages[i].get("content", "")
                     if isinstance(base, list):
-                        # Already multimodal — leave as is
+                        try:
+                            for url in image_urls:
+                                base.append({"type": "image_url",
+                                             "image_url": {"url": url}})
+                            for b64, fmt in audios:
+                                has_instr = any(
+                                    isinstance(p, dict) and p.get("type") == "text"
+                                    and "Слушай это голосовое" in str(p.get("text", ""))
+                                    for p in base)
+                                if not has_instr:
+                                    from core.media import AUDIO_LISTEN_INSTRUCTION
+                                    base.insert(0, {"type": "text",
+                                                    "text": AUDIO_LISTEN_INSTRUCTION})
+                                base.append({"type": "input_audio",
+                                             "input_audio": {"data": b64, "format": fmt}})
+                            messages[i] = {"role": "user", "content": base}
+                        except Exception:
+                            pass
                         break
-                    parts = build_multimodal_parts(str(base), image_urls, audio)
+                    parts = build_multimodal_parts(str(base), image_urls or None,
+                                                   audios or None)
                     messages[i] = {"role": "user", "content": parts}
                     break
             if event_line:
                 messages.append({"role": "system", "content": event_line})
+            n_img = len(image_urls) + len(hist_image_urls)
+            n_aud = len(audios) + len(hist_audios)
+            if n_img or n_aud:
+                print(f"[Pipeline] media attached: {n_img} img + {n_aud} audio "
+                      f"(current {len(image_urls)}+{len(audios)}, history "
+                      f"{len(hist_image_urls)}+{len(hist_audios)})")
             return messages
         except Exception as e:
             print(f"[Pipeline] media attach failed, text-only: {e}")
@@ -334,8 +463,9 @@ class ThinkPipeline:
         notif_block = self._build_notification_block(user_message or "")
         if notif_block:
             messages.append({"role": "system", "content": notif_block})
-        if media:
-            messages = self._attach_media(messages, media)
+        # Always attach: history media (last 3 photos + 2 audios) must load
+        # even on text-only turns (media=None). chat_id fallback = self.chat_id.
+        messages = self._attach_media(messages, media or {}, default_chat_id=self.chat_id)
 
         max_iterations = _max_iterations()
         choice = _tool_choice()

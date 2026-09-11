@@ -132,6 +132,15 @@ class MessageCoordinate:
             except Exception as e:
                 print(f"[Media] download skipped: {e}")
             if local_path:
+                # Persist to MEDIA_DIR so history can re-attach it a few
+                # turns later (TDLib cache alone is not reliable).
+                try:
+                    from core.media import persist_media_file
+                    persisted = persist_media_file(local_path, chat_id, notif.kind)
+                    if persisted:
+                        local_path = persisted
+                except Exception as e:
+                    print(f"[Media] persist skipped: {e}")
                 notif.local_path = local_path
                 try:
                     log_media(chat_id, user_id, local_path, placeholder[:200])
@@ -157,19 +166,37 @@ class MessageCoordinate:
         self._chat_user[chat_id] = user_id
 
         # Accumulate native media for the current batch.
+        # _batch_media holds current-batch bytes only; history bytes are
+        # re-attached later in pipeline from chunks.media_path (last 3
+        # photos + last 2 audios).
         if local_path:
             try:
                 from core.media import encode_image_for_llm, encode_audio_for_llm
                 slot = self._batch_media.setdefault(
-                    chat_id, {"image_data_urls": [], "audio": None})
+                    chat_id, {"image_data_urls": [], "audios": [],
+                              "image_paths": [], "audio_paths": [],
+                              "event_lines": []})
+                slot.setdefault("image_data_urls", [])
+                slot.setdefault("audios", [])
+                slot.setdefault("image_paths", [])
+                slot.setdefault("audio_paths", [])
+                slot.setdefault("event_lines", [])
+                if slot.get("audio") and not slot["audios"]:
+                    slot["audios"].append(slot.pop("audio"))
                 if notif.kind == "photo":
                     url = encode_image_for_llm(local_path)
                     if url:
                         slot["image_data_urls"].append(url)
+                        slot["image_paths"].append(local_path)
                 elif notif.kind == "voice":
                     audio = encode_audio_for_llm(local_path)
                     if audio:
-                        slot["audio"] = audio
+                        slot["audios"].append(audio)
+                        slot["audio_paths"].append(local_path)
+                try:
+                    slot["event_lines"].append(notif.llm_event_line())
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"[Media] encode skipped: {e}")
 
@@ -337,8 +364,21 @@ class MessageCoordinate:
             return False
 
         media = self._batch_media.pop(chat_id, None)
-        if media and not media.get("image_data_urls") and media.get("audio") is None:
-            media = None
+        if media:
+            if media.get("audio") and not media.get("audios"):
+                media["audios"] = [media.pop("audio")]
+            media.pop("audio", None)
+            lines = media.get("event_lines") or []
+            if lines:
+                media["event_line"] = "\n".join(lines)
+            media["chat_id"] = chat_id
+            if not media.get("image_data_urls") and not media.get("audios") \
+                    and not media.get("event_line"):
+                media = {"chat_id": chat_id}
+        else:
+            # Text-only turn: still pass chat_id so pipeline can re-attach
+            # recent history media (last 3 photos + 2 audios).
+            media = {"chat_id": chat_id}
 
         bot = self.bot
         # Actual sender (fixes old bug where pipeline.user_id stayed "system",

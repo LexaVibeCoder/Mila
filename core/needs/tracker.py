@@ -97,7 +97,7 @@ class NeedsTracker:
         ]
         if needs["fatigue"] > 0.7:
             lines.append("")
-            lines.append("You are tired. If you don't have the energy or nothing to say — you can remain silent (silence).")
+            lines.append("You are tired. If you don't have the energy or nothing to say — stay silent (empty content, no tools).")
         if needs["need_social"] > 0.7:
             lines.append("You want social interaction. If you have something to say — write to someone.")
         if needs["boredom"] > 0.7:

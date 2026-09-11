@@ -2,143 +2,220 @@ import json
 from typing import List, Dict, Any, Optional
 
 
-def get_tool_definitions() -> List[Dict]:
+def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
+    """Direct tool definitions (no Think wrapper).
+
+    New scheme:
+    - dialog: reply = `content`, NO send_message. Tools called directly.
+    - rest/working: to start a full dialogue you MUST call enter_dialog first.
+      send_message exists ONLY for a single brush-off
+      ("я занята, давай позже") without entering dialog.
+    - silence: NO tool. Empty `content` + no tool calls = stay silent.
+      (Best practice for tool_choice=auto: model answers in content or
+      calls a tool; forcing a silence tool wastes a turn and causes
+      hallucinations under tool_choice=required. See DiscussLLM silent-token
+      pattern + OpenAI auto vs required docs.)
+
+    presence_state filters send_message availability so the model cannot
+    bypass dialog via send_message while in dialog.
+    """
     try:
         from Mila_observatory.runtime import runtime_config
         tools_enabled = runtime_config.get("tools", {})
         search_enabled = tools_enabled.get("search_memory", True)
         send_enabled = tools_enabled.get("send_message", True)
-        silence_enabled = tools_enabled.get("silence", True)
         diary_enabled = tools_enabled.get("write_diary", True)
         diary_update_enabled = tools_enabled.get("update_diary", True)
         presence_enabled = tools_enabled.get("presence", True)
     except ImportError:
         search_enabled = True
         send_enabled = True
-        silence_enabled = True
         diary_enabled = True
         diary_update_enabled = True
         presence_enabled = True
 
-    action_enum = []
-    if send_enabled:
-        action_enum.append("send_message")
+    # NOTE: tools.silence is intentionally ignored — silence is empty content,
+    # not a tool. Kept in runtime JSON for backward compat, has no effect.
+
+    defs: List[Dict] = []
+
     if search_enabled:
-        action_enum.append("search_memory")
-    if silence_enabled:
-        action_enum.append("silence")
-    if diary_enabled:
-        action_enum.append("write_diary")
-    if diary_update_enabled:
-        action_enum.append("update_diary")
-    if presence_enabled:
-        action_enum.extend(["enter_dialog", "enter_rest", "enter_working", "start_sleep"])
-
-    if not action_enum:
-        action_enum.append("silence")
-
-    diary_categories_enum = ["day_entries", "reflection_entries"]
-
-    return [
-        {
+        defs.append({
             "type": "function",
             "function": {
-                "name": "think",
-                "description": "Express your internal thoughts and optionally perform actions. "
-                               "You MUST call this function EVERY turn. "
-                               "'thoughts' is your private reasoning (never visible to user). "
-                               "'actions' is a list of actions you want to perform. "
-                               "CRITICAL: In the JSON object, the 'thoughts' key MUST appear BEFORE the 'actions' key. "
-                               "Always write 'thoughts' first, then 'actions'. "
-                               "Never start with actions or mix actions into thoughts.",
+                "name": "search_memory",
+                "description": "Search long-term memory for facts about the user. "
+                               "Call directly when you need context. Results come back "
+                               "as a system message, then answer in `content`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "thoughts": {
+                        "query": {
                             "type": "string",
-                            "description": "Your private reasoning and internal monologue. "
-                                           "Think about what the user said, what you know, "
-                                           "and what you want to do next."
-                        },
-                        "actions": {
-                            "type": "array",
-                            "description": "List of actions to perform. "
-                                           "If you want to reply to the user, include a send_message action. "
-                                           "If you need more information from memory, include search_memory. "
-                                           "If you want to stay silent (not reply), include a silence action. "
-                                           "If you want to write or update your diary, include write_diary or update_diary.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "action_type": {
-                                        "type": "string",
-                                        "enum": action_enum,
-                                        "description": "Type of action to perform"
-                                    },
-                                    "params": {
-                                        "type": "object",
-                                        "description": "Parameters for the action",
-                                        "properties": {
-                                            "chat_id": {
-                                                "type": "string",
-                                                "description": "Telegram chat ID to send message to. "
-                                                               "Use the chat_id from context if replying to current conversation. "
-                                                               "When searching memory, not needed."
-                                            },
-                                            "text": {
-                                                "type": "string",
-                                                "description": "Message text to send to the user (for send_message only). "
-                                                               "Do NOT use 'text' for diary actions — diary uses 'entry'."
-                                            },
-                                            "query": {
-                                                "type": "string",
-                                                "description": "Search query to look up in memory (for search_memory only)"
-                                            },
-                                            "reason": {
-                                                "type": "string",
-                                                "description": "Reason for silence (for silence action only). "
-                                                               "Explain why you chose not to respond."
-                                            },
-                                            "entry": {
-                                                "type": "string",
-                                                "description": "Diary entry content (for write_diary / update_diary only). "
-                                                               "1-3 short sentences, first person, natural. "
-                                                               "Use the 'entry' param for diary actions (not 'text')."
-                                            },
-                                            "category": {
-                                                "type": "string",
-                                                "enum": diary_categories_enum,
-                                                "description": "Diary entry category (for write_diary / update_diary only). "
-                                                               "'day_entries' — what happened during the day (events, conversations, moments). "
-                                                               "'reflection_entries' — your thoughts and feelings about what happened."
-                                            },
-                                            "entry_id": {
-                                                "type": "string",
-                                                "description": "ID of an existing diary entry to update (for update_diary only). "
-                                                               "Take it from the diary block in the system prompt, e.g. '[ID: 2]'."
-                                            },
-                                            "duration_minutes": {
-                                                "type": "integer",
-                                                "description": "Sleep duration in minutes (for start_sleep only). "
-                                                               "Required — how long Mila wants to sleep."
-                                            },
-                                            "note": {
-                                                "type": "string",
-                                                "description": "Short note/reason for presence tools "
-                                                               "(enter_dialog / enter_rest / enter_working / start_sleep)."
-                                            }
-                                        }
-                                    }
-                                },
-                                "required": ["action_type", "params"]
-                            }
+                            "description": "What to look for in memory",
                         }
                     },
-                    "required": ["thoughts", "actions"]
-                }
-            }
-        }
-    ]
+                    "required": ["query"],
+                },
+            },
+        })
+
+    # send_message ONLY outside dialog — single brush-off, never a dialogue.
+    if send_enabled and presence_state in ("rest", "working"):
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "send_message",
+                "description": "Send ONE single brush-off message WITHOUT entering dialog. "
+                               "Use ONLY in rest/working when you are busy and want to send "
+                               "a one-liner like 'я занята, давай позже'. "
+                               "NEVER use for a full dialogue — for dialogue call "
+                               "enter_dialog first and then answer in `content`. "
+                               "Not available in dialog state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "chat_id": {
+                            "type": "string",
+                            "description": "Target chat ID (defaults to current notification chat)",
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "One short brush-off line in Mila's voice",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+        })
+
+    if diary_enabled:
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "write_diary",
+                "description": "Write a diary entry (1-3 short sentences, first person). "
+                               "Call directly, then continue with your reply in `content`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entry": {
+                            "type": "string",
+                            "description": "Diary entry text",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": ["day_entries", "reflection_entries"],
+                            "description": "'day_entries' — events, 'reflection_entries' — thoughts/feelings",
+                        },
+                    },
+                    "required": ["entry"],
+                },
+            },
+        })
+
+    if diary_update_enabled:
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "update_diary",
+                "description": "Update an existing diary entry by ID (take ID from diary block).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entry": {
+                            "type": "string",
+                            "description": "New entry text",
+                        },
+                        "entry_id": {
+                            "type": "string",
+                            "description": "ID from diary block, e.g. '2'",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": ["day_entries", "reflection_entries"],
+                        },
+                    },
+                    "required": ["entry", "entry_id"],
+                },
+            },
+        })
+
+    if presence_enabled:
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "enter_dialog",
+                "description": "Move into dialog with a specific chat. REQUIRED in rest/working "
+                               "before answering a notification with a full reply. "
+                               "After the switch you will be called again in dialog state — "
+                               "then answer in `content`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "chat_id": {
+                            "type": "string",
+                            "description": "Chat to talk to (take from the notification)",
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Why you enter dialog (optional)",
+                        },
+                    },
+                    "required": ["chat_id"],
+                },
+            },
+        })
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "enter_rest",
+                "description": "Return to rest (default state) when dialogue is over and there is nothing to do.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {"type": "string", "description": "Optional reason"},
+                    },
+                },
+            },
+        })
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "enter_working",
+                "description": "Get busy with your own stuff (texts for publishing house). "
+                               "Same notification visibility as rest in v1.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {"type": "string", "description": "What you are working on"},
+                    },
+                },
+            },
+        })
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "start_sleep",
+                "description": "Go to sleep and start the night cycle (reflection, memorization).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "How long to sleep in minutes, e.g. 480",
+                        },
+                        "note": {"type": "string", "description": "Optional note"},
+                    },
+                    "required": ["duration_minutes"],
+                },
+            },
+        })
+
+    # Always return at least one tool so tool_choice=auto works;
+    # if everything is disabled the model just answers in content / stays silent.
+    # (Old fallback that forced a `silence` enum entry is removed with Think.)
+    return defs
 
 
 class ToolExecutor:

@@ -114,26 +114,44 @@ def format_state_block(current_chat_id: str | None = None,
                        current_user_name: str | None = None) -> str:
     """Human-readable block for the system prompt.
 
-    Mila explicitly sees where she is and who the notification is from —
-    display names, not bare ids.
+    New scheme (no Think, no send_message in dialog):
+    - rest/working: notification + history. Full reply ONLY via enter_dialog
+      first; single brush-off via send_message (one-liner, no dialogue).
+      Empty content + no tools = stay silent.
+    - dialog: reply = `content` to focus chat. Tools called directly.
+      Empty content + no tools = stay silent.
     """
     p = get_presence()
     state = p["state"]
     lines = ["## Твоё состояние (presence)"]
     if state == "rest":
-        lines.append("Сейчас ты отдыхаешь (rest) — состояние по умолчанию.")
+        lines.append(
+            "Сейчас ты отдыхаешь (rest) — состояние по умолчанию. "
+            "Перед тобой уведомление: последнее сообщение + несколько предыдущих "
+            "для контекста. Чтобы ответить полноценно — сначала вызови "
+            "enter_dialog с chat_id из уведомления, потом отвечай в content "
+            "уже в диалоге. Без перехода отвечать нельзя (кроме разовой отмашки "
+            "через send_message). Пустой content без тулов = промолчать."
+        )
     elif state == "dialog":
         focus = p.get("focus_user_name") or p.get("focus_chat_id") or "?"
         fid = p.get("focus_chat_id") or "?"
         lines.append(
             f"Сейчас ты в диалоге (dialog) с {focus} (чат {fid}). "
-            f"Отвечай в первую очередь туда."
+            f"Обычный ответ = просто текст в content, он уйдёт в этот чат. "
+            f"Тул send_message НЕ существует в этом состоянии и вызывать его не нужно. "
+            f"Нужна память/дневник — вызови нужный тул напрямую (search_memory / "
+            f"write_diary / update_diary), потом допиши ответ в content. "
+            f"Пустой content без тулов = промолчать. "
+            f"Тулов-обёрток нет: никакого Think()."
         )
     elif state == "working":
         extra = f" ({p['note']})" if p.get("note") else ""
         lines.append(
             f"Сейчас ты занята своим делом (working){extra}. "
-            f"Уведомления видишь как обычно и сама решаешь, отвлекаться или нет."
+            f"Уведомления видишь как в rest: полноценный ответ — только через "
+            f"enter_dialog, разовая отмашка — через send_message (один раз, "
+            f"не диалог), молчание — пустой content без тулов."
         )
     elif state == "sleep":
         lines.append("Ты собиралась спать (sleep). Если сон ещё не начался — жди его начала.")
@@ -145,7 +163,7 @@ def format_state_block(current_chat_id: str | None = None,
         if state == "dialog" and str(p.get("focus_chat_id")) != str(current_chat_id):
             lines.append(
                 f"Это уведомление НЕ из твоего диалога: пишет {who} "
-                f"(чат {current_chat_id}). Можешь промолчать и остаться в диалоге, "
+                f"(чат {current_chat_id}). Можешь промолчать (пустой content) и остаться в диалоге, "
                 f"или перейти в диалог с ним через enter_dialog — решаешь сама."
             )
         else:
@@ -154,8 +172,9 @@ def format_state_block(current_chat_id: str | None = None,
             )
     lines.append(
         "Сообщение для тебя — уведомление, а не приказ ответить. "
-        "Видишь последние сообщения и сама решаешь: ответить (send_message), "
-        "сменить состояние (enter_dialog / enter_rest / enter_working / start_sleep) "
-        "или промолчать (silence)."
+        "В rest/working: ответить = enter_dialog → content; разовая отмашка = "
+        "send_message (только единичный случай, не диалог); молчание = пустой content. "
+        "В dialog: ответить = content; нужны данные = вызови тул напрямую; "
+        "молчание = пустой content."
     )
     return "\n".join(lines)

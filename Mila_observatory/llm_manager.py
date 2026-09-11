@@ -58,7 +58,7 @@ class LLMManager:
             "top_p": None,
             "frequency_penalty": None,
             "presence_penalty": None,
-            "tool_choice": runtime_config.get("llm.tool_choice", "required"),
+            "tool_choice": runtime_config.get("llm.tool_choice", "auto"),
         }
 
     # ─── Main LLM ────────────────────────────────────────────

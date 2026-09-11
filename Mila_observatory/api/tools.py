@@ -17,10 +17,11 @@ router = APIRouter(tags=["tools"])
 # Tool descriptions
 TOOL_DESCRIPTIONS = {
     "search_memory": "Search long-term memory for relevant information",
-    "send_message": "Send a message to the user in Telegram",
-    "silence": "Stay silent and do not respond to the user",
+    "send_message": "Single brush-off in rest/working only (no dialogue; dialog uses content)",
+    "silence": "Legacy: no effect (silence = empty content, no tool)",
     "write_diary": "Write a diary entry (day_entries / reflection_entries)",
     "update_diary": "Update an existing diary entry by its ID",
+    "presence": "Presence tools: enter_dialog / enter_rest / enter_working / start_sleep",
 }
 
 
@@ -41,7 +42,7 @@ async def get_tools():
 @router.put("/api/tools/{tool_name}", response_model=ToolStatus)
 async def update_tool(tool_name: str, req: ToolUpdateRequest):
     """Enable or disable a specific tool."""
-    valid_tools = {"search_memory", "send_message", "silence", "write_diary", "update_diary"}
+    valid_tools = {"search_memory", "send_message", "silence", "write_diary", "update_diary", "presence"}
     if tool_name not in valid_tools:
         raise HTTPException(status_code=404, detail=f"Unknown tool: {tool_name}")
 

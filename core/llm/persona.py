@@ -29,7 +29,7 @@ Dynamic templates (``{placeholders}`` filled at runtime):
 - DIARY_BLOCK — wrapper with ``{diary_context}``
 - SESSION_BLOCK — wrapper with ``{session_time}``
 - SESSION_TIME — ``User responded after {formatted}``
-- FUNCTION_CALLING — ``think`` protocol with ``{chat_id}``
+- FUNCTION_CALLING — direct-tool protocol (content = reply, empty = silence) with ``{chat_id}``
 """
 
 from datetime import datetime, timedelta, timezone

@@ -70,7 +70,7 @@ class RuntimeConfig:
                 "top_p": None,
                 "frequency_penalty": None,
                 "presence_penalty": None,
-                "tool_choice": "required",
+                "tool_choice": "auto",
             },
             # Night LLM
             "night_llm": {
@@ -82,12 +82,14 @@ class RuntimeConfig:
                 "tool_choice": "required",
             },
             # Tools (enabled/disabled)
+            # silence is legacy (empty content = silence now), kept for compat.
             "tools": {
                 "search_memory": True,
                 "send_message": True,
                 "silence": True,
                 "write_diary": True,
                 "update_diary": True,
+                "presence": True,
             },
             # Diary
             "diary": {

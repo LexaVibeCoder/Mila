@@ -52,7 +52,7 @@ class MessageCoordinate:
         self._pending = {}     # chat_id -> list[str] (text accumulated this batch)
         self._tasks = {}       # chat_id -> asyncio.Task
         self._chat_user = {}   # chat_id -> sender user_id (for persona/pipeline)
-        self._batch_media = {}  # chat_id -> {"image_data_urls": [...], "audio": (b64, fmt)|None}
+        self._batch_media = {} # chat_id -> {"image_data_urls": [...], "audio": (b64, fmt)|None}
         # Peer typing state: chat_id -> monotonic timestamp of last
         # non-cancel updateChatAction. Expires via TYPING_FRESHNESS_SECONDS.
         self._typing_last: dict[str, float] = {}
@@ -382,6 +382,42 @@ class MessageCoordinate:
             has_silence_action = False
             sent_any = False
 
+            async def _send_reply(text: str, target_chat_id: str, via: str) -> bool:
+                """Pre-send checks + typing + send + storage. Returns True if sent."""
+                nonlocal sent_any
+                pre_send = self._interrupted(chat_id, event)
+                if pre_send is not None:
+                    if not sent_any and not has_silence_action:
+                        self._restore_pending(chat_id, batch_text)
+                    print(f"[Batch] Interrupted before send ({pre_send}) — batch restored")
+                    return False
+                clean = strip_leading_timestamp((text or "").strip())
+                if not clean:
+                    print("\n[Silent Mode] Empty reply — staying silent")
+                    return False
+                print(f"\n[SENDING via {via}] {clean[:100]}... → chat {target_chat_id}")
+                try:
+                    await send_typing(client, int(target_chat_id))
+                except Exception:
+                    pass
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+                try:
+                    await send_text(client, int(target_chat_id), clean)
+                    add_chunk(
+                        target_chat_id, str(bot.me.id),
+                        content=clean,
+                        llm_full_response=full_response or clean,
+                        token_count=0,
+                        type='raw'
+                    )
+                    push_message(target_chat_id, clean, source_chunk_id=None, role="assistant")
+                    sent_any = True
+                    print("[✓] Message sent to Telegram")
+                    return True
+                except Exception as e:
+                    print(f"[❌ ERROR] Failed to send: {e}")
+                    return False
+
             async for gen_event in bot.pipeline.process_message_stream(
                 user_message=batch_text,
                 user_visible_history=user_visible_history,
@@ -403,75 +439,62 @@ class MessageCoordinate:
                 etype = gen_event.get("type")
                 if etype == "thought":
                     preview = gen_event.get("thoughts", "")[:120].replace("\n", " ")
-                    print(f"  Thoughts: {preview}...")
+                    print(f"  Content: {preview}...")
+                    if gen_event.get("thoughts"):
+                        full_response = gen_event.get("thoughts")
                 elif etype == "action":
                     action = gen_event.get("action", {})
-                    if action.get("type") == "send_message":
-                        # Last-chance check right before sending: don't
-                        # interrupt the user while they type.
-                        pre_send = self._interrupted(chat_id, event)
-                        if pre_send is not None:
-                            if not sent_any and not has_silence_action:
-                                self._restore_pending(chat_id, batch_text)
-                            print(f"[Batch] Interrupted before send ({pre_send}) — batch restored")
-                            return True
-                        send_text_content = strip_leading_timestamp(
-                            action.get("text", "").strip()
-                        )
-                        target_chat_id = action.get("chat_id", chat_id)
-                        if send_text_content:
-                            print(f"\n[SENDING] {send_text_content[:100]}...")
-                            try:
-                                await send_typing(client, int(target_chat_id))
-                            except Exception:
-                                pass
-                            await asyncio.sleep(random.uniform(0.3, 1.0))
-                            try:
-                                await send_text(
-                                    client,
-                                    int(target_chat_id),
-                                    send_text_content,
-                                )
-                                add_chunk(
-                                    target_chat_id, str(bot.me.id),
-                                    content=send_text_content,
-                                    llm_full_response=full_response or send_text_content,
-                                    token_count=0,
-                                    type='raw'
-                                )
-                                push_message(target_chat_id, send_text_content, source_chunk_id=None, role="assistant")
-                                sent_any = True
-                                print("[✓] Message sent to Telegram")
-                            except Exception as e:
-                                print(f"[❌ ERROR] Failed to send: {e}")
-                        else:
-                            print("\n[Silent Mode] AI thought but chose not to respond")
-                    elif action.get("type") == "silence":
+                    atype = action.get("type")
+                    if atype == "send_message":
+                        # Legacy/diagnostic: in the new scheme send_message tool
+                        # results are delivered via `reply` events (single brush-off
+                        # in rest/working). Never sent directly from here.
+                        print(f"[Tool] send_message ready (will send via reply): "
+                              f"{(action.get('text') or '')[:80]}")
+                    elif atype == "silence":
+                        # Backward compat only — silence tool no longer exists.
                         has_silence_action = True
                         print(f"\n[Silence Mode] No response. Reason: {action.get('reason', '')}")
-                    elif action.get("type") in ("enter_dialog", "enter_rest", "enter_working"):
-                        print(f"\n[Presence] {action.get('type')} → {action.get('chat_id', action.get('state', ''))}")
-                    elif action.get("type") == "start_sleep":
+                    elif atype in ("enter_dialog", "enter_rest", "enter_working"):
+                        print(f"\n[Presence] {atype} → {action.get('chat_id', action.get('state', ''))}")
+                    elif atype == "start_sleep":
                         has_silence_action = True
                         print(f"\n[Sleep] Started for {action.get('duration_minutes')} min")
-                    elif action.get("type") == "search_memory":
+                    elif atype == "search_memory":
                         print(f"[Memory] Search: '{action.get('query', '')}'")
-                    elif action.get("type") == "write_diary":
-                        print(f"\n[Diary] Entry written")
-                    elif action.get("type") == "update_diary":
-                        print(f"\n[Diary] Entry updated")
+                    elif atype == "write_diary":
+                        print("\n[Diary] Entry written")
+                    elif atype == "update_diary":
+                        print("\n[Diary] Entry updated")
+                elif etype == "reply":
+                    text = gen_event.get("text", "")
+                    target = str(gen_event.get("chat_id", chat_id) or chat_id)
+                    via = gen_event.get("via", "content")
+                    full_response = text or full_response
+                    ok = await _send_reply(text, target, via)
+                    if not ok:
+                        # Interrupted before send → restart batch.
+                        post_check = self._interrupted(chat_id, event)
+                        if post_check is not None and not sent_any:
+                            return True
+                elif etype == "silence":
+                    has_silence_action = True
+                    print(f"\n[Silence] {gen_event.get('reason', '')}")
                 elif etype == "search_result":
                     print("  [Search results added to context]")
                 elif etype == "done":
                     result = gen_event.get("result", {})
-                    full_response = result.get("thoughts", full_response)
+                    if result.get("reply_text"):
+                        full_response = result.get("reply_text", full_response)
+                    if result.get("silence_reason") and not sent_any:
+                        has_silence_action = True
                 elif etype == "error":
                     print(f"\n[Pipeline Error] {gen_event.get('error')}")
 
             # ── Post-processing (silent save) ──
-            # NOTE: there is intentionally NO fallback send of `thoughts`:
-            # thoughts are the private monologue and must never reach the chat.
-            # If the model wants the user to see text, it must use send_message.
+            # NOTE: there is intentionally NO fallback send of internal text:
+            # in dialog the reply arrives via `reply` events (content);
+            # in rest/working bare content is ignored by design (must enter_dialog).
             # Don't do anything while the user is typing or a new message
             # arrived — restore the batch and wait for the full message instead.
             post_reason = self._interrupted(chat_id, event)
@@ -480,11 +503,13 @@ class MessageCoordinate:
                     self._restore_pending(chat_id, batch_text)
                 print(f"[Batch] Interrupted after generation ({post_reason}) — batch restored")
                 return True
-            if not sent_any and not has_silence_action and full_response:
-                print("[Silent] No send_message action — staying silent (thoughts are private)")
+            if not sent_any and has_silence_action:
                 add_chunk(chat_id, str(bot.me.id), content="",
                           llm_full_response=full_response, token_count=0, type='raw')
-            elif has_silence_action and full_response:
+            elif not sent_any and not has_silence_action:
+                # No reply and no explicit silence (e.g. protocol reminder path):
+                # stay silent, keep the trace.
+                print("[Silent] No reply — staying silent")
                 add_chunk(chat_id, str(bot.me.id), content="",
                           llm_full_response=full_response, token_count=0, type='raw')
 

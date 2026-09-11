@@ -1,14 +1,16 @@
 """
-Single-stage reasoning pipeline:
-Model calls `think(thoughts, actions)` — system executes actions.
+Direct-tool reasoning pipeline (no Think wrapper).
 
-Flow:
-1. LLM is called with tool_choice="required" and the `think` function.
-2. Model returns thoughts + list of actions.
-3. System executes actions:
-   - send_message → immediately ready to send (no re-call needed)
-   - search_memory → executes search, adds results to context, re-calls model
-4. Loop continues until no more search_memory actions or max iterations.
+New scheme:
+  rest/working --notification(last + 5-10 prev)--> enter_dialog -->
+  dialog --[search_memory/diary directly]--> reply in `content`.
+
+- tool_choice is always "auto": the model herself decides when a normal
+  tool is needed. Forcing "required" would break content-replies.
+- In dialog: reply = `content`, send_message does NOT exist.
+- In rest/working: full reply ONLY after enter_dialog; single brush-off
+  via send_message tool; empty content + no tools = silence.
+- Silence is empty content, NOT a tool (silent-token pattern).
 
 Each turn produces a detailed JSON log saved to LOG_DIR.
 """
@@ -39,14 +41,12 @@ except ImportError:
     HAS_OBSERVATORY = False
 
 MAX_THINK_ITERATIONS = 7
+# Keep old runtime key name for compat (Observatory panel knob).
+MAX_TOOL_ITERATIONS = MAX_THINK_ITERATIONS
 
 
 def _max_iterations() -> int:
-    """Think-loop cap: Observatory knob wins, builtin default otherwise.
-
-    NOTE: runtime_config.json may still hold an older saved value (5) —
-    raise it in the panel (pipeline.max_think_iterations) if needed.
-    """
+    """Tool-loop cap: Observatory knob wins, builtin default otherwise."""
     if HAS_OBSERVATORY:
         try:
             value = runtime_config.get(
@@ -59,17 +59,51 @@ def _max_iterations() -> int:
     return MAX_THINK_ITERATIONS
 
 
-# System reminder appended when think() has no conversational outcome.
-# thoughts are private — without send_message/silence/search the turn says nothing.
-NO_OUTCOME_REMINDER = (
-    "ERROR: your think() had no send_message, silence or search_memory action. "
-    "'thoughts' is private and NEVER shown to the user — the user only ever sees "
-    "send_message.text. Decide now: reply (send_message) or stay silent (silence)."
+def _tool_choice() -> str:
+    """Always auto for the main pipeline.
+
+    The old default was "required" for the Think wrapper. With direct tools
+    + content replies, "required" would force a tool call every turn and the
+    model could never just reply or stay silent. Night/sleep workers keep
+    their own tool_choice.
+    """
+    if HAS_OBSERVATORY:
+        try:
+            v = runtime_config.get("llm.tool_choice", "auto")
+            if v == "required":
+                print("  [Pipeline] runtime llm.tool_choice=required overridden to auto (direct-tool scheme)")
+                return "auto"
+            if isinstance(v, str) and v:
+                return v
+        except Exception:
+            pass
+    return "auto"
+
+
+def _get_presence_state() -> dict:
+    try:
+        from core.presence import get_presence
+        return get_presence()
+    except Exception:
+        return {"state": "rest", "focus_chat_id": None,
+                "focus_user_name": None, "note": "", "updated_at": None}
+
+
+# Reminder when rest/working returns bare content without entering dialog.
+REST_CONTENT_REMINDER = (
+    "PROTOCOL: you are in rest/working. Bare text in `content` is IGNORED here. "
+    "To answer fully, call enter_dialog with the notification chat_id first "
+    "(you will be called again in dialog, then answer in `content`). "
+    "For a one-line brush-off use the send_message tool once. "
+    "To stay silent return empty content with no tool calls."
 )
 
 
 class ThinkPipeline:
-    """Single-stage reasoning pipeline using `think` function."""
+    """Direct-tool pipeline (kept name for backward compat with bot.py).
+
+    Alias: MilaPipeline.
+    """
 
     def __init__(
         self,
@@ -94,285 +128,76 @@ class ThinkPipeline:
             return llm_manager.get_main_client()
         return self._fallback_llm
 
-    async def process_message(
-        self,
-        user_message: str,
-        user_visible_history: List[Dict[str, str]],
-        agent_internal_history: List[Dict[str, str]],
-        user_profile: Optional[Dict[str, Any]] = None,
-        media: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Main entry point. Process user message through single think stage.
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
-        Returns:
-        {
-            "success": bool,
-            "actions": List[Dict] — executed tool calls,
-            "thoughts": str — LLM's final thinking monologue,
-            "error": Optional[str],
-            "timing": Dict with stage times
-        }
-        """
-        total_start = time.time()
-
+    def _current_tool_defs(self) -> List[Dict]:
+        state = _get_presence_state().get("state", "rest")
         try:
-            # Build system prompt and tool definitions
-            main_system_prompt = build_main_llm_system_prompt(
-                self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
-            )
-            tool_definitions = get_tool_definitions()
+            return get_tool_definitions(presence_state=state)
+        except TypeError:
+            # Old signature fallback (should not happen after migration).
+            return get_tool_definitions()
 
-            # Build messages from history
-            # NOTE: agent_internal_history already contains the current user message
-            # (it was pushed to context_buffer before _build_histories was called),
-            # and is already token-limited to CONTEXT_MAX_TOKENS (30K).
-            # We do NOT append user_message again to avoid duplication,
-            # and we do NOT truncate — the token limit is already applied.
-            messages = list(agent_internal_history)
-            if media:
-                messages = self._attach_media(messages, media)
+    def _build_notification_block(self, batch_text: str) -> Optional[str]:
+        """Explicit notification wrapper for rest/working.
 
-            # Run the think loop
-            all_actions = []
-            final_thoughts = ""
-            iteration = 0
-            max_iterations = _max_iterations()
-            raw_llm_responses = []  # Store full raw LLM responses from each iteration
-
-            while iteration < max_iterations:
-                iteration += 1
-                print(f"\n── Iteration {iteration}/{max_iterations} ──")
-
-                tool_choice = runtime_config.get("llm.tool_choice", "required") if HAS_OBSERVATORY else "required"
-                response = await self.main_llm.generate(
-                    messages=messages,
-                    system_prompt=main_system_prompt,
-                    tools=tool_definitions,
-                    tool_choice=tool_choice,
-                    max_tokens=2048,
-                    temperature=self.main_llm.default_temperature,
-                )
-
-                thoughts = response.get("thoughts", "")
-                tool_calls = response.get("tool_calls", None)
-
-                # Brief console log — full details are in the JSON log file
-                thoughts_preview = (thoughts or "")[:120].replace("\n", " ")
-                print(f"  Thoughts: {thoughts_preview}...")
-                if tool_calls:
-                    for tc in tool_calls:
-                        print(f"  → {tc.function.name}()")
-
-                final_thoughts = thoughts
-
-                # Store raw response for logging
-                raw_llm_responses.append({
-                    "iteration": iteration,
-                    "thoughts": thoughts,
-                    "tool_calls": [
-                        {
-                            "name": tc.function.name,
-                            "arguments": self._reorder_think_args(tc.function.arguments)
-                        }
-                        for tc in (tool_calls or [])
-                    ],
-                    "finish_reason": response.get("finish_reason")
-                })
-
-                # Validate that think() was called
-                if not tool_calls:
-                    if iteration == 1:
-                        print("  [Retry: no think() call]")
-                        messages.append({
-                            "role": "system",
-                            "content": "ERROR: You did not call the think() function. You MUST call think() in every response. "
-                                       "Please regenerate the response and make sure to call think() with your thoughts and actions."
-                        })
-                        continue
-                    else:
-                        break
-
-                first_tool = tool_calls[0]
-                if not hasattr(first_tool, 'function') or first_tool.function.name != 'think':
-                    if iteration == 1:
-                        print(f"  [Retry: called {first_tool.function.name} instead of think]")
-                        messages.append({
-                            "role": "system",
-                            "content": f"ERROR: You called function '{first_tool.function.name}' instead of 'think'. "
-                                       "You MUST use the 'think()' function in every response. "
-                                       "Please regenerate the response and make sure to call 'think()' with your thoughts and actions."
-                        })
-                        continue
-                    else:
-                        break
-
-                # Parse actions from the think function call
-                actions_from_llm = await self._parse_think_call(tool_calls[0])
-                if not actions_from_llm:
-                    if iteration < max_iterations:
-                        print("  [Parse error → retry]")
-                        messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
-                        continue
-                    print("  [Parse error]")
-                    break
-
-                action_types = [a.get("action_type", "?") for a in actions_from_llm]
-                print(f"  Actions: {', '.join(action_types)}")
-
-                # Execute actions
-                has_search = False
-                has_send = False
-                silence_detected = False
-                for action in actions_from_llm:
-                    executed = await self._execute_single_action(action)
-                    all_actions.append(executed)
-                    get_needs_tracker().apply_action_effect(action.get("action_type"))
-
-                    if executed.get("type") == "silence":
-                        silence_detected = True
-                        print("  [Silence → stopping pipeline]")
-                        break
-
-                    if executed.get("type") == "start_sleep" and executed.get("status") == "sleeping":
-                        silence_detected = True
-                        print("  [Sleep started → stopping pipeline]")
-                        break
-
-                    if executed.get("type") in ("enter_dialog", "enter_rest", "enter_working") \
-                            and executed.get("status") == "switched":
-                        has_search = True
-                        messages.append({"role": "system", "content": (
-                            f"Presence switched: {executed.get('type')} → "
-                            f"{executed.get('chat_id', executed.get('state', ''))}. "
-                            f"Now decide what to do in the new state "
-                            f"(answer, stay silent, or switch again)."
-                        )})
-                        print("  [Presence switched → re-calling]")
-                        continue
-
-                    if executed.get("type") == "send_message" and executed.get("status") == "ready":
-                        if (executed.get("text") or "").strip():
-                            has_send = True
-                        continue
-
-                    if executed.get("type") == "search_memory":
-                        has_search = True
-                        if executed.get("status") == "searched":
-                            context_addon = executed.get("context_addon", "[No results found]")
-                            messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
-                            print("  [Search results → re-calling]")
-                        else:
-                            messages.append({"role": "system", "content": (
-                                "Memory search failed "
-                                f"({executed.get('error', 'unknown error')}). "
-                                "Answer from the conversation context or stay silent."
-                            )})
-                            print("  [Search error → re-calling anyway]")
-
-                if silence_detected:
-                    break
-
-                if has_search:
-                    continue
-
-                if has_send:
-                    print("  [Done]")
-                    break
-
-                # think() with no conversational outcome (empty/unknown actions,
-                # diary-only, empty send text): force an explicit choice.
-                if iteration < max_iterations:
-                    print("  [No outcome → retry]")
-                    messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
-                    continue
-                print("  [Done]")
-                break
-
-            # End of think loop
-            s_time = time.time() - total_start
-
-            result = {
-                "success": True,
-                "actions": all_actions,
-                "thoughts": final_thoughts,
-                "system_prompt": main_system_prompt,
-                "llm_messages": messages,
-                "error": None,
-                "raw_llm_responses": raw_llm_responses,
-                "timing": {
-                    "total": f"{s_time:.2f}s",
-                    "iterations": iteration
-                }
-            }
-
-            # Save detailed JSON log
-            await self._save_log(result, user_message)
-
-            return result
-
-        except Exception as e:
-            total_time = time.time() - total_start
-            import traceback
-            tb = traceback.format_exc()
-            print(f"[Pipeline Error] {e}\n{tb}")
-            error_result = {
-                "success": False,
-                "actions": [],
-                "thoughts": "",
-                "error": str(e),
-                "timing": {"total": f"{total_time:.2f}s"}
-            }
-            await self._save_log({**error_result, "traceback": tb}, user_message)
-            return error_result
-
-    # ------------------------------------------------------------------
-    # Parse think() function call
-    # ------------------------------------------------------------------
-
-    async def _parse_think_call(self, tool_call) -> List[Dict]:
+        History (agent_internal_history) already carries 5-10+ previous
+        messages within the token limit; this block marks which part is the
+        NEW notification vs context so the model in rest can decide whether
+        enter_dialog is worth it.
         """
-        Parse the `think` function call arguments.
-        Returns list of action dicts.
-        """
-        try:
-            arguments = json.loads(tool_call.function.arguments)
-            actions = arguments.get("actions", [])
-            if not isinstance(actions, list):
-                print(f"[ThinkPipeline] 'actions' is not a list: {type(actions)}")
-                return []
-            return actions
-        except (json.JSONDecodeError, AttributeError, KeyError) as e:
-            print(f"[ThinkPipeline] Failed to parse think() arguments: {e}")
-            print(f"[ThinkPipeline] Raw arguments: {tool_call.function.arguments}")
-            return []
-
-    # ------------------------------------------------------------------
-    # Execute single action
-    # ------------------------------------------------------------------
+        presence = _get_presence_state()
+        state = presence.get("state", "rest")
+        if state not in ("rest", "working"):
+            return None
+        last = (batch_text or "").strip()[:2000]
+        if not last:
+            return None
+        return (
+            f"[уведомление] новый текст из чата {self.chat_id}:\n"
+            f"{last}\n"
+            f"(выше в истории — предыдущие ~5-10 сообщений этого чата для контекста. "
+            f"Ты в {state}: полноценный ответ только через enter_dialog, "
+            f"разовая отмашка через send_message, молчание — пустой content.)"
+        )
 
     @staticmethod
-    def _reorder_think_args(arguments_json: str) -> str:
+    def _tool_calls_to_actions(tool_calls) -> List[Dict]:
+        """Convert OpenAI tool_calls to executor action dicts.
+
+        Returns [{"action_type": name, "params": {...}, "_call_id": id}, ...].
+        Malformed JSON args are skipped (logged).
         """
-        Reorder JSON keys in think() arguments so that 'thoughts' always
-        appears BEFORE 'actions'. Cosmetic — for cleaner logging.
-        """
-        try:
-            args = json.loads(arguments_json)
-            if "thoughts" in args and "actions" in args:
-                ordered = {"thoughts": args["thoughts"], "actions": args["actions"]}
-                return json.dumps(ordered, ensure_ascii=False)
-            return arguments_json
-        except (json.JSONDecodeError, Exception):
-            return arguments_json
+        actions: List[Dict] = []
+        for tc in tool_calls or []:
+            try:
+                name = tc.function.name
+                raw = tc.function.arguments or "{}"
+                try:
+                    params = json.loads(raw) if raw.strip() else {}
+                except (json.JSONDecodeError, AttributeError):
+                    print(f"[Pipeline] bad tool args for {name}: {raw[:200]}")
+                    continue
+                if not isinstance(params, dict):
+                    params = {}
+                actions.append({
+                    "action_type": name,
+                    "params": params,
+                    "_call_id": getattr(tc, "id", None),
+                })
+            except Exception as e:
+                print(f"[Pipeline] tool_call convert error: {e}")
+        return actions
 
     async def _execute_single_action(self, action: Dict) -> Dict:
-        """Execute a single action from think()."""
+        """Execute a single direct-tool action."""
         executor = ToolExecutor(
             text_memory=self.text_memory,
             embedding_client=self.emb_client,
             current_user_id=self.user_id,
-            chat_id=self.chat_id
+            chat_id=self.chat_id,
         )
         return await executor.execute_action(action)
 
@@ -412,8 +237,298 @@ class ThinkPipeline:
             return messages
 
     # ------------------------------------------------------------------
-    # Detailed logging to file
+    # Core loop (shared by stream / non-stream)
     # ------------------------------------------------------------------
+
+    async def _run_stream(
+        self,
+        user_message: str,
+        agent_internal_history: List[Dict[str, str]],
+        media: Optional[Dict[str, Any]],
+    ):
+        """Yield low-level step dicts; caller translates to public events.
+
+        Yields internal dicts:
+          {"kind": "llm", "content": str, "tool_calls": [...], "finish_reason": str}
+          {"kind": "action", "action": executed_dict}
+          {"kind": "reply_content", "text": str, "target_chat_id": str}
+          {"kind": "reply_tool", "action": executed send_message dict}
+          {"kind": "silence", "reason": str}
+        """
+        messages = list(agent_internal_history)
+        notif_block = self._build_notification_block(user_message or "")
+        if notif_block:
+            messages.append({"role": "system", "content": notif_block})
+        if media:
+            messages = self._attach_media(messages, media)
+
+        max_iterations = _max_iterations()
+        choice = _tool_choice()
+        iteration = 0
+
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n── Iteration {iteration}/{max_iterations} [direct] ──")
+
+            # Presence may have changed mid-loop (enter_dialog etc.) —
+            # rebuild prompt + tools every iteration so rules match state.
+            presence = _get_presence_state()
+            state = presence.get("state", "rest")
+            main_system_prompt = build_main_llm_system_prompt(
+                self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
+            )
+            tool_definitions = self._current_tool_defs()
+
+            response = await self.main_llm.generate(
+                messages=messages,
+                system_prompt=main_system_prompt,
+                tools=tool_definitions if tool_definitions else None,
+                tool_choice=choice if tool_definitions else "none",
+                max_tokens=2048,
+                temperature=self.main_llm.default_temperature,
+            )
+
+            content = (response.get("thoughts", "") or "")
+            tool_calls = response.get("tool_calls", None)
+
+            preview = content[:120].replace("\n", " ")
+            print(f"  Content: {preview}..." if preview else "  Content: <empty>")
+            if tool_calls:
+                for tc in tool_calls:
+                    print(f"  → {tc.function.name}()")
+
+            yield {
+                "kind": "llm",
+                "iteration": iteration,
+                "content": content,
+                "tool_calls": [
+                    {"name": tc.function.name, "arguments": tc.function.arguments}
+                    for tc in (tool_calls or [])
+                ],
+                "finish_reason": response.get("finish_reason"),
+                "system_prompt": main_system_prompt,
+            }
+
+            actions = self._tool_calls_to_actions(tool_calls)
+
+            # ---- No tools: content is the verdict ----
+            if not actions:
+                text = content.strip()
+                if not text:
+                    yield {"kind": "silence", "reason": "empty content, no tools"}
+                    return
+                if state == "dialog":
+                    target = str(presence.get("focus_chat_id") or self.chat_id)
+                    yield {"kind": "reply_content", "text": text,
+                           "target_chat_id": target}
+                    return
+                # rest/working + bare content = protocol violation -> retry
+                print("  [Protocol: bare content in rest/working → reminder]")
+                messages.append({"role": "system", "content": REST_CONTENT_REMINDER})
+                # Keep the model's text for logs but do NOT send it.
+                messages.append({"role": "assistant", "content": content})
+                if iteration >= max_iterations:
+                    yield {"kind": "silence",
+                           "reason": "bare content in rest without enter_dialog"}
+                    return
+                continue
+
+            # ---- Tools present: content this turn is NOT sent ----
+            # (When the model calls tools, content is reasoning/draft.)
+            if content.strip():
+                messages.append({"role": "assistant", "content": content})
+
+            has_search = False
+            presence_switched = False
+            send_tool_reply = None
+            sleep_started = False
+
+            for action in actions:
+                executed = await self._execute_single_action(action)
+                get_needs_tracker().apply_action_effect(action.get("action_type"))
+                yield {"kind": "action", "action": executed}
+
+                atype = executed.get("type")
+                status = executed.get("status")
+
+                if atype == "silence":
+                    # Backward compat: old silence tool if model somehow calls it.
+                    yield {"kind": "silence",
+                           "reason": executed.get("reason", "silence tool")}
+                    return
+
+                if atype == "start_sleep" and status == "sleeping":
+                    sleep_started = True
+                    break
+
+                if atype in ("enter_dialog", "enter_rest", "enter_working") \
+                        and status == "switched":
+                    presence_switched = True
+                    messages.append({"role": "system", "content": (
+                        f"Presence switched: {atype} → "
+                        f"{executed.get('chat_id', executed.get('state', ''))}. "
+                        f"Now decide what to do in the new state: answer in "
+                        f"`content` (dialog) or stay silent (empty content)."
+                    )})
+                    print("  [Presence switched → re-calling]")
+                    continue
+
+                if atype == "send_message" and status == "ready":
+                    if (executed.get("text") or "").strip():
+                        send_tool_reply = executed
+                    continue
+
+                if atype == "search_memory":
+                    has_search = True
+                    if status == "searched":
+                        context_addon = executed.get("context_addon", "[No results found]")
+                        messages.append({"role": "system",
+                                         "content": f"Search results in memory:\n{context_addon}"})
+                        print("  [Search results → re-calling]")
+                    else:
+                        messages.append({"role": "system", "content": (
+                            "Memory search failed "
+                            f"({executed.get('error', 'unknown error')}). "
+                            "Answer from the conversation context or stay silent."
+                        )})
+                        print("  [Search error → re-calling anyway]")
+                    continue
+
+                if atype in ("write_diary", "update_diary"):
+                    if status in ("written", "updated"):
+                        messages.append({"role": "system", "content": (
+                            f"Diary {atype} done ({status}). "
+                            f"Now answer in `content` or stay silent."
+                        )})
+                    else:
+                        messages.append({"role": "system", "content": (
+                            f"Diary {atype} failed ({executed.get('error', status)}). "
+                            f"Answer from context or stay silent."
+                        )})
+                    continue
+
+            if sleep_started:
+                yield {"kind": "silence", "reason": "sleep started"}
+                return
+
+            if send_tool_reply is not None and not has_search and not presence_switched:
+                # Single brush-off in rest/working — final, no re-call.
+                yield {"kind": "reply_tool", "action": send_tool_reply}
+                return
+
+            if has_search or presence_switched:
+                continue
+
+            # Only diary tools (+ draft content ignored): re-call for final verdict,
+            # unless model already gave content alongside diary calls.
+            if content.strip():
+                text = content.strip()
+                presence2 = _get_presence_state()
+                if presence2.get("state") == "dialog":
+                    target = str(presence2.get("focus_chat_id") or self.chat_id)
+                    yield {"kind": "reply_content", "text": text,
+                           "target_chat_id": target}
+                    return
+                # rest + diary + content but no enter_dialog -> still violation
+                messages.append({"role": "system", "content": REST_CONTENT_REMINDER})
+                continue
+
+            # Tools with no outcome (e.g. diary error + empty content): re-call.
+            if iteration >= max_iterations:
+                yield {"kind": "silence", "reason": "tools with no reply"}
+                return
+            messages.append({"role": "system", "content": (
+                "No reply yet. Answer in `content` now or stay silent "
+                "(empty content, no tools)."
+            )})
+
+        yield {"kind": "silence", "reason": "max iterations reached"}
+
+    # ------------------------------------------------------------------
+    # Public entry points
+    # ------------------------------------------------------------------
+
+    async def process_message(
+        self,
+        user_message: str,
+        user_visible_history: List[Dict[str, str]],
+        agent_internal_history: List[Dict[str, str]],
+        user_profile: Optional[Dict[str, Any]] = None,
+        media: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        total_start = time.time()
+        try:
+            all_actions: List[Dict] = []
+            raw_llm_responses: List[Dict] = []
+            reply_text = ""
+            reply_via = ""
+            reply_chat_id = ""
+            silence_reason = ""
+            iterations = 0
+
+            async for step in self._run_stream(user_message, agent_internal_history, media):
+                kind = step.get("kind")
+                if kind == "llm":
+                    iterations = step.get("iteration", iterations)
+                    raw_llm_responses.append({
+                        "iteration": step.get("iteration"),
+                        "thoughts": step.get("content", ""),
+                        "tool_calls": step.get("tool_calls", []),
+                        "finish_reason": step.get("finish_reason"),
+                    })
+                elif kind == "action":
+                    all_actions.append(step["action"])
+                elif kind == "reply_content":
+                    reply_text = step["text"]
+                    reply_chat_id = step["target_chat_id"]
+                    reply_via = "content"
+                    get_needs_tracker().apply_action_effect("send_message")
+                    break
+                elif kind == "reply_tool":
+                    a = step["action"]
+                    reply_text = (a.get("text") or "").strip()
+                    reply_chat_id = str(a.get("chat_id", self.chat_id))
+                    reply_via = "send_message_brush_off"
+                    all_actions.append(a) if a not in all_actions else None
+                    break
+                elif kind == "silence":
+                    silence_reason = step.get("reason", "")
+                    get_needs_tracker().apply_action_effect("silence")
+                    break
+
+            s_time = time.time() - total_start
+            # Keep legacy keys (thoughts/actions) for Observatory UI compat.
+            result = {
+                "success": True,
+                "actions": all_actions,
+                "thoughts": reply_text,
+                "reply_text": reply_text,
+                "reply_via": reply_via,
+                "reply_chat_id": reply_chat_id,
+                "silence_reason": silence_reason,
+                "system_prompt": "",
+                "llm_messages": [],
+                "error": None,
+                "raw_llm_responses": raw_llm_responses,
+                "timing": {"total": f"{s_time:.2f}s", "iterations": iterations},
+            }
+            await self._save_log(result, user_message)
+            return result
+        except Exception as e:
+            total_time = time.time() - total_start
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[Pipeline Error] {e}\n{tb}")
+            error_result = {
+                "success": False,
+                "actions": [],
+                "thoughts": "",
+                "reply_text": "",
+                "error": str(e),
+                "timing": {"total": f"{total_time:.2f}s"},
+            }
+            await self._save_log({**error_result, "traceback": tb}, user_message)
+            return error_result
 
     async def _save_log(self, result: Dict, user_message: str):
         """Save a detailed JSON log of the pipeline run."""
@@ -428,12 +543,16 @@ class ThinkPipeline:
             "system_prompt": result.get("system_prompt", ""),
             "llm_messages": result.get("llm_messages", []),
             "thoughts": result.get("thoughts", ""),
+            "reply_text": result.get("reply_text", ""),
+            "reply_via": result.get("reply_via", ""),
+            "reply_chat_id": result.get("reply_chat_id", ""),
+            "silence_reason": result.get("silence_reason", ""),
             "actions": result.get("actions", []),
             "raw_llm_responses": result.get("raw_llm_responses", []),
             "success": result.get("success", False),
             "error": result.get("error"),
             "timing": result.get("timing", {}),
-            "traceback": result.get("traceback", None)
+            "traceback": result.get("traceback", None),
         }
 
         filename = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.json"
@@ -454,200 +573,88 @@ class ThinkPipeline:
         user_profile: Optional[Dict[str, Any]] = None,
         media: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Streaming version of process_message.
-        
-        Think loop: LLM generates thoughts + actions via think().
-        When a send_message action is found — it's yielded immediately
-        with the full text already generated. The consumer (bot) sends
-        it right away, while the think loop continues processing more
-        actions (e.g. search_memory, another send_message).
+        """Streaming version consumed by core/queue.py.
 
         Yields:
           {"type": "thought", "thoughts": str}
-          {"type": "action", "action": Dict}  — full action with complete text
+          {"type": "action", "action": Dict}
           {"type": "search_result", "content": str}
+          {"type": "reply", "text": str, "chat_id": str, "via": str}
+          {"type": "silence", "reason": str}
           {"type": "done", "result": Dict}
           {"type": "error", "error": str}
         """
         total_start = time.time()
-
         try:
-            main_system_prompt = build_main_llm_system_prompt(
-                self.user_id, chat_id=self.chat_id, my_user_id=self.my_user_id
-            )
-            tool_definitions = get_tool_definitions()
-
-            messages = list(agent_internal_history)
-            if media:
-                messages = self._attach_media(messages, media)
-
-            all_actions = []
-            final_thoughts = ""
+            all_actions: List[Dict] = []
+            raw_llm_responses: List[Dict] = []
+            reply_text = ""
+            reply_via = ""
+            reply_chat_id = ""
+            silence_reason = ""
             iteration = 0
-            max_iterations = _max_iterations()
-            raw_llm_responses = []
 
-            while iteration < max_iterations:
-                iteration += 1
-                print(f"\n── Iteration {iteration}/{max_iterations} [stream] ──")
-
-                tool_choice = runtime_config.get("llm.tool_choice", "required") if HAS_OBSERVATORY else "required"
-                response = await self.main_llm.generate(
-                    messages=messages,
-                    system_prompt=main_system_prompt,
-                    tools=tool_definitions,
-                    tool_choice=tool_choice,
-                    max_tokens=2048,
-                    temperature=self.main_llm.default_temperature,
-                )
-
-                thoughts = response.get("thoughts", "")
-                tool_calls = response.get("tool_calls", None)
-
-                final_thoughts = thoughts
-                yield {"type": "thought", "thoughts": thoughts}
-
-                raw_llm_responses.append({
-                    "iteration": iteration,
-                    "thoughts": thoughts,
-                    "tool_calls": [
-                        {"name": tc.function.name, "arguments": self._reorder_think_args(tc.function.arguments)}
-                        for tc in (tool_calls or [])
-                    ],
-                    "finish_reason": response.get("finish_reason")
-                })
-
-                # Validate think() call
-                if not tool_calls:
-                    if iteration == 1:
-                        print("  [Retry: no think() call]")
-                        messages.append({
-                            "role": "system",
-                            "content": "ERROR: You did not call the think() function. You MUST call think() in every response. "
-                                       "Please regenerate the response and make sure to call think() with your thoughts and actions."
-                        })
-                        continue
-                    else:
-                        break
-
-                first_tool = tool_calls[0]
-                if not hasattr(first_tool, 'function') or first_tool.function.name != 'think':
-                    if iteration == 1:
-                        print(f"  [Retry: called {first_tool.function.name} instead of think]")
-                        messages.append({
-                            "role": "system",
-                            "content": f"ERROR: You called function '{first_tool.function.name}' instead of 'think'. "
-                                       "You MUST use the 'think()' function in every response. "
-                                       "Please regenerate the response and make sure to call 'think()' with your thoughts and actions."
-                        })
-                        continue
-                    else:
-                        break
-
-                actions_from_llm = await self._parse_think_call(tool_calls[0])
-                if not actions_from_llm:
-                    if iteration < max_iterations:
-                        print("  [Parse error → retry]")
-                        messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
-                        continue
-                    print("  [Parse error]")
+            async for step in self._run_stream(user_message, agent_internal_history, media):
+                kind = step.get("kind")
+                if kind == "llm":
+                    iteration = step.get("iteration", iteration)
+                    raw_llm_responses.append({
+                        "iteration": step.get("iteration"),
+                        "thoughts": step.get("content", ""),
+                        "tool_calls": step.get("tool_calls", []),
+                        "finish_reason": step.get("finish_reason"),
+                    })
+                    yield {"type": "thought", "thoughts": step.get("content", "")}
+                elif kind == "action":
+                    action = step["action"]
+                    all_actions.append(action)
+                    # Needs effect already applied inside _run_stream — do not double-count.
+                    yield {"type": "action", "action": action}
+                    if action.get("type") == "search_memory" and action.get("status") == "searched":
+                        yield {"type": "search_result",
+                               "content": action.get("context_addon", "")}
+                elif kind == "reply_content":
+                    reply_text = step["text"]
+                    reply_chat_id = step["target_chat_id"]
+                    reply_via = "content"
+                    get_needs_tracker().apply_action_effect("send_message")
+                    yield {"type": "reply", "text": reply_text,
+                           "chat_id": reply_chat_id, "via": "content"}
                     break
-
-                action_types = [a.get("action_type", "?") for a in actions_from_llm]
-                print(f"  Actions: {', '.join(action_types)}")
-
-                # Execute each action — send_message is yielded immediately
-                # with the full text, so the bot can send it right away
-                has_search = False
-                has_send = False
-                silence_detected = False
-                for action in actions_from_llm:
-                    executed = await self._execute_single_action(action)
-                    all_actions.append(executed)
-                    get_needs_tracker().apply_action_effect(action.get("action_type"))
-                    yield {"type": "action", "action": executed}
-
-                    if executed.get("type") == "silence":
-                        silence_detected = True
-                        print("  [Silence → stopping pipeline]")
-                        break
-
-                    if executed.get("type") == "start_sleep" and executed.get("status") == "sleeping":
-                        silence_detected = True
-                        print("  [Sleep started → stopping pipeline]")
-                        break
-
-                    if executed.get("type") in ("enter_dialog", "enter_rest", "enter_working") \
-                            and executed.get("status") == "switched":
-                        has_search = True
-                        messages.append({"role": "system", "content": (
-                            f"Presence switched: {executed.get('type')} → "
-                            f"{executed.get('chat_id', executed.get('state', ''))}. "
-                            f"Now decide what to do in the new state."
-                        )})
-                        print("  [Presence switched → re-calling]")
-                        continue
-
-                    if executed.get("type") == "send_message" and executed.get("status") == "ready":
-                        if (executed.get("text") or "").strip():
-                            has_send = True
-                        continue
-
-                    if executed.get("type") == "search_memory":
-                        has_search = True
-                        if executed.get("status") == "searched":
-                            context_addon = executed.get("context_addon", "[No results found]")
-                            messages.append({"role": "system", "content": f"Search results in memory:\n{context_addon}"})
-                            yield {"type": "search_result", "content": context_addon}
-                            print("  [Search results → re-calling]")
-                        else:
-                            messages.append({"role": "system", "content": (
-                                "Memory search failed "
-                                f"({executed.get('error', 'unknown error')}). "
-                                "Answer from the conversation context or stay silent."
-                            )})
-                            print("  [Search error → re-calling anyway]")
-
-                if silence_detected:
+                elif kind == "reply_tool":
+                    a = step["action"]
+                    # _run_stream already applied needs effect; avoid double count
+                    # for the action itself (applied inside _run_stream), so just yield.
+                    reply_text = (a.get("text") or "").strip()
+                    reply_chat_id = str(a.get("chat_id", self.chat_id))
+                    reply_via = "send_message_brush_off"
+                    yield {"type": "reply", "text": reply_text,
+                           "chat_id": reply_chat_id, "via": "send_message_brush_off"}
                     break
-
-                if has_search:
-                    continue
-
-                if has_send:
-                    print("  [Done]")
+                elif kind == "silence":
+                    silence_reason = step.get("reason", "")
+                    get_needs_tracker().apply_action_effect("silence")
+                    yield {"type": "silence", "reason": silence_reason}
                     break
-
-                # think() with no conversational outcome: force an explicit choice.
-                if iteration < max_iterations:
-                    print("  [No outcome → retry]")
-                    messages.append({"role": "system", "content": NO_OUTCOME_REMINDER})
-                    continue
-                print("  [Done]")
-                break
 
             s_time = time.time() - total_start
-
             result = {
                 "success": True,
                 "actions": all_actions,
-                "thoughts": final_thoughts,
-                "system_prompt": main_system_prompt,
-                "llm_messages": messages,
+                "thoughts": reply_text,
+                "reply_text": reply_text,
+                "reply_via": reply_via,
+                "reply_chat_id": reply_chat_id,
+                "silence_reason": silence_reason,
+                "system_prompt": "",
+                "llm_messages": [],
                 "error": None,
                 "raw_llm_responses": raw_llm_responses,
-                "timing": {
-                    "total": f"{s_time:.2f}s",
-                    "iterations": iteration
-                }
+                "timing": {"total": f"{s_time:.2f}s", "iterations": iteration},
             }
-
             await self._save_log(result, user_message)
             yield {"type": "done", "result": result}
-
         except Exception as e:
-            total_time = time.time() - total_start
             import traceback
             tb = traceback.format_exc()
             print(f"[Pipeline Error] {e}\n{tb}")
@@ -655,8 +662,13 @@ class ThinkPipeline:
                 "success": False,
                 "actions": [],
                 "thoughts": "",
+                "reply_text": "",
                 "error": str(e),
-                "timing": {"total": f"{total_time:.2f}s"}
+                "timing": {"total": f"{time.time() - total_start:.2f}s"},
             }
             await self._save_log({**error_result, "traceback": tb}, user_message)
             yield {"type": "error", "error": str(e)}
+
+
+# Backward/forward-compatible alias.
+MilaPipeline = ThinkPipeline

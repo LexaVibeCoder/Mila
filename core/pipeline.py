@@ -209,10 +209,11 @@ class ThinkPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _current_tool_defs(self) -> List[Dict]:
+    def _current_tool_defs(self, include_proactive: bool = False) -> List[Dict]:
         state = _get_presence_state().get("state", "rest")
         try:
-            return get_tool_definitions(presence_state=state)
+            return get_tool_definitions(presence_state=state,
+                                        include_proactive=include_proactive)
         except TypeError:
             # Old signature fallback (should not happen after migration).
             return get_tool_definitions()
@@ -287,8 +288,10 @@ class ThinkPipeline:
 
         - Current batch bytes go to the LAST user message (as before).
         - Recent history bytes (last 3 photos + last 2 audios from
-          chunks.media_path) are re-attached to their own user messages,
-          so the model still sees a photo a few turns later.
+          chunks.media_path) are re-attached ONLY to their own user
+          messages (matched by placeholder). If the native message is
+          no longer in context (summarized away), its bytes are dropped —
+          never folded into the current message as fresh info.
         Falls back to text-only if nothing usable.
         """
         try:
@@ -389,19 +392,12 @@ class ThinkPipeline:
                 messages[i] = {"role": "user", "content": parts}
 
             # History media whose placeholder wasn't found (summarized away):
-            # fold into the last user message so bytes aren't silently lost.
-            leftover_imgs = [u for u, _p in hist_img_rev]
-            leftover_auds = [a for a, _p in hist_aud_rev]
-            if (leftover_imgs or leftover_auds) and last_user_idx is not None:
-                base = messages[last_user_idx].get("content", "")
-                if not isinstance(base, list):
-                    note = str(base)
-                    if leftover_imgs:
-                        note += f"\n[ранее в диалоге было фото — смотри прикреплённое, всего {len(leftover_imgs)}]"
-                    parts = build_multimodal_parts(note, leftover_imgs or None,
-                                                   leftover_auds or None)
-                    messages[last_user_idx] = {"role": "user", "content": parts}
-                    leftover_imgs, leftover_auds = [], []
+            # drop the bytes — they stay in history as plain-text placeholders
+            # only. Folding them into the last user message would present
+            # stale photos/audios as fresh info for the current turn.
+            if hist_img_rev or hist_aud_rev:
+                print(f"[Pipeline] history media without native message dropped: "
+                      f"{len(hist_img_rev)} img + {len(hist_aud_rev)} audio")
 
             # Enrich last user message with current-batch media
             for i in range(len(messages) - 1, -1, -1):
@@ -413,14 +409,6 @@ class ThinkPipeline:
                                 base.append({"type": "image_url",
                                              "image_url": {"url": url}})
                             for b64, fmt in audios:
-                                has_instr = any(
-                                    isinstance(p, dict) and p.get("type") == "text"
-                                    and "Слушай это голосовое" in str(p.get("text", ""))
-                                    for p in base)
-                                if not has_instr:
-                                    from core.media import AUDIO_LISTEN_INSTRUCTION
-                                    base.insert(0, {"type": "text",
-                                                    "text": AUDIO_LISTEN_INSTRUCTION})
                                 base.append({"type": "input_audio",
                                              "input_audio": {"data": b64, "format": fmt}})
                             messages[i] = {"role": "user", "content": base}
@@ -433,12 +421,15 @@ class ThinkPipeline:
                     break
             if event_line:
                 messages.append({"role": "system", "content": event_line})
-            n_img = len(image_urls) + len(hist_image_urls)
-            n_aud = len(audios) + len(hist_audios)
-            if n_img or n_aud:
+            n_dropped_img = len(hist_img_rev)
+            n_dropped_aud = len(hist_aud_rev)
+            n_img = len(image_urls) + len(hist_image_urls) - n_dropped_img
+            n_aud = len(audios) + len(hist_audios) - n_dropped_aud
+            if n_img or n_aud or n_dropped_img or n_dropped_aud:
                 print(f"[Pipeline] media attached: {n_img} img + {n_aud} audio "
                       f"(current {len(image_urls)}+{len(audios)}, history "
-                      f"{len(hist_image_urls)}+{len(hist_audios)})")
+                      f"{len(hist_image_urls) - n_dropped_img}+{len(hist_audios) - n_dropped_aud}, "
+                      f"dropped {n_dropped_img}+{n_dropped_aud})")
             return messages
         except Exception as e:
             print(f"[Pipeline] media attach failed, text-only: {e}")
@@ -455,6 +446,8 @@ class ThinkPipeline:
         media: Optional[Dict[str, Any]],
         request_user_id: str | None = None,
         request_chat_id: str | None = None,
+        enable_peek: bool = False,
+        proactive_block: str | None = None,
     ):
         """Yield low-level step dicts; caller translates to public events.
 
@@ -472,9 +465,13 @@ class ThinkPipeline:
         req_user = request_user_id or self.user_id
         req_chat = request_chat_id or self.chat_id
         messages = list(agent_internal_history)
-        notif_block = self._build_notification_block(user_message or "", chat_id=req_chat)
-        if notif_block:
-            messages.append({"role": "system", "content": notif_block})
+        if proactive_block:
+            # Proactive turn: instructions + chat list on top, no fake notification.
+            messages.append({"role": "system", "content": proactive_block})
+        else:
+            notif_block = self._build_notification_block(user_message or "", chat_id=req_chat)
+            if notif_block:
+                messages.append({"role": "system", "content": notif_block})
         # Always attach: history media (last 3 photos + 2 audios) must load
         # even on text-only turns (media=None). chat_id fallback = req_chat.
         messages = self._attach_media(messages, media or {}, default_chat_id=req_chat)
@@ -495,7 +492,10 @@ class ThinkPipeline:
             main_system_prompt = build_main_llm_system_prompt(
                 req_user, chat_id=req_chat, my_user_id=self.my_user_id
             )
-            tool_definitions = self._current_tool_defs()
+            # Peek is proactive-only: keep reactive turns clean.
+            # After enter_dialog the turn becomes dialog and peek drops out.
+            tool_definitions = self._current_tool_defs(
+                include_proactive=bool(enable_peek and proactive_block))
             want_json = state == "dialog"
             fmt = None
             if want_json and use_response_format:
@@ -589,6 +589,7 @@ class ThinkPipeline:
                 messages.append({"role": "assistant", "content": content})
 
             has_search = False
+            has_peek = False
             presence_switched = False
             send_tool_reply = None
             sleep_started = False
@@ -649,16 +650,39 @@ class ThinkPipeline:
                         )})
                     continue
 
+                if atype == "peek_recent_chats":
+                    has_peek = True
+                    if status == "peeked":
+                        context_addon = executed.get("context_addon", "[нет чатов]")
+                        messages.append({"role": "system", "content": (
+                            "Recent messages across chats "
+                            "(old->new, fresh at the bottom):\n"
+                            f"{context_addon}\n"
+                            "Теперь выбери ОДИН чат и либо вызови enter_dialog "
+                            "с его chat_id, либо отправь одну записку через "
+                            "send_message, либо промолчи пустым ответом."
+                        )})
+                        print("  [Peek results → re-calling]")
+                    else:
+                        messages.append({"role": "system", "content": (
+                            "Peek failed "
+                            f"({executed.get('error', 'unknown error')}). "
+                            "Выбери чат из списка или промолчи."
+                        )})
+                        print("  [Peek error → re-calling anyway]")
+                    continue
+
             if sleep_started:
                 yield {"kind": "silence", "reason": "sleep started"}
                 return
 
-            if send_tool_reply is not None and not has_search and not presence_switched:
+            if send_tool_reply is not None and not has_search and not has_peek \
+                    and not presence_switched:
                 # Single note in rest/working — final, no re-call.
                 yield {"kind": "reply_tool", "action": send_tool_reply}
                 return
 
-            if has_search or presence_switched:
+            if has_search or has_peek or presence_switched:
                 continue
 
             # Diary-only turn with no verdict yet: re-call.
@@ -686,6 +710,8 @@ class ThinkPipeline:
         media: Optional[Dict[str, Any]] = None,
         request_user_id: str | None = None,
         request_chat_id: str | None = None,
+        enable_peek: bool = False,
+        proactive_block: str | None = None,
     ) -> Dict[str, Any]:
         total_start = time.time()
         req_user = request_user_id or self.user_id
@@ -700,7 +726,11 @@ class ThinkPipeline:
             silence_reason = ""
             iterations = 0
 
-            async for step in self._run_stream(user_message, agent_internal_history, media, request_user_id=req_user, request_chat_id=req_chat):
+            async for step in self._run_stream(
+                user_message, agent_internal_history, media,
+                request_user_id=req_user, request_chat_id=req_chat,
+                enable_peek=enable_peek, proactive_block=proactive_block,
+            ):
                 kind = step.get("kind")
                 if kind == "llm":
                     iterations = step.get("iteration", iterations)
@@ -748,7 +778,8 @@ class ThinkPipeline:
                 "raw_llm_responses": raw_llm_responses,
                 "timing": {"total": f"{s_time:.2f}s", "iterations": iterations},
             }
-            await self._save_log(result, user_message, request_user_id=req_user, request_chat_id=req_chat)
+            await self._save_log(result, proactive_block or user_message,
+                                 request_user_id=req_user, request_chat_id=req_chat)
             return result
         except Exception as e:
             total_time = time.time() - total_start
@@ -823,6 +854,8 @@ class ThinkPipeline:
         media: Optional[Dict[str, Any]] = None,
         request_user_id: str | None = None,
         request_chat_id: str | None = None,
+        enable_peek: bool = False,
+        proactive_block: str | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Streaming version consumed by core/queue.py.
 
@@ -848,7 +881,11 @@ class ThinkPipeline:
             silence_reason = ""
             iteration = 0
 
-            async for step in self._run_stream(user_message, agent_internal_history, media, request_user_id=req_user, request_chat_id=req_chat):
+            async for step in self._run_stream(
+                user_message, agent_internal_history, media,
+                request_user_id=req_user, request_chat_id=req_chat,
+                enable_peek=enable_peek, proactive_block=proactive_block,
+            ):
                 kind = step.get("kind")
                 if kind == "llm":
                     iteration = step.get("iteration", iteration)
@@ -865,6 +902,9 @@ class ThinkPipeline:
                     # Needs effect already applied inside _run_stream — do not double-count.
                     yield {"type": "action", "action": action}
                     if action.get("type") == "search_memory" and action.get("status") == "searched":
+                        yield {"type": "search_result",
+                               "content": action.get("context_addon", "")}
+                    if action.get("type") == "peek_recent_chats" and action.get("status") == "peeked":
                         yield {"type": "search_result",
                                "content": action.get("context_addon", "")}
                 elif kind == "reply_bubbles":
@@ -909,7 +949,8 @@ class ThinkPipeline:
                 "raw_llm_responses": raw_llm_responses,
                 "timing": {"total": f"{s_time:.2f}s", "iterations": iteration},
             }
-            await self._save_log(result, user_message, request_user_id=req_user, request_chat_id=req_chat)
+            await self._save_log(result, proactive_block or user_message,
+                                 request_user_id=req_user, request_chat_id=req_chat)
             yield {"type": "done", "result": result}
         except Exception as e:
             import traceback
@@ -923,7 +964,10 @@ class ThinkPipeline:
                 "error": str(e),
                 "timing": {"total": f"{time.time() - total_start:.2f}s"},
             }
-            await self._save_log({**error_result, "traceback": tb}, user_message, request_user_id=request_user_id, request_chat_id=request_chat_id)
+            await self._save_log({**error_result, "traceback": tb},
+                                 proactive_block or user_message,
+                                 request_user_id=request_user_id,
+                                 request_chat_id=request_chat_id)
             yield {"type": "error", "error": str(e)}
 
 

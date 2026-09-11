@@ -90,6 +90,7 @@ class RuntimeConfig:
                 "write_diary": True,
                 "update_diary": True,
                 "presence": True,
+                "peek_recent": True,
             },
             # Diary
             "diary": {
@@ -118,6 +119,16 @@ class RuntimeConfig:
                 "start_hour": None,
                 "end_hour": None,
                 "forced_awake": False,
+            },
+            # Proactive (state_agent every N min of global silence)
+            "proactive": {
+                "enabled": True,
+                "idle_minutes": 27,
+                "check_interval_seconds": 60,
+                "sleep_minutes": 480,
+                "cooldown_minutes": 27,
+                "max_chats": 20,
+                "default_peek_limit": 10,
             },
             # System
             "system": {

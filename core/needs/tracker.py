@@ -123,6 +123,8 @@ class NeedsTracker:
             self._fatigue_offset = max(self._fatigue_offset - 0.1, -0.3)
         elif action_type == "search_memory":
             self._boredom_offset = max(self._boredom_offset - 0.1, -0.5)
+        elif action_type == "peek_recent_chats":
+            self._boredom_offset = max(self._boredom_offset - 0.1, -0.5)
         elif action_type == "write_diary":
             self._boredom_offset = max(self._boredom_offset - 0.08, -0.5)
             self._fatigue_offset = min(self._fatigue_offset + 0.03, 0.3)

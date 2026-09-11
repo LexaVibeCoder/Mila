@@ -24,16 +24,6 @@ MAX_IMAGE_SIDE = 1568
 MAX_HISTORY_IMAGES = 3
 MAX_HISTORY_AUDIOS = 2
 
-# Instruction injected alongside any native audio so the model listens
-# to the whole soundscape, not just speech transcription.
-AUDIO_LISTEN_INSTRUCTION = (
-    "Слушай это голосовое целиком, а не только транскрибируй речь: "
-    "разбери слова, интонацию и эмоции голоса, а также ВСЕ окружающие звуки — "
-    "фон, шумы, музыку, природу, технику, других людей. "
-    "Если есть не-речевые звуки, опиши их. "
-    "Отвечай как человек, который реально это услышал."
-)
-
 
 def encode_image_for_llm(path: str) -> Optional[str]:
     """Resize + JPEG-encode a photo, return data_url. None on failure."""
@@ -160,16 +150,15 @@ def persist_media_file(src_path: str, chat_id: str, kind: str) -> Optional[str]:
 
 
 def build_multimodal_parts(text: str, image_data_urls: list[str] | None = None,
-                           audio: tuple[str, str] | list[tuple[str, str]] | None = None,
-                           add_audio_instruction: bool = True) -> str | list:
+                           audio: tuple[str, str] | list[tuple[str, str]] | None = None) -> str | list:
     """Build OpenAI-compatible message content.
 
     Returns a plain string when no media, else a parts list:
     [{type: text}, {type: image_url}, {type: input_audio}].
 
     `audio` accepts a single (b64, fmt) tuple or a list of them.
-    When audio is present, AUDIO_LISTEN_INSTRUCTION is prepended as text
-    so the model listens to ambient sounds, not just transcribes speech.
+    Media bytes are attached as-is; no extra instructions are added —
+    the model decides itself what to do with a photo or audio.
     """
     parts: list = []
     audios: list[tuple[str, str]] = []
@@ -178,11 +167,6 @@ def build_multimodal_parts(text: str, image_data_urls: list[str] | None = None,
             audios = [a for a in audio if a]
         else:
             audios = [audio]
-    if audios and add_audio_instruction:
-        instr = AUDIO_LISTEN_INSTRUCTION
-        # Don't duplicate if caller already included it.
-        if not (text or "").strip().startswith("Слушай это голосовое"):
-            text = f"{instr}\n\n{(text or '').strip()}" if (text or "").strip() else instr
     if text and text.strip():
         parts.append({"type": "text", "text": text})
     for url in image_data_urls or []:

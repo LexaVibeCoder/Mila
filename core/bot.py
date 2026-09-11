@@ -139,6 +139,12 @@ class MilaUserbot:
         start_auto_rest_scheduler(
             typing_checker=lambda chat_id: self.messages.is_user_typing(chat_id)
         )
+        # Proactive: state_agent every 27 min of global silence.
+        try:
+            from core.proactive import start_proactive_scheduler
+            start_proactive_scheduler(self)
+        except Exception as e:
+            print(f"[Proactive] scheduler start failed: {e}")
 
     async def _heartbeat_loop(self):
         """Fresh data/bot_heartbeat = healthy for compose healthcheck."""
@@ -345,6 +351,11 @@ class MilaUserbot:
             pass
         try:
             stop_auto_rest_scheduler()
+        except Exception:
+            pass
+        try:
+            from core.proactive import stop_proactive_scheduler
+            stop_proactive_scheduler()
         except Exception:
             pass
         try:

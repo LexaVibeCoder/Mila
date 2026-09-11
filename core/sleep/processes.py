@@ -254,6 +254,31 @@ class StagingExecutor:
         removed = pop_oldest_messages_by_tokens(chat_id, 50000)
         messages_removed = len(removed) if removed else message_count
 
+        # Detach bytes of summarized-away media: text placeholders and the
+        # summary stay, but files are deleted and chunks.media_path cleared
+        # so later turns don't re-attach stale photos/audios as fresh info.
+        try:
+            chunk_ids = [(m.get("source_chunk_id") or "") for m in (removed or [])]
+            chunk_ids = [c for c in chunk_ids if c]
+            if chunk_ids:
+                from core.db import detach_media_by_chunk_ids
+                detached = detach_media_by_chunk_ids(chunk_ids)
+                if detached:
+                    import os as _os
+                    n_files = 0
+                    for _p in detached:
+                        for _cand in (_p, _os.path.splitext(_p)[0] + ".wav"):
+                            try:
+                                if _cand and _os.path.isfile(_cand):
+                                    _os.unlink(_cand)
+                                    n_files += 1
+                            except OSError:
+                                pass
+                    print(f"  [Sleep] media detached for {chat_id[:12]}...: "
+                          f"{len(detached)} chunk(s), {n_files} file(s) removed")
+        except Exception as e:
+            print(f"  [Sleep] media detach failed for {chat_id[:12]}...: {e}")
+
         log_dialog_summary(self.session_id, chat_id, summary_text, messages_removed)
 
         sid = stage_operation(

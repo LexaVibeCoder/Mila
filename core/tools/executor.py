@@ -2,7 +2,8 @@ import json
 from typing import List, Dict, Any, Optional
 
 
-def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
+def get_tool_definitions(presence_state: str = "rest",
+                         include_proactive: bool = False) -> List[Dict]:
     """Direct tools for the current state only.
 
     - rest: enter_dialog (answer), send_message (one brush-off),
@@ -11,6 +12,7 @@ def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
     - dialog: search_memory, write_diary, update_diary, enter_dialog (switch),
       enter_rest, enter_working, start_sleep.
     - sleep: start_sleep only (pipeline rarely runs here).
+    - proactive: rest/working + peek_recent_chats (one shot view of all chats).
     """
     try:
         from Mila_observatory.runtime import runtime_config
@@ -20,12 +22,14 @@ def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
         diary_enabled = tools_enabled.get("write_diary", True)
         diary_update_enabled = tools_enabled.get("update_diary", True)
         presence_enabled = tools_enabled.get("presence", True)
+        peek_enabled = tools_enabled.get("peek_recent", True)
     except ImportError:
         search_enabled = True
         send_enabled = True
         diary_enabled = True
         diary_update_enabled = True
         presence_enabled = True
+        peek_enabled = True
 
     state = presence_state or "rest"
     defs: List[Dict] = []
@@ -233,6 +237,46 @@ def get_tool_definitions(presence_state: str = "rest") -> List[Dict]:
             },
         })
 
+    # Proactive-only: one-shot view of recent messages across chats.
+    # Sorted old->new by chat freshness, messages NOT truncated.
+    if include_proactive and peek_enabled and state in ("rest", "working"):
+        try:
+            from Mila_observatory.runtime import runtime_config as _rc
+            _default_peek = int(_rc.get("proactive.default_peek_limit", 10) or 10)
+        except Exception:
+            _default_peek = 10
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "peek_recent_chats",
+                "description": (
+                    "Посмотреть последние сообщения из каждого чата одновременно, "
+                    "чтобы решить кому написать. Вернёт чаты от старых к свежим "
+                    "(свежие внизу). Сообщения не обрезаются."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit_per_chat": {
+                            "type": "integer",
+                            "description": (
+                                f"Сколько последних сообщений взять из каждого чата "
+                                f"(по умолчанию {_default_peek}, ты можешь поставить своё)"
+                            ),
+                        },
+                        "chat_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Необязательно: конкретные chat_id. "
+                                "Если пусто — все доступные чаты."
+                            ),
+                        },
+                    },
+                },
+            },
+        })
+
     return defs
 
 
@@ -271,6 +315,8 @@ class ToolExecutor:
             return await self._handle_enter_working(params)
         elif action_type == "start_sleep":
             return await self._handle_start_sleep(params)
+        elif action_type == "peek_recent_chats":
+            return await self._handle_peek_recent_chats(params)
         else:
             return {
                 "type": action_type,
@@ -478,3 +524,105 @@ class ToolExecutor:
         print(f"[Presence] → sleep for {duration} min")
         return {"type": "start_sleep", "duration_minutes": duration,
                 "sleep_result": result, "status": "sleeping"}
+
+    async def _handle_peek_recent_chats(self, params: Dict) -> Dict:
+        """One-shot view of recent messages across chats, old->new.
+
+        No truncation of message texts (per spec). Chats ordered by last
+        activity ASC: stale in the middle of context, fresh at the bottom.
+        """
+        try:
+            limit = int(params.get("limit_per_chat", 0) or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            try:
+                from Mila_observatory.runtime import runtime_config as _rc
+                limit = int(_rc.get("proactive.default_peek_limit", 10) or 10)
+            except Exception:
+                limit = 10
+        limit = max(1, min(limit, 50))
+        wanted = params.get("chat_ids") or []
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        wanted = [str(x).strip() for x in (wanted or []) if str(x).strip()]
+
+        try:
+            from core.db import (
+                get_chats_by_last_activity,
+                get_recent_chunks,
+                get_user_display_name,
+            )
+            try:
+                from Mila_observatory.runtime import runtime_config as _rc
+                max_chats = int(_rc.get("proactive.max_chats", 20) or 20)
+            except Exception:
+                max_chats = 20
+
+            if wanted:
+                # Keep requested chats, but still order old->new by last activity.
+                all_chats = get_chats_by_last_activity(limit=1000000)
+                by_id = {c["chat_id"]: c for c in all_chats}
+                chats = [by_id[cid] for cid in wanted if cid in by_id]
+                # Requested but unknown (no chunks yet) — still show stub.
+                known = set(by_id)
+                for cid in wanted:
+                    if cid not in known:
+                        try:
+                            nm = get_user_display_name(cid)
+                        except Exception:
+                            nm = cid[:8]
+                        chats.append({"chat_id": cid, "chat_name": nm,
+                                      "last_at": "", "count": 0})
+            else:
+                chats = get_chats_by_last_activity(limit=max_chats)
+
+            blocks: list[str] = []
+            picked: list[dict] = []
+            for ch in chats:
+                cid = str(ch["chat_id"])
+                cname = ch.get("chat_name") or cid[:8]
+                try:
+                    chunks = get_recent_chunks(cid, limit=limit)
+                except Exception:
+                    chunks = []
+                msgs: list[str] = []
+                for r in chunks or []:
+                    ts = (r.get("time_start") or "")[:16].replace("T", " ")
+                    uid = str(r.get("user_id") or "")
+                    try:
+                        who = get_user_display_name(uid) if uid else cname
+                    except Exception:
+                        who = cname
+                    text = (r.get("content") or "").strip()
+                    if not text:
+                        continue
+                    # No truncation — full text.
+                    msgs.append(f"[{ts}] {who}: {text}" if ts else f"{who}: {text}")
+                picked.append({"chat_id": cid, "chat_name": cname,
+                               "last_at": ch.get("last_at") or "",
+                               "messages": msgs})
+                if msgs:
+                    body = "\n".join(msgs)
+                else:
+                    body = "(пока пусто)"
+                last = (ch.get("last_at") or "")[:16].replace("T", " ")
+                header = f"Чат «{cname}» ({cid})"
+                if last:
+                    header += f" — последнее сообщение {last}:"
+                else:
+                    header += ":"
+                blocks.append(f"{header}\n{body}")
+
+            context_addon = "\n\n".join(blocks) if blocks else "[нет доступных чатов]"
+            print(f"[ToolExecutor] peek_recent: {len(picked)} чатов x до {limit}")
+            return {
+                "type": "peek_recent_chats",
+                "status": "peeked",
+                "limit_per_chat": limit,
+                "chats": picked,
+                "context_addon": context_addon,
+            }
+        except Exception as e:
+            return {"type": "peek_recent_chats", "status": "error",
+                    "error": str(e)}

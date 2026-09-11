@@ -22,6 +22,7 @@ TOOL_DESCRIPTIONS = {
     "write_diary": "Write a diary entry (day_entries / reflection_entries)",
     "update_diary": "Update an existing diary entry by its ID",
     "presence": "Presence tools: enter_dialog / enter_rest / enter_working / start_sleep",
+    "peek_recent": "Proactive-only: view recent messages across chats at once",
 }
 
 
@@ -42,7 +43,7 @@ async def get_tools():
 @router.put("/api/tools/{tool_name}", response_model=ToolStatus)
 async def update_tool(tool_name: str, req: ToolUpdateRequest):
     """Enable or disable a specific tool."""
-    valid_tools = {"search_memory", "send_message", "silence", "write_diary", "update_diary", "presence"}
+    valid_tools = {"search_memory", "send_message", "silence", "write_diary", "update_diary", "presence", "peek_recent"}
     if tool_name not in valid_tools:
         raise HTTPException(status_code=404, detail=f"Unknown tool: {tool_name}")
 

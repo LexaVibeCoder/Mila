@@ -247,6 +247,46 @@ def get_recent_media(chat_id: str, kinds: list[str] | tuple[str, ...] = ("photo"
     finally:
         conn.close()
 
+
+def detach_media_by_chunk_ids(chunk_ids: list[str]) -> list[str]:
+    """Clear media_path for given chunks, return detached file paths.
+
+    Used by sleep summarization: bytes of summarized-away photos/audios
+    are dropped so get_recent_media no longer re-attaches them to later
+    turns. Text placeholders and summaries stay untouched; the caller
+    deletes the returned files from disk (including converted twins).
+    """
+    ids = [c for c in (chunk_ids or []) if c]
+    if not ids:
+        return []
+    conn = get_conn()
+    try:
+        try:
+            placeholders = ",".join("?" for _ in ids)
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT chunk_id, media_path FROM chunks "
+                f"WHERE chunk_id IN ({placeholders}) "
+                f"AND media_path IS NOT NULL AND media_path != ''",
+                ids,
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            if not rows:
+                return []
+            paths = [r.get("media_path") for r in rows if r.get("media_path")]
+            found_ids = [r["chunk_id"] for r in rows]
+            ph2 = ",".join("?" for _ in found_ids)
+            conn.execute(
+                f"UPDATE chunks SET media_path=NULL WHERE chunk_id IN ({ph2})",
+                found_ids,
+            )
+            conn.commit()
+            return paths
+        except sqlite3.OperationalError:
+            return []
+    finally:
+        conn.close()
+
 def update_user_name(user_id: str, user_name: str):
     conn = get_conn()
     try:
@@ -323,6 +363,70 @@ def get_all_chat_ids_from_chunks() -> list[str]:
     try:
         cur = conn.execute("SELECT DISTINCT chat_id FROM chunks")
         return [r["chat_id"] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_chats_by_last_activity(limit: int = 20) -> list[dict]:
+    """Chats sorted by last activity, oldest first (for proactive).
+
+    Returns [{chat_id, chat_name, last_at, count}] ordered ASC by last_at,
+    i.e. stale chats in the middle of context, fresh ones at the bottom.
+    No message truncation happens here — only chat-level limiting.
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT chat_id, MAX(time_start) AS last_at, COUNT(*) AS cnt "
+            "FROM chunks GROUP BY chat_id ORDER BY last_at ASC"
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    # Keep only the freshest `limit` chats when there are too many,
+    # preserving old->new order.
+    if limit and len(rows) > limit:
+        rows = rows[-limit:]
+    out = []
+    for r in rows:
+        chat_id = str(r.get("chat_id") or "")
+        if not chat_id:
+            continue
+        name = ""
+        try:
+            conn2 = get_conn()
+            try:
+                cur2 = conn2.execute(
+                    "SELECT chat_name FROM chats WHERE chat_id=?", (chat_id,))
+                row2 = cur2.fetchone()
+                if row2 and row2["chat_name"]:
+                    name = row2["chat_name"]
+            finally:
+                conn2.close()
+        except Exception:
+            name = ""
+        if not name:
+            try:
+                name = get_user_display_name(chat_id)
+            except Exception:
+                name = chat_id[:8]
+        out.append({
+            "chat_id": chat_id,
+            "chat_name": name or chat_id[:8],
+            "last_at": r.get("last_at") or "",
+            "count": int(r.get("cnt") or 0),
+        })
+    return out
+
+
+def get_global_last_activity() -> str | None:
+    """Newest chunks.time_start across all chats (any side)."""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT MAX(time_start) AS last_at FROM chunks")
+        row = cur.fetchone()
+        return row["last_at"] if row else None
     finally:
         conn.close()
 

@@ -129,6 +129,16 @@ class RuntimeConfig:
                 "cooldown_minutes": 27,
                 "max_chats": 20,
                 "default_peek_limit": 10,
+                # One-shot manual trigger (Observatory writes, bot consumes).
+                "command": {
+                    "run_now": False,
+                    "dry_run": False,
+                    "force_action": None,
+                    "needs_override": {},
+                    "requested_at": None,
+                },
+                # Last run outcome (bot writes, Observatory reads).
+                "last_run": None,
             },
             # System
             "system": {

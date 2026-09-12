@@ -504,7 +504,7 @@ class ToolExecutor:
         return {"type": "enter_working", "state": state, "status": "switched"}
 
     async def _handle_start_sleep(self, params: Dict) -> Dict:
-        from core.presence import enter_sleep_note
+        from core.presence import enter_sleep_note, get_presence
         try:
             duration = int(params.get("duration_minutes", 0) or 0)
         except (TypeError, ValueError):
@@ -514,13 +514,34 @@ class ToolExecutor:
                     "error": "Missing duration_minutes (how long to sleep)"}
         duration = max(1, min(duration, 12 * 60))
         note = str(params.get("note", "") or "")
+        prev = get_presence()
         enter_sleep_note(note or f"{duration} min")
         try:
-            from core.sleep.manager import start_sleep
+            from core.sleep.manager import start_sleep, is_sleeping
             result = await start_sleep(duration_minutes=duration,
                                        triggered_by="mila_tool")
         except Exception as e:
-            return {"type": "start_sleep", "status": "error", "error": str(e)}
+            result = {"success": False, "message": str(e)}
+        if not result.get("success"):
+            # Refused (e.g. forced_awake) → don't leave presence stuck
+            # in sleep while Mila is actually awake; restore previous state.
+            try:
+                from core.sleep.manager import is_sleeping as _is_sleeping
+                if not _is_sleeping():
+                    if prev.get("state") == "dialog" and prev.get("focus_chat_id"):
+                        from core.presence import enter_dialog as _ed
+                        _ed(str(prev["focus_chat_id"]),
+                            prev.get("focus_user_name"), "sleep refused")
+                    elif prev.get("state") == "working":
+                        from core.presence import enter_working as _ew
+                        _ew(prev.get("note", ""))
+                    else:
+                        from core.presence import enter_rest as _er
+                        _er("sleep refused")
+            except Exception:
+                pass
+            return {"type": "start_sleep", "status": "error",
+                    "error": result.get("message", "sleep refused")}
         print(f"[Presence] → sleep for {duration} min")
         return {"type": "start_sleep", "duration_minutes": duration,
                 "sleep_result": result, "status": "sleeping"}

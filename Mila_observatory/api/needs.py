@@ -76,6 +76,65 @@ async def run_state_agent():
     return InferenceResult(**result)
 
 
+class TriggerRequest(BaseModel):
+    """One-shot proactive run on demand (executed by the bot process).
+
+    - dry_run=True: only describe what WOULD happen (no LLM turn, no send,
+      no sleep) — safe simulation of each action branch.
+    - force_action: skip inference and route this action through the real
+      handler (wait / plan_day / sleep / write_to_user).
+    - needs_override: same fields as NeedsOverride, applied to live needs
+      before inference (bot side).
+    The bot picks the command up within ~10s and reports to last_run.
+    """
+    dry_run: bool = False
+    force_action: Optional[str] = None
+    needs_override: Optional[NeedsOverride] = None
+
+
+class TriggerState(BaseModel):
+    pending: bool
+    command: Optional[dict] = None
+    last_run: Optional[dict] = None
+
+
+@router.post("/api/state-agent/trigger", response_model=TriggerState)
+async def trigger_proactive(req: TriggerRequest):
+    from Mila_observatory.runtime import runtime_config
+    from Mila_observatory.api.dashboard import add_event
+    if req.force_action is not None and req.force_action not in ACTIONS:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422,
+                            detail=f"Unknown action: {req.force_action}")
+    cmd = {
+        "run_now": True,
+        "dry_run": req.dry_run,
+        "force_action": req.force_action,
+        "needs_override": (req.needs_override.model_dump(exclude_none=True)
+                           if req.needs_override else {}),
+        "requested_at": datetime.now().isoformat(),
+    }
+    runtime_config.set("proactive.command", cmd, updated_by="observatory")
+    add_event("proactive_trigger",
+              f"Manual trigger (dry={req.dry_run}, action={req.force_action or 'auto'})")
+    return TriggerState(
+        pending=True,
+        command=cmd,
+        last_run=runtime_config.get("proactive.last_run"),
+    )
+
+
+@router.get("/api/state-agent/trigger", response_model=TriggerState)
+async def get_trigger_state():
+    from Mila_observatory.runtime import runtime_config
+    cmd = runtime_config.get("proactive.command", {}) or {}
+    return TriggerState(
+        pending=bool(cmd.get("run_now")),
+        command=cmd or None,
+        last_run=runtime_config.get("proactive.last_run"),
+    )
+
+
 @router.post("/api/state-agent/needs", response_model=StateAgentStatus)
 async def override_needs(override: NeedsOverride):
     tracker = get_tracker()

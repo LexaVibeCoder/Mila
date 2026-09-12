@@ -467,3 +467,29 @@ export const getStateAgentStatus = () => request<StateAgentStatus>('/state-agent
 export const runStateAgent = () => request<StateAgentInference>('/state-agent/run', { method: 'POST' });
 export const overrideNeeds = (data: NeedsOverride) =>
   request<StateAgentStatus>('/state-agent/needs', { method: 'POST', body: JSON.stringify(data) });
+
+export interface ProactiveTriggerRequest {
+  dry_run: boolean;
+  force_action: string | null;
+  needs_override?: NeedsOverride | null;
+}
+
+export interface ProactiveLastRun {
+  at: string;
+  action: string;
+  probabilities: Record<string, number>;
+  forced: boolean;
+  dry_run: boolean;
+  idle_seconds: number;
+  result: string;
+}
+
+export interface ProactiveTriggerState {
+  pending: boolean;
+  command: Record<string, unknown> | null;
+  last_run: ProactiveLastRun | null;
+}
+
+export const triggerProactive = (data: ProactiveTriggerRequest) =>
+  request<ProactiveTriggerState>('/state-agent/trigger', { method: 'POST', body: JSON.stringify(data) });
+export const getTriggerState = () => request<ProactiveTriggerState>('/state-agent/trigger');

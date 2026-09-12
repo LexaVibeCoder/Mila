@@ -3,7 +3,10 @@ import {
   getStateAgentStatus,
   runStateAgent,
   overrideNeeds,
+  triggerProactive,
+  getTriggerState,
   StateAgentStatus,
+  ProactiveTriggerState,
 } from '../api/client';
 
 const styles: Record<string, any> = {
@@ -102,6 +105,10 @@ export default function StateAgentControl() {
   const [overrideDialog, setOverrideDialog] = useState<boolean | null>(null);
   const [useOverrides, setUseOverrides] = useState(false);
 
+  const [forceAction, setForceAction] = useState<string>('auto');
+  const [triggerState, setTriggerState] = useState<ProactiveTriggerState | null>(null);
+  const [triggerLoading, setTriggerLoading] = useState(false);
+
   const fetchStatus = useCallback(async () => {
     try {
       const s = await getStateAgentStatus();
@@ -111,15 +118,56 @@ export default function StateAgentControl() {
     }
   }, []);
 
+  const fetchTrigger = useCallback(async () => {
+    try {
+      const t = await getTriggerState();
+      setTriggerState(t);
+    } catch {
+      // silent
+    }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 5000);
+    fetchTrigger();
+    const interval = setInterval(() => { fetchStatus(); fetchTrigger(); }, 5000);
     return () => clearInterval(interval);
-  }, [fetchStatus]);
+  }, [fetchStatus, fetchTrigger]);
 
   const showSuccess = (msg: string) => {
     setSuccessMsg(msg);
     setTimeout(() => setSuccessMsg(''), 4000);
+  };
+
+  const buildOverrideData = (): Record<string, unknown> | null => {
+    if (!useOverrides) return null;
+    const data: Record<string, unknown> = {};
+    if (overrideFatigue !== null) data.fatigue = overrideFatigue;
+    if (overrideSocial !== null) data.need_social = overrideSocial;
+    if (overrideBoredom !== null) data.boredom = overrideBoredom;
+    if (overrideSeconds) data.seconds_since_last_msg = parseFloat(overrideSeconds);
+    if (overrideHour) data.current_hour = parseInt(overrideHour);
+    if (overrideDialog !== null) data.in_active_dialog = overrideDialog;
+    return data;
+  };
+
+  const handleTrigger = async (dryRun: boolean) => {
+    try {
+      setError('');
+      setTriggerLoading(true);
+      const t = await triggerProactive({
+        dry_run: dryRun,
+        force_action: forceAction === 'auto' ? null : forceAction,
+        needs_override: buildOverrideData(),
+      });
+      setTriggerState(t);
+      showSuccess(dryRun ? 'Dry-run queued — bot picks it up within ~10s' : 'Trigger queued — bot picks it up within ~10s');
+      await fetchTrigger();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to trigger');
+    } finally {
+      setTriggerLoading(false);
+    }
   };
 
   const handleRunInference = async () => {
@@ -127,13 +175,7 @@ export default function StateAgentControl() {
       setError('');
       setLoading(true);
       if (useOverrides) {
-        const data: Record<string, unknown> = {};
-        if (overrideFatigue !== null) data.fatigue = overrideFatigue;
-        if (overrideSocial !== null) data.need_social = overrideSocial;
-        if (overrideBoredom !== null) data.boredom = overrideBoredom;
-        if (overrideSeconds) data.seconds_since_last_msg = parseFloat(overrideSeconds);
-        if (overrideHour) data.current_hour = parseInt(overrideHour);
-        if (overrideDialog !== null) data.in_active_dialog = overrideDialog;
+        const data = buildOverrideData() || {};
         const result = await overrideNeeds(data);
         setStatus(result);
       } else {
@@ -282,6 +324,97 @@ export default function StateAgentControl() {
           </div>
         </div>
       )}
+
+      {/* ── Trigger & Simulate (real bot run, no 27-min wait) ── */}
+      <div style={styles.section}>
+        <h2 style={styles.sectionTitle}>⚡ Trigger &amp; Simulate</h2>
+        <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+          Запускает настоящий проактивный проход в боте (тот же код, что срабатывает после 27 мин тишины).
+          Idle/кулдаун не проверяются, защита от сна и чужого диалога — действует.
+          {useOverrides ? ' Входные needs — из слайдеров выше.' : ' Входные needs — живые данные бота.'}
+        </div>
+
+        <div style={{ ...styles.row, marginBottom: '12px' }}>
+          <span style={styles.label}>Форсировать действие:</span>
+          <select
+            value={forceAction}
+            onChange={e => setForceAction(e.target.value)}
+            style={{
+              padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)',
+              background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '14px',
+            }}
+          >
+            <option value="auto">Auto (модель решает)</option>
+            <option value="write_to_user">✍️ write_to_user</option>
+            <option value="sleep">💤 sleep</option>
+            <option value="wait">⏳ wait</option>
+            <option value="plan_day">📋 plan_day</option>
+          </select>
+        </div>
+
+        <div style={styles.row}>
+          <button
+            style={{ ...styles.btn, ...styles.btnPrimary, ...(triggerLoading ? styles.btnDisabled : {}) }}
+            disabled={triggerLoading}
+            onClick={() => handleTrigger(false)}
+          >
+            {triggerLoading ? '⏳ Queued...' : '▶️ Trigger now'}
+          </button>
+          <button
+            style={{ ...styles.btn, ...styles.btnOutline, ...(triggerLoading ? styles.btnDisabled : {}) }}
+            disabled={triggerLoading}
+            onClick={() => handleTrigger(true)}
+          >
+            🔍 Dry-run
+          </button>
+          <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+            Dry-run безопасен: только описывает, что бы произошло.
+          </span>
+        </div>
+        <div style={{ fontSize: '12px', color: 'var(--warning)', marginTop: '8px' }}>
+          ⚠️ Trigger now — реальное действие: write_to_user напишет человеку, sleep усыпит на 8ч.
+        </div>
+
+        <div style={styles.divider}></div>
+
+        {/* Trigger status */}
+        {triggerState?.pending && (
+          <div style={{ fontSize: '13px', color: 'var(--accent)', marginBottom: '8px' }}>
+            ⏳ Команда в очереди — бот подхватит в течение ~10с...
+          </div>
+        )}
+        {triggerState?.last_run ? (
+          <div style={{ fontSize: '13px' }}>
+            <div style={{ ...styles.row, marginBottom: '8px' }}>
+              <span style={{
+                ...styles.badge,
+                ...(triggerState.last_run.dry_run ? styles.badgeWarning : styles.badgeActive),
+              }}>
+                {triggerState.last_run.dry_run ? '🔍 DRY-RUN' : '▶️ REAL'}
+              </span>
+              <span style={{
+                ...styles.actionBadge, fontSize: '14px', padding: '4px 14px',
+                color: ACTION_INFO[triggerState.last_run.action]?.color ?? 'var(--text-primary)',
+                background: ACTION_INFO[triggerState.last_run.action]?.bg ?? 'var(--bg-primary)',
+              }}>
+                {ACTION_INFO[triggerState.last_run.action]?.label ?? triggerState.last_run.action}
+              </span>
+              <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+                {new Date(triggerState.last_run.at).toLocaleString()}
+                {' • '}idle {formatTime(triggerState.last_run.idle_seconds)}
+                {triggerState.last_run.forced ? ' • forced' : ' • scheduled'}
+              </span>
+            </div>
+            <div style={{ color: 'var(--text-primary)' }}>{triggerState.last_run.result}</div>
+          </div>
+        ) : (
+          !triggerState?.pending && (
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Запусков пока не было.
+            </div>
+          )
+        )}
+      </div>
 
       {/* ── Controls ────────────────────────────────────────── */}
       <div style={styles.section}>

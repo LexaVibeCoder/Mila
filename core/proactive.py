@@ -26,6 +26,8 @@ _LEADING_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s
 _proactive_task: asyncio.Task | None = None
 _last_run_ts: float = 0.0
 
+VALID_ACTIONS = ("wait", "sleep", "write_to_user", "plan_day")
+
 
 def _cfg(key: str, default: Any) -> Any:
     try:
@@ -294,6 +296,116 @@ async def run_proactive_turn(bot) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def _apply_needs_override(needs: dict, override: dict | None) -> dict:
+    """Apply Observatory-provided needs values onto live needs (simulation)."""
+    if not override:
+        return needs
+    out = dict(needs)
+    for k in ("fatigue", "need_social", "boredom", "seconds_since_last_msg",
+              "current_hour", "in_active_dialog"):
+        if override.get(k) is not None:
+            out[k] = override[k]
+    return out
+
+
+def _record_last_run(entry: dict) -> None:
+    """Persist the last run outcome for the Observatory UI (other process)."""
+    try:
+        from Mila_observatory.runtime import runtime_config
+        runtime_config.set("proactive.last_run", entry, updated_by="bot")
+    except Exception:
+        pass
+
+
+async def _handle_action(bot, action: str, probs: dict, idle: float,
+                         needs: dict, dry_run: bool = False,
+                         forced: bool = False) -> dict:
+    """Single routing point for scheduled AND forced runs (real or dry-run).
+
+    dry_run only describes what WOULD happen: no LLM turn, no send, no sleep.
+    """
+    summary = ""
+    if action == "write_to_user":
+        if dry_run:
+            try:
+                from core.db import get_chats_by_last_activity
+                n = len(get_chats_by_last_activity(
+                    limit=int(_cfg("max_chats", 20) or 20)))
+                summary = f"dry-run: would run proactive turn ({n} chats)"
+            except Exception:
+                summary = "dry-run: would run proactive turn (chat list unavailable)"
+            print(f"[Proactive] {summary}")
+            try:
+                from Mila_observatory.api.dashboard import add_event
+                add_event("proactive", f"dry-run write_to_user (idle {idle:.0f}s)")
+            except Exception:
+                pass
+            outcome = {"success": True, "dry_run": True}
+        else:
+            try:
+                from Mila_observatory.api.dashboard import add_event
+                add_event("proactive", f"state_agent → write_to_user (idle {idle:.0f}s)")
+            except Exception:
+                pass
+            outcome = await run_proactive_turn(bot)
+            if outcome.get("success") and outcome.get("reply_texts"):
+                summary = (f"sent {len(outcome['reply_texts'])} bubble(s) "
+                           f"→ {outcome.get('reply_chat_id')}")
+            else:
+                summary = (f"no send "
+                           f"({outcome.get('silence_reason') or outcome.get('error') or 'silence'})")
+    elif action == "sleep":
+        minutes = int(_cfg("sleep_minutes", 480) or 480)
+        if dry_run:
+            summary = f"dry-run: would sleep {minutes} мин"
+            print(f"[Proactive] {summary}")
+            outcome = {"success": True, "dry_run": True}
+        else:
+            print(f"[Proactive] state_agent → sleep {minutes} мин")
+            try:
+                # presence note is set centrally by start_sleep; check the
+                # result — a refused sleep must not leave presence stuck.
+                from core.sleep.manager import start_sleep
+                res = await start_sleep(duration_minutes=minutes,
+                                        triggered_by="state_agent")
+                if res.get("success"):
+                    summary = f"sleep started ({minutes} мин)"
+                    try:
+                        from Mila_observatory.api.dashboard import add_event
+                        add_event("sleep", f"Proactive sleep {minutes} мин (state_agent)")
+                    except Exception:
+                        pass
+                else:
+                    summary = f"sleep refused: {res.get('message')}"
+                    print(f"[Proactive] {summary}")
+                outcome = res
+            except Exception as e:
+                summary = f"sleep failed: {e}"
+                print(f"[Proactive] {summary}")
+                outcome = {"success": False, "error": str(e)}
+    else:
+        # wait / plan_day → stub for now.
+        summary = f"stub ({action}): nothing happens"
+        print(f"[Proactive] state_agent → {action} (stub, nothing happens)")
+        try:
+            from Mila_observatory.api.dashboard import add_event
+            add_event("proactive", f"state_agent → {action} (stub)")
+        except Exception:
+            pass
+        outcome = {"success": True, "stub": True}
+
+    _record_last_run({
+        "at": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "probabilities": probs or {},
+        "forced": forced,
+        "dry_run": dry_run,
+        "idle_seconds": round(idle),
+        "result": summary,
+    })
+    return outcome
+
+
 async def _tick(bot) -> None:
     global _last_run_ts
     try:
@@ -339,50 +451,116 @@ async def _tick(bot) -> None:
         action = (result or {}).get("action", "wait")
         probs = (result or {}).get("probabilities", {})
         print(f"[Proactive] idle {idle:.0f}s → state_agent: {action} {probs}")
-
-        if action == "write_to_user":
-            try:
-                from Mila_observatory.api.dashboard import add_event
-                add_event("proactive", f"state_agent → write_to_user (idle {idle:.0f}s)")
-            except Exception:
-                pass
-            await run_proactive_turn(bot)
-        elif action == "sleep":
-            minutes = int(_cfg("sleep_minutes", 480) or 480)
-            print(f"[Proactive] state_agent → sleep {minutes} мин")
-            try:
-                from core.presence import enter_sleep_note
-                enter_sleep_note(f"state_agent: {minutes} min")
-                from core.sleep.manager import start_sleep
-                await start_sleep(duration_minutes=minutes,
-                                  triggered_by="state_agent")
-                try:
-                    from Mila_observatory.api.dashboard import add_event
-                    add_event("sleep", f"Proactive sleep {minutes} мин (state_agent)")
-                except Exception:
-                    pass
-            except Exception as e:
-                print(f"[Proactive] sleep failed: {e}")
-        else:
-            # wait / plan_day → stub for now.
-            print(f"[Proactive] state_agent → {action} (stub, nothing happens)")
-            try:
-                from Mila_observatory.api.dashboard import add_event
-                add_event("proactive", f"state_agent → {action} (stub)")
-            except Exception:
-                pass
+        await _handle_action(bot, action, probs, idle, needs)
     except Exception as e:
         print(f"[Proactive] tick error: {e}")
 
 
+def _take_command() -> dict | None:
+    """Consume a one-shot trigger written by Observatory (another process).
+
+    The JSON runtime config is the bridge: Observatory sets
+    proactive.command.run_now, the bot clears it and executes. Returns the
+    command dict or None.
+    """
+    try:
+        from Mila_observatory.runtime import runtime_config
+        cmd = runtime_config.get("proactive.command", {}) or {}
+        if not cmd.get("run_now"):
+            return None
+        runtime_config.set("proactive.command.run_now", False, updated_by="bot")
+        return {
+            "dry_run": bool(cmd.get("dry_run", False)),
+            "force_action": cmd.get("force_action"),
+            "needs_override": cmd.get("needs_override") or {},
+        }
+    except Exception:
+        return None
+
+
+async def _run_forced(bot, cmd: dict) -> None:
+    """Immediate run on Observatory demand: bypasses idle/cooldown, keeps
+    the safety guards (sleeping / presence). Reports the outcome for the UI."""
+    global _last_run_ts
+    dry_run = bool(cmd.get("dry_run"))
+    force_action = cmd.get("force_action")
+    if force_action is not None and force_action not in VALID_ACTIONS:
+        print(f"[Proactive] forced: unknown action {force_action!r} — ignored")
+        return
+
+    def _skip(reason: str) -> None:
+        print(f"[Proactive] forced run skipped: {reason}")
+        _record_last_run({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "action": force_action or "unknown",
+            "probabilities": {},
+            "forced": True,
+            "dry_run": dry_run,
+            "idle_seconds": round(get_global_idle_seconds()),
+            "result": f"skipped: {reason}",
+        })
+
+    try:
+        from core.sleep.manager import is_sleeping, is_committing
+        if is_sleeping() or is_committing():
+            _skip("Mila is sleeping")
+            return
+    except Exception:
+        pass
+    try:
+        from core.presence import get_presence
+        st = get_presence().get("state", "rest")
+    except Exception:
+        st = "rest"
+    if st not in ("rest", "working"):
+        _skip(f"presence is {st} (needs rest/working)")
+        return
+
+    try:
+        from core.needs.tracker import get_tracker
+        tracker = get_tracker()
+        needs = _apply_needs_override(tracker.get_needs(force=True),
+                                      cmd.get("needs_override"))
+        if force_action:
+            action = force_action
+            probs = {a: 1.0 if a == force_action else 0.0 for a in VALID_ACTIONS}
+        else:
+            result = tracker.run_inference(needs)
+            action = (result or {}).get("action", "wait")
+            probs = (result or {}).get("probabilities", {})
+    except Exception as e:
+        print(f"[Proactive] forced run failed: {e}")
+        return
+
+    idle = get_global_idle_seconds()
+    print(f"[Proactive] forced run (dry={dry_run}): {action} {probs}")
+    await _handle_action(bot, action, probs, idle, needs,
+                         dry_run=dry_run, forced=True)
+    if not dry_run:
+        _last_run_ts = time.monotonic()
+
+
 async def _loop(bot) -> None:
-    interval = float(_cfg("check_interval_seconds", 60) or 60)
+    try:
+        interval = float(_cfg("check_interval_seconds", 60) or 60)
+    except Exception:
+        interval = 60.0
     interval = max(10.0, min(interval, 3600.0))
     print(f"[Proactive] scheduler started "
           f"(idle {_cfg('idle_minutes', 27)} мин, check every {interval:.0f}s)")
+    last_eval = 0.0
     while True:
         try:
-            await _tick(bot)
+            # One-shot Observatory commands are polled often (10s) so a
+            # manual trigger fires without waiting for the idle interval.
+            cmd = _take_command()
+            if cmd is not None:
+                await _run_forced(bot, cmd)
+            else:
+                now = time.monotonic()
+                if now - last_eval >= interval:
+                    last_eval = now
+                    await _tick(bot)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -392,7 +570,7 @@ async def _loop(bot) -> None:
             interval = max(10.0, min(interval, 3600.0))
         except Exception:
             pass
-        await asyncio.sleep(interval)
+        await asyncio.sleep(10)
 
 
 def start_proactive_scheduler(bot) -> None:

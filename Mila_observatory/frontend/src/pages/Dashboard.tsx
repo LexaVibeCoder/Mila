@@ -50,24 +50,32 @@ export default function Dashboard() {
     ? `${Math.floor(status.uptime / 3600)}h ${Math.floor((status.uptime % 3600) / 60)}m`
     : 'N/A';
 
-  const isSleeping = sleepStatus?.state === 'sleeping';
-  const isCommitting = sleepStatus?.state === 'committing';
-  const sleepStageLabel = sleepStatus?.current_stage || 'idle';
-  const sleepProgress = sleepStatus?.progress_pct || 0;
+  // Sleep is shown only here, in Mila's card (single source of truth).
+  const sleepState = sleepStatus?.state;
+  const sleepActive = sleepState === 'sleeping' || sleepState === 'committing';
 
   const presence: PresenceInfo | null | undefined = status.presence;
   const pState = presence?.state || 'rest';
+  const sleeping = sleepActive || pState === 'sleep';
   const pFocus = presence?.focus_user_name || (presence?.focus_chat_id ? `чат ${presence.focus_chat_id.slice(0, 12)}` : '');
+  const sleepRemaining = sleepStatus?.remaining_seconds != null
+    ? `осталось ${Math.floor(sleepStatus.remaining_seconds / 3600)}ч ${Math.floor((sleepStatus.remaining_seconds % 3600) / 60)}м`
+    : sleepStatus?.scheduled_end_at
+      ? `до ${new Date(sleepStatus.scheduled_end_at).toLocaleString()}`
+      : '';
+  const sleepStage = sleepStatus?.current_stage && sleepStatus.current_stage !== 'idle'
+    ? ` • этап: ${sleepStatus.current_stage} (${(sleepStatus.progress_pct || 0).toFixed(0)}%)`
+    : '';
   const presenceBadge =
+    sleeping ? '💤 Спит' :
     pState === 'dialog' ? '💬 Диалог' :
-    pState === 'working' ? '✍️ Занята' :
-    pState === 'sleep' ? '💤 К сну' : '😌 Отдыхает';
+    pState === 'working' ? '✍️ Занята' : '😌 Отдыхает';
   const presenceSub =
+    sleeping ? `спит${sleepStage}${sleepRemaining ? ` • ${sleepRemaining}` : ''}` :
     pState === 'dialog' && pFocus ? `с ${pFocus}` :
     presence?.note ? presence.note :
     pState === 'dialog' ? 'диалог' :
-    pState === 'working' ? 'свои дела' :
-    pState === 'sleep' ? 'намерение спать' : 'состояние по умолчанию';
+    pState === 'working' ? 'свои дела' : 'состояние по умолчанию';
 
   return (
     <div style={styles.page}>
@@ -89,8 +97,8 @@ export default function Dashboard() {
           <div>
             <span style={{
               ...styles.badge,
-              background: pState === 'dialog' ? 'rgba(116, 185, 255, 0.2)' : pState === 'working' ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
-              color: pState === 'dialog' ? '#74b9ff' : pState === 'working' ? '#fdcb6e' : 'var(--success)',
+              background: sleeping ? 'rgba(108, 92, 231, 0.2)' : pState === 'dialog' ? 'rgba(116, 185, 255, 0.2)' : pState === 'working' ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
+              color: sleeping ? '#a29bfe' : pState === 'dialog' ? '#74b9ff' : pState === 'working' ? '#fdcb6e' : 'var(--success)',
             }}>
               {presenceBadge}
             </span>
@@ -110,21 +118,6 @@ export default function Dashboard() {
           <div style={styles.cardSub}>Total chunks stored</div>
         </div>
 
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Sleep</div>
-          <div>
-            <span style={{
-              ...styles.badge,
-              background: isSleeping ? 'rgba(116, 185, 255, 0.2)' : isCommitting ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
-              color: isSleeping ? '#74b9ff' : isCommitting ? '#fdcb6e' : 'var(--success)',
-            }}>
-              {isSleeping ? '💤 Sleeping' : isCommitting ? '💾 Committing' : '✨ Awake'}
-            </span>
-          </div>
-          <div style={styles.cardSub}>
-            {isSleeping ? `Stage: ${sleepStageLabel} (${sleepProgress.toFixed(0)}%)` : 'Mila is awake'}
-          </div>
-        </div>
       </div>
 
       <div style={styles.section}>

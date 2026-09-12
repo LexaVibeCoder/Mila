@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
 from config import settings
@@ -28,17 +28,72 @@ _sleep_duration = None
 _auto_sleep_task = None
 
 
+def _parse_iso(raw) -> datetime | None:
+    """Parse DB timestamps (naive → assume UTC). None on failure."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _seconds_until_deadline(deadline_iso: str | None) -> float | None:
+    """Wall-clock seconds until scheduled_end_at. None = indefinite/no deadline."""
+    dt = _parse_iso(deadline_iso)
+    if dt is None:
+        return None
+    return (dt - datetime.now(timezone.utc)).total_seconds()
+
+
+def _presence_to_rest(note: str) -> None:
+    """Best-effort presence sync on wake: sleep ended → back to rest."""
+    try:
+        from core.presence import get_presence, enter_rest
+        if get_presence().get("state") == "sleep":
+            enter_rest(note)
+    except Exception:
+        pass
+
+
+def _ensure_presence_sleep(note: str) -> None:
+    """Best-effort presence sync on sleep start (keeps a custom note if set)."""
+    try:
+        from core.presence import get_presence, enter_sleep_note
+        if get_presence().get("state") != "sleep":
+            enter_sleep_note(note)
+    except Exception:
+        pass
+
+
+async def _resume_sleep_until_deadline(session_id: str, deadline_iso: str):
+    """Crash-resume for the dormant phase: processes already done → wait
+    wall-clock until the deadline, then commit. No timer to freeze: the
+    deadline lives in the DB."""
+    try:
+        secs = _seconds_until_deadline(deadline_iso)
+        if secs is not None and secs > 0:
+            print(f"[Recovery] Resuming sleep until {deadline_iso} ({secs:.0f}s left)")
+            await asyncio.sleep(secs)
+        cur = get_current_state()
+        if cur.get("state") == "sleeping" and cur.get("session_id") == session_id:
+            print("[Recovery] Deadline reached → committing resumed sleep")
+            await commit_all(session_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[Recovery] resume error: {e}")
+
+
 async def recover_from_crash() -> bool:
-    global _current_session_id, _sleep_in_progress, _sleep_start_time
+    global _current_session_id, _sleep_in_progress, _sleep_start_time, _sleep_duration
     _ensure_sleep_tables()
     current = get_current_state()
     state = current.get("state", "awake")
     session_id = current.get("session_id")
-    # Restore in-memory session so queue_incoming_message doesn't drop
-    # messages right after a restart while DB still says sleeping.
-    if state == "sleeping" and session_id:
-        _current_session_id = session_id
-        _sleep_in_progress = True
 
     if state == "awake":
         return False
@@ -50,6 +105,45 @@ async def recover_from_crash() -> bool:
     print(f"{'='*60}\n")
 
     if state == "sleeping":
+        # Wall-clock deadline from the DB is authoritative, not the
+        # in-memory asyncio timer (which dies with the process).
+        # Dormant phase marker: execute_sleep sets stage idle/90% right
+        # before the long wait; anything else means the crash hit mid
+        # processing → roll back (safe), otherwise resume waiting.
+        stage = current.get("current_stage", "")
+        try:
+            progress = float(current.get("progress_pct") or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        dormant = (stage == SleepStage.IDLE.value) and progress >= 89.0
+        scheduled_end = current.get("scheduled_end_at")
+        secs_left = _seconds_until_deadline(scheduled_end)
+
+        if dormant and (secs_left is None or secs_left > 0):
+            # Processes already done → keep staged ops, wait for deadline.
+            _current_session_id = session_id
+            _sleep_in_progress = True
+            started = _parse_iso(current.get("started_at"))
+            _sleep_start_time = started.timestamp() if started else time.time()
+            end = _parse_iso(scheduled_end)
+            if started is not None and end is not None:
+                _sleep_duration = max(0.0, (end - started).total_seconds() / 60.0)
+            else:
+                _sleep_duration = None
+            _ensure_presence_sleep(f"resumed {(session_id or '')[:8]}")
+            if secs_left is not None:
+                asyncio.create_task(_resume_sleep_until_deadline(session_id, scheduled_end))
+                print(f"[Recovery] Dormant sleep resumed ({secs_left:.0f}s until deadline)")
+            else:
+                print("[Recovery] Indefinite sleep resumed (until manual wake)")
+            return True
+
+        if dormant and secs_left is not None and secs_left <= 0:
+            # Deadline passed while offline → finish the sleep.
+            print("[Recovery] Deadline passed while offline → committing")
+            await commit_all(session_id)
+            return True
+
         print("[Recovery] Sleep was in progress → rolling back all changes")
         await rollback_all(session_id)
         print("[Recovery] Rollback complete. System is now AWAKE.")
@@ -84,6 +178,7 @@ async def rollback_all(session_id: str = None):
     if not session_id:
         print("[Rollback] No session_id to rollback")
         set_state(SleepState.AWAKE)
+        _presence_to_rest("sleep rollback")
         return
 
     print(f"[Rollback] Rolling back session {session_id[:8]}...")
@@ -135,6 +230,7 @@ async def rollback_all(session_id: str = None):
     else:
         print("[Rollback] WARNING: diary backup failed — keeping entries")
     set_state(SleepState.AWAKE)
+    _presence_to_rest("sleep rollback")
     print(f"[Rollback] Complete")
 
 
@@ -163,6 +259,7 @@ async def commit_all(session_id: str) -> bool:
         print("[Commit] WARNING: diary backup failed — keeping entries")
 
     set_state(SleepState.AWAKE)
+    _presence_to_rest("sleep complete")
 
     print(f"[Commit] Sleep session {session_id[:8]}... committed successfully")
     return True
@@ -177,8 +274,15 @@ async def execute_sleep(session_id: str, duration_minutes: int = None) -> bool:
         all_success, message, process_results = await run_all_processes(session_id)
 
         if all_success and duration_minutes:
-            elapsed = time.time() - _sleep_start_time
-            remaining = max(0, duration_minutes * 60 - elapsed)
+            remaining = max(0, duration_minutes * 60 - (time.time() - _sleep_start_time))
+            # Wall-clock deadline from the DB is authoritative (survives restarts).
+            try:
+                db_left = _seconds_until_deadline(
+                    get_current_state().get("scheduled_end_at"))
+                if db_left is not None:
+                    remaining = max(0.0, db_left)
+            except Exception:
+                pass
             if remaining > 0:
                 set_stage(SleepStage.IDLE, progress_pct=90.0)
                 print(f"[Sleep] Processing done, staying asleep for {remaining:.0f}s more...")
@@ -260,6 +364,9 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
 
     set_state(SleepState.SLEEPING, session_id=session_id, triggered_by=triggered_by,
               duration_minutes=duration_minutes)
+    # Single source of truth for "Mila sleeps": sleep_state row + presence.
+    # Centralized here so manual (/sleep API), auto and tool paths agree.
+    _ensure_presence_sleep(f"{duration_minutes} min" if duration_minutes else "until woken")
 
     # Reset needs tracker offsets to avoid double-counting during sleep
     get_needs_tracker().reset_offsets()
@@ -370,13 +477,20 @@ def get_sleep_status() -> Dict[str, Any]:
     state_data = get_current_state()
     queue_count = get_queue_count()
 
+    # Wall-clock first (survives restarts); in-memory only as fallback.
     elapsed = None
-    if _sleep_start_time and state_data.get("state") == "sleeping":
-        elapsed = time.time() - _sleep_start_time
-
     remaining = None
-    if _sleep_duration and elapsed is not None:
-        remaining = max(0, _sleep_duration * 60 - elapsed)
+    if state_data.get("state") == "sleeping":
+        started = _parse_iso(state_data.get("started_at"))
+        if started is not None:
+            elapsed = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+        elif _sleep_start_time:
+            elapsed = time.time() - _sleep_start_time
+        db_left = _seconds_until_deadline(state_data.get("scheduled_end_at"))
+        if db_left is not None:
+            remaining = max(0.0, db_left)
+        elif _sleep_duration and elapsed is not None:
+            remaining = max(0, _sleep_duration * 60 - elapsed)
 
     return {
         "state": state_data.get("state", "awake"),

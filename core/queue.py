@@ -357,6 +357,18 @@ class MessageCoordinate:
         """
         event = self._events[chat_id]
 
+        # Hard gate: never generate/reply while sleeping. The message is
+        # already saved (chunks + context buffer, see handle()), so dropping
+        # the batch loses nothing — sleep summarizers read chunks.
+        try:
+            from core.sleep.manager import is_sleeping as _is_sleeping
+            if _is_sleeping():
+                self._pending.pop(chat_id, None)
+                print("[Batch] Mila sleeping — drop batch (saved, no reply)")
+                return False
+        except Exception:
+            pass
+
         # If interrupted before we even drained the batch — keep pending
         # intact so nothing is lost on restart.
         pre_reason = self._interrupted(chat_id, event)
@@ -447,6 +459,13 @@ class MessageCoordinate:
                 if not cleans:
                     print("\n[Skip] Empty reply — no answer")
                     return False
+                try:
+                    from core.sleep.manager import is_sleeping as _is_sleeping2
+                    if _is_sleeping2():
+                        print("[Batch] Fell asleep before send — abort (no reply while sleeping)")
+                        return False
+                except Exception:
+                    pass
                 pre_send = self._interrupted(chat_id, event)
                 if pre_send is not None:
                     if not sent_any and not has_silence_action:

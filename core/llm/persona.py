@@ -211,9 +211,11 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     except Exception:
         media_note = ""
 
-    parts = [header, static_prefix, relationship_block, needs_block, history_note]
+    parts = [static_prefix, history_note]
     if media_note:
         parts.append(media_note)
+
+    parts.append(relationship_block)
 
     # Presence block — location only (where am I + who writes).
     # Behavior rules live in states/{state}.md, not here.
@@ -226,17 +228,20 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     except Exception:
         pass
 
+    # State behavior — exactly one file, only what is needed now.
+    state = _get_presence_state_name()
+    parts.append(_load_state_block(state, chat_id))
+
     diary_context = get_today_diary_context()
     if diary_context:
         parts.append(_load("context/diary_block").replace("{diary_context}", diary_context))
+
+    parts.append(needs_block)
+    parts.append(header)
 
     if chat_id and my_user_id:
         session_time = _get_session_time_info(chat_id, my_user_id)
         if session_time:
             parts.append(_load("context/session").replace("{session_time}", session_time))
-
-    # State behavior — exactly one file, only what is needed now.
-    state = _get_presence_state_name()
-    parts.append(_load_state_block(state, chat_id))
 
     return "\n\n".join(parts).strip()

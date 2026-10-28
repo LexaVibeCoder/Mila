@@ -6,6 +6,7 @@ Used by both the main bot and create_session.py / test scripts.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import sys
 import threading
@@ -47,6 +48,8 @@ _CODE_DELIVERY = {
 
 _RESEND_WORDS = {"resend", "повтор", "повторить", "отправить", "ещё", "еще"}
 _QR_WORDS = {"qr", "qr-код", "qrкод", "куар"}
+_MAX_CODE_ATTEMPTS = 3
+_MAX_PASSWORD_ATTEMPTS = 5
 
 
 _stdin_buffer = b""
@@ -130,8 +133,15 @@ def _read_line_blocking(prompt: str) -> str:
     return _read_line_fd(prompt)
 
 
-async def _ainput(prompt: str = "") -> str:
-    """Read a line from stdin in a daemon thread (cancellable on shutdown)."""
+def _read_password_blocking(prompt: str) -> str:
+    """Read a password without echo (getpass uses the tty, not sys.stdin)."""
+    import getpass
+
+    return getpass.getpass(prompt)
+
+
+async def _run_reader(reader) -> str:
+    """Run a blocking reader (input/password) in a daemon thread."""
     loop = asyncio.get_running_loop()
     future: asyncio.Future[str] = loop.create_future()
 
@@ -145,7 +155,7 @@ async def _ainput(prompt: str = "") -> str:
 
     def _read() -> None:
         try:
-            line = _read_line_blocking(prompt)
+            line = reader()
         except (EOFError, OSError) as e:
             outcome: dict[str, Any] = {"exc": _NoTtyError(str(e))}
         else:
@@ -163,6 +173,14 @@ async def _ainput(prompt: str = "") -> str:
     return await future
 
 
+async def _ainput(prompt: str = "") -> str:
+    return await _run_reader(lambda: _read_line_blocking(prompt))
+
+
+async def _apassword(prompt: str = "  Пароль 2FA: ") -> str:
+    return await _run_reader(lambda: _read_password_blocking(prompt))
+
+
 def _warn_no_tty(what: str) -> None:
     global _tty_warned
     if _tty_warned:
@@ -176,6 +194,27 @@ def _warn_no_tty(what: str) -> None:
         "      docker compose up -d bot",
         flush=True,
     )
+
+
+def _render_qr(link: str) -> bool:
+    """Render a scannable QR code as ASCII art. Returns False if no qrcode lib."""
+    try:
+        import qrcode
+    except ImportError:
+        return False
+
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        border=4,  # standard quiet zone, helps phone scanners
+    )
+    qr.add_data(link)
+    qr.make(fit=True)
+
+    buffer = io.StringIO()
+    # invert=True: light blocks on a dark terminal background, as scanners expect.
+    qr.print_ascii(out=buffer, invert=True)
+    print(buffer.getvalue(), end="", flush=True)
+    return True
 
 
 def _type_name(obj: Any) -> str:
@@ -232,10 +271,11 @@ def register_auth_handlers(
     sending a phone number (no code needed; confirm on another device).
     """
     sent_phone_this_run = False
+    last_qr_link = ""
 
     @client.on_updateAuthorizationState()
     async def _auth_handler(c, update: types.UpdateAuthorizationState) -> None:
-        nonlocal sent_phone_this_run
+        nonlocal sent_phone_this_run, last_qr_link
         state = update.authorization_state
         name = _type_name(state)
 
@@ -247,15 +287,16 @@ def register_auth_handlers(
                 print(f"  QR-вход недоступен: {res.message}. Пробую по номеру.")
 
             phone = (phone_hint or "").strip()
-            if not phone:
+            while not phone:
                 try:
                     phone = (await _ainput("  Номер (+79123456789): ")).strip()
                 except _NoTtyError:
                     _warn_no_tty("номер телефона")
                     return
                 if not phone:
-                    print("  Номер не введён.")
-                    return
+                    print(
+                        "  Номер не введён — введите ещё раз (Ctrl+C — выйти)."
+                    )
             res = await c.setAuthenticationPhoneNumber(phone_number=phone)
             if isinstance(res, types.Error):
                 print(f"  Ошибка номера: {res.message}")
@@ -275,55 +316,79 @@ def register_auth_handlers(
                     "    Введите код, который уже пришёл, либо удалите data/tdlib "
                     "и запустите заново, чтобы запросить новый."
                 )
-            try:
-                code = (await _ainput("  Код из Telegram (или 'resend' / 'qr'): ")).strip()
-            except _NoTtyError:
-                _warn_no_tty("код из Telegram")
-                return
-            if not code:
-                print("  Код не введён.")
-                return
-            if code.lower() in _QR_WORDS:
+            if use_qr:
                 res = await c.requestQrCodeAuthentication()
-                if isinstance(res, types.Error):
-                    print(f"  QR-вход недоступен: {res.message}")
+                if not isinstance(res, types.Error):
+                    return
+                print(f"  QR-вход недоступен: {res.message} — продолжаю с кодом.")
+            wrong = 0
+            while wrong < _MAX_CODE_ATTEMPTS:
+                try:
+                    code = (
+                        await _ainput("  Код из Telegram (или 'resend' / 'qr'): ")
+                    ).strip()
+                except _NoTtyError:
+                    _warn_no_tty("код из Telegram")
+                    return
+                if not code:
                     print(
-                        "    Удалите каталог TDLib (обычно data/tdlib) и запустите:\n"
-                        "      ./start/create_session.sh --qr"
+                        "  Код не введён — введите ещё раз (Ctrl+C — выйти)."
                     )
-                return
-            if code.lower() in _RESEND_WORDS:
-                res = await c.resendAuthenticationCode()
-                if isinstance(res, types.Error):
-                    print(f"  Переотправка недоступна: {res.message}")
-                    print(
-                        "  Telegram не даёт для этой попытки резервный канал, "
-                        "поэтому новый код не отправить."
-                    )
-                    print(
-                        "  Варианты:\n"
-                        "    • посмотреть код в чате «Telegram» (777000) в приложении;\n"
-                        "    • удалить каталог TDLib (обычно data/tdlib) и запросить код заново;\n"
-                        "    • войти по QR: введите 'qr' здесь же либо перезапустите с --qr"
-                    )
-                else:
-                    print("  Код запрошен повторно.")
-                return
-            res = await c.checkAuthenticationCode(code=code)
-            if isinstance(res, types.Error):
+                    continue
+                if code.lower() in _QR_WORDS:
+                    res = await c.requestQrCodeAuthentication()
+                    if isinstance(res, types.Error):
+                        print(f"  QR-вход недоступен: {res.message}")
+                        print(
+                            "    Удалите каталог TDLib (обычно data/tdlib) и запустите:\n"
+                            "      ./start/create_session.sh --qr"
+                        )
+                    return
+                if code.lower() in _RESEND_WORDS:
+                    res = await c.resendAuthenticationCode()
+                    if isinstance(res, types.Error):
+                        print(f"  Переотправка недоступна: {res.message}")
+                        print(
+                            "  Telegram не даёт для этой попытки резервный канал, "
+                            "поэтому новый код не отправить."
+                        )
+                        print(
+                            "  Варианты:\n"
+                            "    • посмотреть код в чате «Telegram» (777000) в приложении;\n"
+                            "    • удалить каталог TDLib (обычно data/tdlib) и запросить код заново;\n"
+                            "    • войти по QR: введите 'qr' здесь же либо перезапустите с --qr"
+                        )
+                    else:
+                        print("  Код запрошен повторно.")
+                    return
+                res = await c.checkAuthenticationCode(code=code)
+                if not isinstance(res, types.Error):
+                    return
+                wrong += 1
                 print(f"  Ошибка кода: {res.message}")
+                if wrong < _MAX_CODE_ATTEMPTS:
+                    print(
+                        f"  Попробуйте ещё раз ({wrong}/{_MAX_CODE_ATTEMPTS})."
+                    )
+            print(
+                "  Слишком много неверных попыток ввода кода. "
+                "Перезапустите скрипт, чтобы попробовать снова."
+            )
             return
 
         if isinstance(state, types.AuthorizationStateWaitEmailAddress):
             print("  Telegram просит email для подтверждения входа.")
-            try:
-                email = (await _ainput("  Email: ")).strip()
-            except _NoTtyError:
-                _warn_no_tty("email")
-                return
-            if not email:
-                print("  Email не введён.")
-                return
+            email = ""
+            while not email:
+                try:
+                    email = (await _ainput("  Email: ")).strip()
+                except _NoTtyError:
+                    _warn_no_tty("email")
+                    return
+                if not email:
+                    print(
+                        "  Email не введён — введите ещё раз (Ctrl+C — выйти)."
+                    )
             res = await c.setAuthenticationEmailAddress(email_address=email)
             if isinstance(res, types.Error):
                 print(f"  Ошибка email: {res.message}")
@@ -336,26 +401,76 @@ def register_auth_handlers(
             print(f"  Код отправлен на email {pattern or '(адрес скрыт)'}")
             if length:
                 print(f"  Длина кода: {length}")
-            try:
-                code = (await _ainput("  Код из письма (или 'resend'): ")).strip()
-            except _NoTtyError:
-                _warn_no_tty("код из письма")
-                return
-            if not code:
-                print("  Код не введён.")
-                return
-            if code.lower() in _RESEND_WORDS:
-                res = await c.resendAuthenticationCode()
-                if isinstance(res, types.Error):
-                    print(f"  Переотправка недоступна: {res.message}")
-                else:
-                    print("  Код запрошен повторно.")
-                return
-            res = await c.checkAuthenticationEmailCode(
-                code=types.EmailAddressAuthenticationCode(code=code)
-            )
-            if isinstance(res, types.Error):
+            wrong = 0
+            while wrong < _MAX_CODE_ATTEMPTS:
+                try:
+                    code = (await _ainput("  Код из письма (или 'resend'): ")).strip()
+                except _NoTtyError:
+                    _warn_no_tty("код из письма")
+                    return
+                if not code:
+                    print(
+                        "  Код не введён — введите ещё раз (Ctrl+C — выйти)."
+                    )
+                    continue
+                if code.lower() in _RESEND_WORDS:
+                    res = await c.resendAuthenticationCode()
+                    if isinstance(res, types.Error):
+                        print(f"  Переотправка недоступна: {res.message}")
+                    else:
+                        print("  Код запрошен повторно.")
+                    return
+                res = await c.checkAuthenticationEmailCode(
+                    code=types.EmailAddressAuthenticationCode(code=code)
+                )
+                if not isinstance(res, types.Error):
+                    return
+                wrong += 1
                 print(f"  Ошибка кода: {res.message}")
+                if wrong < _MAX_CODE_ATTEMPTS:
+                    print(
+                        f"  Попробуйте ещё раз ({wrong}/{_MAX_CODE_ATTEMPTS})."
+                    )
+            print(
+                "  Слишком много неверных попыток ввода кода. "
+                "Перезапустите скрипт, чтобы попробовать снова."
+            )
+            return
+
+        if isinstance(state, types.AuthorizationStateWaitPassword):
+            hint = getattr(state, "password_hint", "")
+            recovery = getattr(state, "recovery_email_address_pattern", "")
+            print("  Включён облачный пароль (2FA) — нужен пароль от аккаунта.")
+            if hint:
+                print(f"  Подсказка: {hint}")
+            if recovery:
+                print(f"  Восстановление: {recovery}")
+            wrong = 0
+            while wrong < _MAX_PASSWORD_ATTEMPTS:
+                try:
+                    pw = (await _apassword("  Пароль 2FA (ввод скрыт): ")).strip()
+                except _NoTtyError:
+                    _warn_no_tty("пароль 2FA")
+                    return
+                if not pw:
+                    print(
+                        "  Пароль не введён — введите ещё раз (Ctrl+C — выйти)."
+                    )
+                    continue
+                res = await c.checkAuthenticationPassword(password=pw)
+                if not isinstance(res, types.Error):
+                    return
+                wrong += 1
+                print(f"  Ошибка 2FA: {res.message}")
+                if wrong < _MAX_PASSWORD_ATTEMPTS:
+                    print(
+                        "  Попробуйте ещё раз "
+                        f"({wrong}/{_MAX_PASSWORD_ATTEMPTS})."
+                    )
+            print(
+                "  Слишком много неверных попыток ввода пароля. "
+                "Перезапустите скрипт, чтобы попробовать снова."
+            )
             return
 
         if isinstance(state, types.AuthorizationStateWaitRegistration):
@@ -385,11 +500,22 @@ def register_auth_handlers(
 
         if isinstance(state, types.AuthorizationStateWaitOtherDeviceConfirmation):
             link = getattr(state, "link", "")
-            print(
-                "  Подтвердите вход: откройте ссылку на телефоне, где Telegram уже\n"
-                "  авторизован в этом аккаунте (ссылка периодически обновляется):"
-            )
-            print(f"    {link}")
+            if link and link != last_qr_link:
+                last_qr_link = link
+                print(
+                    "\n  QR для входа (обновляется автоматически — сканируйте последний).\n"
+                    "  Нужен телефон, где Telegram уже авторизован в этом аккаунте.\n"
+                )
+                if not _render_qr(link):
+                    print(
+                        "  (модуль qrcode не установлен — откройте ссылку вручную)"
+                    )
+                else:
+                    print(
+                        "  Если QR не читается (светлая тема терминала), "
+                        "откройте ссылку ниже."
+                    )
+                print(f"\n  Ссылка: {link}\n")
             return
 
         if isinstance(state, types.AuthorizationStateReady):

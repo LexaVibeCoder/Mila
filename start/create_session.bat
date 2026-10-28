@@ -114,10 +114,10 @@ if errorlevel 1 (
 echo --^> pip installed via uv
 
 :install_deps
-echo --^> Installing session deps: %PYTDBOT_SPEC% %TDJSON_SPEC% pydantic-settings python-dotenv
+echo --^> Installing session deps: %PYTDBOT_SPEC% %TDJSON_SPEC% pydantic-settings python-dotenv qrcode
 "%VENV_PY%" -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
-"%VENV_PY%" -m pip install "%PYTDBOT_SPEC%" "%TDJSON_SPEC%" pydantic-settings python-dotenv
+"%VENV_PY%" -m pip install "%PYTDBOT_SPEC%" "%TDJSON_SPEC%" pydantic-settings python-dotenv "qrcode>=7.4"
 if errorlevel 1 exit /b 1
 
 echo --^> Running create_session.py ^(workdir: project root^)

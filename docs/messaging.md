@@ -93,7 +93,7 @@ loop:
 
 ## tg_auth (`core/tg_auth.py`) и create_session
 
-- `register_auth_handlers(client, phone_hint)`: `WaitPhoneNumber` (hint из `PHONE_NUMBER` или ввод) → `WaitCode` → `WaitPassword` (2FA) → `Ready`. Дополнительно обрабатываются `WaitEmailAddress` / `WaitEmailCode` / `WaitRegistration` / `WaitPremiumPurchase` / `WaitOtherDeviceConfirmation`; неизвестные состояния печатаются как `[auth] Состояние ...`. Ввод читается с fd 0 в daemon-потоке (не блокирует выход по таймауту). В Docker без TTY — предупреждение `_warn_no_tty()` (используйте `docker attach`).
+- `register_auth_handlers(client, phone_hint)`: `WaitPhoneNumber` (hint из `PHONE_NUMBER` или ввод) → `WaitCode` → `WaitPassword` (2FA) → `Ready`. Дополнительно обрабатываются `WaitEmailAddress` / `WaitEmailCode` / `WaitRegistration` / `WaitPremiumPurchase` / `WaitOtherDeviceConfirmation`; неизвестные состояния печатаются как `[auth] Состояние ...`. Ввод читается с fd 0 в daemon-потоке (не блокирует выход по таймауту). В Docker без TTY — предупреждение `_warn_no_tty()` (используйте `docker attach`). Неверный пароль 2FA можно ввести повторно (до 5 попыток), неверный код — до 3 попыток; пустой ввод просто повторяет запрос (попытку не расходует), Ctrl+C — выход; после исчерпания попыток скрипт просит перезапуск. Пароль 2FA вводится скрыто (`getpass`).
 - `create_session.py` — one-shot: клиент TDLib → ожидание `AuthorizationStateReady` 300с → `getMe()` → печать пути `TD_FILES_DIRECTORY`. Обёртки: `start/create_session.sh` (venv через python3.11/uv + pip) и `start/create_session.bat`.
 
 ### Код не приходит
@@ -102,7 +102,7 @@ loop:
 - Таймаут 300с **не отправляет новый код**: TDLib восстанавливает `WaitCode` из `data/tdlib`. Повторный запуск скрипта покажет предупреждение «новый код НЕ отправлялся» — нужно ввести уже полученный код либо удалить `data/tdlib` и запросить код заново.
 - Слишком частые запросы кода Telegram временно блокирует; после нескольких неудачных попыток нужно подождать несколько часов.
 - `resend` работает только если `next_type` не пуст. При `next_type = null` Telegram отвечает `Authentication code can't be resend` — новый код можно получить только новым запросом (удалить каталог TDLib).
-- Альтернатива без кода — QR-вход: `rm -rf data/tdlib && ./start/create_session.sh --qr` (или `python create_session.py --qr`), затем открыть напечатанную ссылку `tg://login?token=...` на телефоне, где этот аккаунт уже авторизован. Требуется активная сессия Telegram; при незавершённом запросе кода QR недоступен.
+- Альтернатива без кода — QR-вход: `rm -rf data/tdlib && ./start/create_session.sh --qr` (или `python create_session.py --qr`), затем отсканировать QR (рисуется в терминале через библиотеку `qrcode`, рядом печатается ссылка `tg://login?token=...`), либо открыть ссылку на телефоне, где этот аккаунт уже авторизован. Требуется активная сессия Telegram; при незавершённом запросе кода QR недоступен. Ссылка обновляется автоматически — сканируйте последний QR.
 
 ## Настройки (config.py)
 

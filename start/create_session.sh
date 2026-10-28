@@ -30,8 +30,9 @@ VENV_PY="$VENV_DIR/bin/python"
 
 PYTDBOT_SPEC="Pytdbot[tdjson]==0.10.1"
 TDJSON_SPEC="tdjson==1.8.65"
-# Minimal deps of create_session.py: pytdbot + config.py (pydantic-settings, dotenv).
-DEPS=("$PYTDBOT_SPEC" "$TDJSON_SPEC" "pydantic-settings" "python-dotenv")
+# Minimal deps of create_session.py: pytdbot + config.py (pydantic-settings,
+# dotenv) + qrcode for the terminal QR login.
+DEPS=("$PYTDBOT_SPEC" "$TDJSON_SPEC" "pydantic-settings" "python-dotenv" "qrcode>=7.4")
 
 info() { echo "--> $*"; }
 die() {

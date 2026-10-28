@@ -93,8 +93,14 @@ loop:
 
 ## tg_auth (`core/tg_auth.py`) и create_session
 
-- `register_auth_handlers(client, phone_hint)`: `WaitPhoneNumber` (hint из `PHONE_NUMBER` или `input()`) → `WaitCode` → `WaitPassword` (2FA) → `Ready`. В Docker без TTY — предупреждение `_warn_no_tty()` (используйте `docker attach`).
+- `register_auth_handlers(client, phone_hint)`: `WaitPhoneNumber` (hint из `PHONE_NUMBER` или ввод) → `WaitCode` → `WaitPassword` (2FA) → `Ready`. Дополнительно обрабатываются `WaitEmailAddress` / `WaitEmailCode` / `WaitRegistration` / `WaitPremiumPurchase` / `WaitOtherDeviceConfirmation`; неизвестные состояния печатаются как `[auth] Состояние ...`. Ввод читается с fd 0 в daemon-потоке (не блокирует выход по таймауту). В Docker без TTY — предупреждение `_warn_no_tty()` (используйте `docker attach`).
 - `create_session.py` — one-shot: клиент TDLib → ожидание `AuthorizationStateReady` 300с → `getMe()` → печать пути `TD_FILES_DIRECTORY`. Обёртки: `start/create_session.sh` (venv через python3.11/uv + pip) и `start/create_session.bat`.
+
+### Код не приходит
+
+- Способ доставки и длина кода печатаются из `code_info`. `authenticationCodeTypeTelegramMessage` — код приходит сообщением в сервисный чат **«Telegram» (777000)** в уже авторизованном приложении, а не по SMS. Если `next_type` пуст, резервной доставки (SMS/звонок) Telegram для этого входа не предлагает.
+- Таймаут 300с **не отправляет новый код**: TDLib восстанавливает `WaitCode` из `data/tdlib`. Повторный запуск скрипта покажет предупреждение «новый код НЕ отправлялся» — нужно ввести уже полученный код либо удалить `data/tdlib` и запросить код заново.
+- Слишком частые запросы кода Telegram временно блокирует; после нескольких неудачных попыток нужно подождать несколько часов.
 
 ## Настройки (config.py)
 

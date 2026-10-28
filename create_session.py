@@ -52,20 +52,29 @@ async def main():
     try:
         await asyncio.wait_for(ready.wait(), timeout=300)
     except asyncio.TimeoutError:
-        print("\n✗ Login timed out.")
+        print("\n✗ Login timed out (5 minutes).")
+        print("  Если код так и не пришёл:")
+        print("    • Telegram мог отправить его в чат «Telegram» (777000) в уже")
+        print("      авторизованном приложении — это не обязательно SMS;")
+        print("    • повторный запуск не отправляет новый код: удалите")
+        print(f"      {settings.TD_FILES_DIRECTORY}/ и запустите заново;")
+        print("    • частые запросы кода Telegram временно блокирует — подождите")
+        print("      несколько часов, прежде чем пробовать снова.")
         await app.stop()
-        return
+        sys.exit(1)
 
     me = await app.getMe()
     if isinstance(me, types.Error):
         print(f"\n✗ getMe failed: {me.message}")
-    else:
-        username = ""
-        if me.usernames and me.usernames.editable_username:
-            username = f" (@{me.usernames.editable_username})"
-        print(f"\n✓ Session created! Account: {me.first_name}{username}")
-        print(f"  Directory: {settings.TD_FILES_DIRECTORY}/")
-        print(f"  ID: {me.id}")
+        await app.stop()
+        sys.exit(1)
+
+    username = ""
+    if me.usernames and me.usernames.editable_username:
+        username = f" (@{me.usernames.editable_username})"
+    print(f"\n✓ Session created! Account: {me.first_name}{username}")
+    print(f"  Directory: {settings.TD_FILES_DIRECTORY}/")
+    print(f"  ID: {me.id}")
 
     await app.stop()
 

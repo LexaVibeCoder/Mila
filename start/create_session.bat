@@ -2,8 +2,10 @@
 REM One-shot TDLib login for Mila (Windows).
 REM
 REM Usage:
-REM   start\create_session.bat
-REM   (run from anywhere; paths are resolved relative to this script)
+REM   start\create_session.bat              (login by Telegram code)
+REM   start\create_session.bat --qr         (QR link login, no code)
+REM   (run from anywhere; paths are resolved relative to this script;
+REM    arguments are passed through to create_session.py)
 REM
 REM What it does:
 REM   1. Drops a stale venv from a previous run; if it cannot be removed
@@ -124,7 +126,7 @@ if errorlevel 1 (
     echo ERROR: cannot cd to %PROJECT_ROOT% 1>&2
     exit /b 1
 )
-"%VENV_PY%" create_session.py
+"%VENV_PY%" create_session.py %*
 set "STATUS=%errorlevel%"
 
 if "%STATUS%"=="0" (

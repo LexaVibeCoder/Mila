@@ -4,9 +4,11 @@ Runs once on the host.
 Creates the TDLib database directory, which is then used later.
 
 Usage:
-    python create_session.py
+    python create_session.py          # вход по коду из Telegram
+    python create_session.py --qr     # вход по QR-ссылке (без кода)
 
-After running, enter your phone number and the code received from Telegram.
+After running, enter your phone number and the code received from Telegram,
+or confirm the printed tg://login link on an already authorized device.
 """
 import asyncio
 import sys
@@ -28,6 +30,8 @@ async def main():
     print(f"API_HASH: {settings.API_HASH[:8]}...")
     print(f"PHONE_NUMBER: {settings.PHONE_NUMBER or 'not specified (will be requested)'}")
     print(f"TD_FILES_DIRECTORY: {settings.TD_FILES_DIRECTORY}")
+    if "--qr" in sys.argv[1:]:
+        print("Режим: QR-вход (код не нужен, подтвердите ссылку на телефоне)")
     print()
 
     app = Client(
@@ -39,7 +43,10 @@ async def main():
         td_verbosity=settings.TD_VERBOSITY,
         user_bot=True,
     )
-    register_auth_handlers(app, phone_hint=settings.PHONE_NUMBER or "")
+    use_qr = "--qr" in sys.argv[1:]
+    register_auth_handlers(
+        app, phone_hint=settings.PHONE_NUMBER or "", use_qr=use_qr
+    )
 
     ready = asyncio.Event()
 
@@ -59,7 +66,9 @@ async def main():
         print("    • повторный запуск не отправляет новый код: удалите")
         print(f"      {settings.TD_FILES_DIRECTORY}/ и запустите заново;")
         print("    • частые запросы кода Telegram временно блокирует — подождите")
-        print("      несколько часов, прежде чем пробовать снова.")
+        print("      несколько часов, прежде чем пробовать снова;")
+        print("    • можно войти по QR без кода: введите 'qr' на запросе кода")
+        print(f"      или: rm -rf {settings.TD_FILES_DIRECTORY} && ./start/create_session.sh --qr")
         await app.stop()
         sys.exit(1)
 

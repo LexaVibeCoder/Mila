@@ -46,6 +46,7 @@ _CODE_DELIVERY = {
 }
 
 _RESEND_WORDS = {"resend", "повтор", "повторить", "отправить", "ещё", "еще"}
+_QR_WORDS = {"qr", "qr-код", "qrкод", "куар"}
 
 
 _stdin_buffer = b""
@@ -221,11 +222,14 @@ def _describe_code(info: Any) -> None:
         print(f"  Альтернатива{when}: {next_hint}. Введите 'resend', чтобы запросить.")
 
 
-def register_auth_handlers(client, phone_hint: str = "") -> None:
+def register_auth_handlers(
+    client, phone_hint: str = "", use_qr: bool = False
+) -> None:
     """Register on_updateAuthorizationState handler for interactive login.
 
     If phone_hint is provided (settings.PHONE_NUMBER), it is tried first
-    without prompting.
+    without prompting. If use_qr is true, QR login is requested instead of
+    sending a phone number (no code needed; confirm on another device).
     """
     sent_phone_this_run = False
 
@@ -236,6 +240,12 @@ def register_auth_handlers(client, phone_hint: str = "") -> None:
         name = _type_name(state)
 
         if isinstance(state, types.AuthorizationStateWaitPhoneNumber):
+            if use_qr:
+                res = await c.requestQrCodeAuthentication()
+                if not isinstance(res, types.Error):
+                    return
+                print(f"  QR-вход недоступен: {res.message}. Пробую по номеру.")
+
             phone = (phone_hint or "").strip()
             if not phone:
                 try:
@@ -266,17 +276,36 @@ def register_auth_handlers(client, phone_hint: str = "") -> None:
                     "и запустите заново, чтобы запросить новый."
                 )
             try:
-                code = (await _ainput("  Код из Telegram (или 'resend'): ")).strip()
+                code = (await _ainput("  Код из Telegram (или 'resend' / 'qr'): ")).strip()
             except _NoTtyError:
                 _warn_no_tty("код из Telegram")
                 return
             if not code:
                 print("  Код не введён.")
                 return
+            if code.lower() in _QR_WORDS:
+                res = await c.requestQrCodeAuthentication()
+                if isinstance(res, types.Error):
+                    print(f"  QR-вход недоступен: {res.message}")
+                    print(
+                        "    Удалите каталог TDLib (обычно data/tdlib) и запустите:\n"
+                        "      ./start/create_session.sh --qr"
+                    )
+                return
             if code.lower() in _RESEND_WORDS:
                 res = await c.resendAuthenticationCode()
                 if isinstance(res, types.Error):
                     print(f"  Переотправка недоступна: {res.message}")
+                    print(
+                        "  Telegram не даёт для этой попытки резервный канал, "
+                        "поэтому новый код не отправить."
+                    )
+                    print(
+                        "  Варианты:\n"
+                        "    • посмотреть код в чате «Telegram» (777000) в приложении;\n"
+                        "    • удалить каталог TDLib (обычно data/tdlib) и запросить код заново;\n"
+                        "    • войти по QR: введите 'qr' здесь же либо перезапустите с --qr"
+                    )
                 else:
                     print("  Код запрошен повторно.")
                 return
@@ -356,7 +385,11 @@ def register_auth_handlers(client, phone_hint: str = "") -> None:
 
         if isinstance(state, types.AuthorizationStateWaitOtherDeviceConfirmation):
             link = getattr(state, "link", "")
-            print(f"  Подтвердите вход в Telegram (QR): {link}")
+            print(
+                "  Подтвердите вход: откройте ссылку на телефоне, где Telegram уже\n"
+                "  авторизован в этом аккаунте (ссылка периодически обновляется):"
+            )
+            print(f"    {link}")
             return
 
         if isinstance(state, types.AuthorizationStateReady):

@@ -2,8 +2,10 @@
 # One-shot TDLib login for Mila (Linux / macOS).
 #
 # Usage:
-#   ./start/create_session.sh
-#   (run from anywhere; paths are resolved relative to this script)
+#   ./start/create_session.sh              # вход по коду из Telegram
+#   ./start/create_session.sh --qr         # вход по QR-ссылке (без кода)
+#   (run from anywhere; paths are resolved relative to this script;
+#    arguments are passed through to create_session.py)
 #
 # What it does:
 #   1. Refuses to run as root/sudo (override with MILA_ALLOW_ROOT=1):
@@ -117,7 +119,7 @@ info "Installing session deps: ${DEPS[*]}"
 
 echo "--> Running create_session.py (workdir: project root)"
 cd "$PROJECT_ROOT" || die "cannot cd to $PROJECT_ROOT"
-"$VENV_PY" create_session.py
+"$VENV_PY" create_session.py "$@"
 STATUS=$?
 
 if [ "$STATUS" -eq 0 ]; then

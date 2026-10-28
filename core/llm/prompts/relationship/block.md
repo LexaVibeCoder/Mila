@@ -1,2 +1,2 @@
-## Relationship Context
+## Контекст отношений
 {relationship}

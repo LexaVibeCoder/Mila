@@ -1,2 +1,2 @@
-## Your Personal Diary (Today's Entries)
+## Твой личный дневник (записи за сегодня)
 {diary_context}

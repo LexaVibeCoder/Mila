@@ -1,2 +1,2 @@
-## Session State
+## Состояние сессии
 {session_time}

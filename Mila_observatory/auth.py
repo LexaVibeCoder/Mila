@@ -3,7 +3,7 @@ Mila Observatory — authentication helpers.
 
 - HTTP Basic Auth, credentials from .env (OBSERVATORY_USERNAME / OBSERVATORY_PASSWORD).
 - If OBSERVATORY_PASSWORD is empty, auth is disabled: keep the panel
-  localhost-only via docker-compose ports ("127.0.0.1:8080:8080").
+  bound to loopback (OBSERVATORY_HOST defaults to 127.0.0.1).
 - Secrets masking: runtime config no longer stores API keys (they come from
   .env only). The helpers below remain as defense-in-depth for legacy files:
   responses never contain full keys, only "abcd1234...wxyz" sentinels, and
@@ -58,19 +58,19 @@ async def require_auth(
 
 
 def resolve_host() -> str:
-    """Bind address: explicit OBSERVATORY_HOST wins, otherwise "0.0.0.0".
+    """Bind address from OBSERVATORY_HOST, defaulting to "127.0.0.1".
 
-    NOTE: must stay "0.0.0.0" inside Docker — a container's 127.0.0.1 is
-    its own isolated loopback, so a "127.0.0.1:8080:8080" port mapping
-    would never reach it. Localhost-only access is enforced one layer
-    up, via docker-compose ports ("127.0.0.1:8080:8080").
+    In Docker the container must bind "0.0.0.0" (its own 127.0.0.1 is an
+    isolated loopback, unreachable through a ports mapping). docker-compose
+    therefore sets OBSERVATORY_HOST=0.0.0.0 for the observatory service and
+    restricts the published address via its `ports` line instead.
     """
     from config import settings
 
     explicit = (getattr(settings, "OBSERVATORY_HOST", "") or "").strip()
     if explicit:
         return explicit
-    return "0.0.0.0"
+    return "127.0.0.1"
 
 
 def mask_secret(value: object) -> object:

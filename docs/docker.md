@@ -37,8 +37,10 @@ services:
     user: root
     restart: unless-stopped
     env_file: [.env]
+    environment:
+      OBSERVATORY_HOST: 0.0.0.0   # внутри контейнера; см. ports
     ports:
-      - "127.0.0.1:8080:8080"   # localhost-only по умолчанию
+      - "${OBSERVATORY_HOST:-127.0.0.1}:${OBSERVATORY_PORT:-8080}:${OBSERVATORY_PORT:-8080}"
     volumes:
       - .:/app:z
       - mila_data:/app/data
@@ -48,7 +50,7 @@ services:
       - /etc/timezone:/etc/timezone:ro
     command: python -m Mila_observatory.server
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:${OBSERVATORY_PORT:-8080}/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -67,8 +69,10 @@ networks: { mila_network: { driver: bridge } }
 - `bot` не имеет HTTP-порта; healthcheck смотрит на `data/bot_heartbeat`
   (обновляется каждые 30с, считается свежим < 120с).
 - `observatory` зависит от `bot`; healthcheck — публичный `/api/health`.
-- Панель слушает `0.0.0.0` внутри контейнера, но наружу проброшена только на
-  `127.0.0.1`. Для доступа по LAN замените на `"8080:8080"` **и** задайте
+- Внутри контейнера панель всегда слушает `0.0.0.0` (его собственный
+  `127.0.0.1` недоступен извне). Наружу порт публикуется на
+  `${OBSERVATORY_HOST:-127.0.0.1}:${OBSERVATORY_PORT:-8080}` из `.env`; для
+  доступа по LAN задайте `OBSERVATORY_HOST=0.0.0.0` **и**
   `OBSERVATORY_PASSWORD` (Basic Auth).
 - TDLib-авторизация в контейнере: `docker attach mila-bot` (телефон/код/2FA,
   detach — `Ctrl-P Ctrl-Q`), либо один раз на хосте через
@@ -191,7 +195,7 @@ docker attach mila-bot   # detach: Ctrl-P Ctrl-Q
 | Симптом | Причина / решение |
 |---------|-------------------|
 | `database is locked` | Два процесса пишут в SQLite; WAL/busy_timeout уже настроены, не держите долгие транзакции |
-| Панель не открывается с хоста | Проверьте `127.0.0.1:8080:8080` и что сервер слушает `0.0.0.0` |
+| Панель не открывается с хоста | Проверьте `OBSERVATORY_HOST`/`OBSERVATORY_PORT` в `.env` (по умолчанию `127.0.0.1:8080`) |
 | 401 в панели | Задан `OBSERVATORY_PASSWORD`; введите `OBSERVATORY_USERNAME`/пароль |
 | Голосовые не слышны | Нет `ffmpeg` в окружении или файл > 10 МБ |
 | TDLib-сессия «сломалась» | Сменился `TD_DATABASE_ENCRYPTION_KEY`; верните прежний ключ или создайте fresh `data/tdlib` |

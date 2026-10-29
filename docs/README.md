@@ -76,7 +76,7 @@ cp .env.example .env          # заполните API_ID/API_HASH, LLM_*, EMBED
 # 5. Запуск бота
 .venv/bin/python main.py
 
-# 6. Веб-панель (отдельный процесс, http://localhost:8080)
+# 6. Веб-панель (отдельный процесс, http://127.0.0.1:8080 — порт из OBSERVATORY_PORT)
 .venv/bin/python -m Mila_observatory.server
 ```
 
@@ -154,7 +154,7 @@ docs/                    документация
 # Фронтенд
 cd Mila_observatory/frontend
 npm ci
-npm run dev                                       # Vite на :5173, proxy /api → :8080
+npm run dev                                       # Vite на :5173, proxy /api → OBSERVATORY_HOST:OBSERVATORY_PORT
 npm run build                                     # tsc -b + vite build → dist/
 
 # State Agent

@@ -47,10 +47,16 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # Localhost-only by default. To expose on LAN, replace with "8080:8080"
-    # AND set OBSERVATORY_PASSWORD in .env (HTTP Basic Auth).
+    environment:
+      # The container must bind 0.0.0.0: its own 127.0.0.1 is an isolated
+      # loopback, unreachable through a ports mapping. Host exposure is
+      # controlled by the `ports` line below.
+      OBSERVATORY_HOST: 0.0.0.0
+    # Localhost-only by default (OBSERVATORY_HOST defaults to 127.0.0.1).
+    # To expose on LAN, set OBSERVATORY_HOST=0.0.0.0 in .env AND set
+    # OBSERVATORY_PASSWORD (HTTP Basic Auth).
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${OBSERVATORY_HOST:-127.0.0.1}:${OBSERVATORY_PORT:-8080}:${OBSERVATORY_PORT:-8080}"
     volumes:
       - .:/app:z
       - mila_data:/app/data
@@ -58,11 +64,9 @@ services:
       - ./models:/app/models:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-    # Container must listen on 0.0.0.0 (its 127.0.0.1 is unreachable
-    # from the host); localhost restriction is the ports line above.
     command: python -m Mila_observatory.server
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:${OBSERVATORY_PORT:-8080}/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

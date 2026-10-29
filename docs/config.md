@@ -91,8 +91,8 @@ runtime_config.json (значение не null)  →  побеждает  →  
 |------|--------------|----------|
 | `OBSERVATORY_USERNAME` | `admin` | Basic Auth |
 | `OBSERVATORY_PASSWORD` | `""` | Пусто = auth выключен |
-| `OBSERVATORY_HOST` | `""` | Пусто = `0.0.0.0` |
-| `OBSERVATORY_PORT` | не поле `Settings` | Порт берётся из `runtime system.observatory_port`; переменная может лежать в `.env` благодаря `extra="allow"`, но код её не читает |
+| `OBSERVATORY_HOST` | `127.0.0.1` | Адрес прослушивания; читается только из `.env` |
+| `OBSERVATORY_PORT` | `8080` | Порт; читается только из `.env` (не из runtime config) |
 
 ### Сообщения / typing
 
@@ -211,7 +211,6 @@ API-ключи в runtime config **не хранятся**: `llm.api_key` и `ni
     "last_run": null
   },
   "system": {
-    "observatory_port": 8080,
     "log_level": "INFO"
   },
   "_meta": {
@@ -295,10 +294,11 @@ EMBED_API_BASE=http://127.0.0.1:11434
 EMBED_API_KEY=
 EMBED_MODEL=nomic-embed-text
 
-# Observatory (пусто = auth выключен, слушать только localhost)
+# Observatory (порт/хост — только из .env; по умолчанию 127.0.0.1:8080)
 OBSERVATORY_USERNAME=admin
 OBSERVATORY_PASSWORD=
-# OBSERVATORY_HOST=0.0.0.0
+# OBSERVATORY_HOST=127.0.0.1
+# OBSERVATORY_PORT=8080
 
 # Presence
 DIALOG_IDLE_TIMEOUT_SECONDS=300
@@ -322,4 +322,4 @@ DIALOG_IDLE_CHECK_INTERVAL_SECONDS=30
 | `core/sleep/manager.py` | `sleep.*` |
 | `core/sleep/processes.py` | `night_llm.*` |
 | `core/presence.py` | только `config.py` (`DIALOG_IDLE_*`) |
-| `Mila_observatory/server.py` | `system.observatory_port` |
+| `Mila_observatory/server.py` | ничего из runtime: хост/порт только из `.env` (`OBSERVATORY_HOST`/`OBSERVATORY_PORT`) |

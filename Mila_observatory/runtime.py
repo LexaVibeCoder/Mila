@@ -144,7 +144,6 @@ class RuntimeConfig:
             },
             # System
             "system": {
-                "observatory_port": 8080,
                 "log_level": "INFO",
             },
             # Metadata

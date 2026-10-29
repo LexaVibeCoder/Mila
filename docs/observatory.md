@@ -42,14 +42,18 @@ Mila_observatory/
 # Windows-лаунчер (venv + сервер + браузер)
 Mila_Observatory.bat
 
+# Linux/macOS-лаунчер (сервер в фоне + браузер; --stop, --foreground)
+./Mila_Observatory.sh
+
 # Docker
 docker compose up -d observatory
 ```
 
-Порт: `system.observatory_port` (по умолчанию 8080). Сервер слушает
-`0.0.0.0` (`OBSERVATORY_HOST` может переопределить); наружу в compose
-проброшен только `127.0.0.1:8080` — для LAN нужно поменять ports и включить
-пароль.
+Хост и порт берутся только из `.env`: `OBSERVATORY_HOST` (по умолчанию
+`127.0.0.1`) и `OBSERVATORY_PORT` (по умолчанию `8080`). Runtime config
+(`system.observatory_port`) больше не используется. В compose контейнер
+слушает `0.0.0.0`, а наружу порт проброшен на `${OBSERVATORY_HOST:-127.0.0.1}`
+— для LAN задайте `OBSERVATORY_HOST=0.0.0.0` и включите пароль.
 
 ## Авторизация и безопасность
 
@@ -187,8 +191,9 @@ main-пайплайна. Ночные процессы читают `night_llm.t
 
 ## Фронтенд
 
-React SPA на TypeScript + Vite. В dev-режиме проксирует API на `:8080`; в
-проде сервится FastAPI из `frontend/dist/`.
+React SPA на TypeScript + Vite. В dev-режиме проксирует API на хост/порт из
+`.env` (`OBSERVATORY_HOST`/`OBSERVATORY_PORT`, по умолчанию `127.0.0.1:8080`);
+в проде сервится FastAPI из `frontend/dist/`.
 
 ### Маршруты (11)
 

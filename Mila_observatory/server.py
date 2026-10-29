@@ -22,7 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from Mila_observatory.auth import is_auth_enabled, require_auth, resolve_host
-from Mila_observatory.runtime import runtime_config, RUNTIME_CONFIG_PATH
+from Mila_observatory.runtime import RUNTIME_CONFIG_PATH
+from config import settings
 from Mila_observatory.api.dashboard import router as dashboard_router
 from Mila_observatory.api.model import router as model_router
 from Mila_observatory.api.memory import router as memory_router
@@ -42,7 +43,7 @@ async def lifespan(app: FastAPI):
     print(f"\n{'='*60}")
     print(f"  Mila Observatory Server")
     print(f"  Config: {RUNTIME_CONFIG_PATH}")
-    print(f"  Port: {runtime_config.get('system.observatory_port', 8080)}")
+    print(f"  Listen: {resolve_host()}:{settings.OBSERVATORY_PORT} (from .env)")
     print(f"{'='*60}\n")
     yield
     print("\nObservatory server shutting down.")
@@ -126,16 +127,15 @@ app = create_app()
 
 def main():
     """Entry point for running the server."""
-    port = runtime_config.get("system.observatory_port", 8080)
-    # Always 0.0.0.0 by default: inside Docker the container's 127.0.0.1
-    # is unreachable from the host even with a ports mapping.
-    # Localhost-only exposure is done via compose ports ("127.0.0.1:8080:8080").
+    # Bind address/port come from .env (OBSERVATORY_HOST/OBSERVATORY_PORT),
+    # never from runtime_config.json.
+    port = settings.OBSERVATORY_PORT
     host = resolve_host()
     if not is_auth_enabled():
         print(
             "[Observatory] WARNING: no OBSERVATORY_PASSWORD set — anyone with "
-            "network access to this port controls the bot. Keep compose ports "
-            "as 127.0.0.1:8080:8080 or set a password."
+            "network access to this port controls the bot. Keep it bound to "
+            "127.0.0.1 (the default) or set a password."
         )
     print(f"[Observatory] Listening on {host}:{port} (auth={'on' if is_auth_enabled() else 'off'})")
     uvicorn.run(

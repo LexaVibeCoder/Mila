@@ -32,8 +32,8 @@ uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev
 
 # запуск
 .venv/bin/python main.py                      # бот; РЕАЛЬНЫЕ сообщения — только с разрешения
-.venv/bin/python -m Mila_observatory.server   # панель на :8080
-cd Mila_observatory/frontend && npm ci && npm run dev   # Vite :5173, proxy /api → :8080
+.venv/bin/python -m Mila_observatory.server   # панель на OBSERVATORY_HOST:OBSERVATORY_PORT (по умолчанию 127.0.0.1:8080)
+cd Mila_observatory/frontend && npm ci && npm run dev   # Vite :5173, proxy /api → тот же хост/порт
 cd Mila_observatory/frontend && npm run build           # tsc -b + vite build → dist/
 
 # проверки

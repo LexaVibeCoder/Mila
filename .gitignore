@@ -21,7 +21,6 @@ runtime_config.json
 models/
 *.bin
 *.safetensors
-AGENTS.md
 
 # Logs
 logs/

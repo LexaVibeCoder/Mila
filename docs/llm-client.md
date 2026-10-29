@@ -50,7 +50,7 @@ result = await client.generate(
 - `system_prompt` препендится как `{"role": "system", ...}`;
 - `tools`/`tool_choice` отправляются только если передан `tools`;
 - `response_format` передаётся провайдеру как есть (пайплайн использует
-  `json_schema` в диалоге);
+  настройку `llm.response_format`, по умолчанию `json_schema`);
 - `reasoning_effort`/`extra_body` добавляются, если заданы (см. ниже);
 - возвращает:
 

@@ -24,7 +24,8 @@ process_message_stream() / process_message()
     │   ├── presence = get_presence()               (может меняться внутри цикла)
     │   ├── system_prompt = build_main_llm_system_prompt(...)  (заново каждый раз)
     │   ├── tools = get_tool_definitions(presence_state, include_proactive=...)
-    │   ├── если state == "dialog": response_format = json_schema(chat_messages)
+    │   ├── если state == "dialog": response_format по `llm.response_format`
+    │   │   (json_schema/json_object/prompt; пустой ответ → ретрай prompt-only)
     │   ├── LLM.generate(messages, system_prompt, tools, tool_choice="auto")
     │   │
     │   ├── нет tool_calls:
@@ -75,8 +76,13 @@ LLM снова — уже по правилам диалога. После `ente
 - пустой массив — валидное молчание;
 - код-фенсы и текст вокруг JSON вырезаются парсером;
 - ведущий `[YYYY-MM-DD HH:MM:SS]`, скопированный из истории, удаляется;
-- при поддержке провайдера запрашивается `response_format={"type":"json_schema", ...}`;
-  если провайдер отверг `response_format`, один раз повторяется prompt-only.
+- при поддержке провайдера запрашивается `response_format` по настройке
+  `llm.response_format`: `json_schema` (по умолчанию), `json_object` или
+  `prompt` (без нативного формата);
+- если провайдер отверг `response_format`, один раз повторяется prompt-only;
+- если под нативным форматом пришёл пустой `content` без tool_calls (так ведёт
+  себя, например, `xiaomi/mimo` на длинном промпте), итерация один раз
+  повторяется prompt-only, и до конца хода формат больше не запрашивается.
 
 ## Стриминговые события
 

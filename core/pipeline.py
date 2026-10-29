@@ -81,6 +81,32 @@ def _tool_choice() -> str:
     return "auto"
 
 
+def _response_format_mode() -> str:
+    """Observatory knob `llm.response_format`: json_schema | json_object | prompt.
+
+    `prompt` disables the native response_format entirely (prompt + parser
+    only) — the escape hatch for providers that return empty content under
+    structured output.
+    """
+    if HAS_OBSERVATORY:
+        try:
+            value = runtime_config.get("llm.response_format", "json_schema")
+            if value in ("json_schema", "json_object", "prompt"):
+                return value
+        except Exception:
+            pass
+    return "json_schema"
+
+
+def _dialog_response_format(mode: str) -> Optional[Dict[str, Any]]:
+    """Native response_format dict for a dialog turn (None = prompt-only)."""
+    if mode == "prompt":
+        return None
+    if mode == "json_object":
+        return {"type": "json_object"}
+    return {"type": "json_schema", "json_schema": CHAT_MESSAGES_SCHEMA}
+
+
 def _get_presence_state() -> dict:
     try:
         from core.presence import get_presence
@@ -479,7 +505,9 @@ class ThinkPipeline:
         max_iterations = _max_iterations()
         choice = _tool_choice()
         iteration = 0
-        use_response_format = True  # dialog JSON; disabled on provider error
+        # Snapshot once per turn: a mid-turn Observatory change applies next turn.
+        format_mode = _response_format_mode()
+        use_response_format = format_mode != "prompt"
 
         while iteration < max_iterations:
             iteration += 1
@@ -497,38 +525,46 @@ class ThinkPipeline:
             tool_definitions = self._current_tool_defs(
                 include_proactive=bool(enable_peek and proactive_block))
             want_json = state == "dialog"
-            fmt = None
-            if want_json and use_response_format:
-                fmt = {"type": "json_schema", "json_schema": CHAT_MESSAGES_SCHEMA}
+            fmt = _dialog_response_format(format_mode) if (want_json and use_response_format) else None
 
-            try:
-                response = await self.main_llm.generate(
+            async def _call(fmt_override=fmt):
+                return await self.main_llm.generate(
                     messages=messages,
                     system_prompt=main_system_prompt,
                     tools=tool_definitions if tool_definitions else None,
                     tool_choice=choice if tool_definitions else "none",
                     max_tokens=2048,
                     temperature=self.main_llm.default_temperature,
-                    response_format=fmt,
+                    response_format=fmt_override,
                 )
+
+            try:
+                response = await _call()
             except Exception as e:
                 # Provider without json_schema support: retry prompt-only once.
-                if want_json and use_response_format and "response_format" in str(e).lower():
+                if want_json and fmt is not None and "response_format" in str(e).lower():
                     print(f"  [Pipeline] response_format rejected ({e}), retrying prompt-only")
                     use_response_format = False
-                    response = await self.main_llm.generate(
-                        messages=messages,
-                        system_prompt=main_system_prompt,
-                        tools=tool_definitions if tool_definitions else None,
-                        tool_choice=choice if tool_definitions else "none",
-                        max_tokens=2048,
-                        temperature=self.main_llm.default_temperature,
-                    )
+                    fmt = None
+                    response = await _call(None)
                 else:
                     raise
 
             content = (response.get("thoughts", "") or "")
             tool_calls = response.get("tool_calls", None)
+
+            # Some providers silently return empty content when a structured
+            # response_format is combined with a long prompt (observed with
+            # xiaomi/mimo on OpenRouter: finish_reason=stop, content=null).
+            # Retry the same iteration prompt-only instead of burning all
+            # iterations on empties, and stay prompt-only for the rest of the turn.
+            if want_json and fmt is not None and not content.strip() and not tool_calls:
+                print("  [Pipeline] empty reply with response_format → retrying prompt-only")
+                use_response_format = False
+                fmt = None
+                response = await _call(None)
+                content = (response.get("thoughts", "") or "")
+                tool_calls = response.get("tool_calls", None)
 
             preview = content[:120].replace("\n", " ")
             print(f"  Content: {preview}..." if preview else "  Content: <empty>")

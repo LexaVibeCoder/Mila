@@ -58,6 +58,7 @@ class LLMManager:
             "presence_penalty": None,
             "tool_choice": runtime_config.get("llm.tool_choice", "auto"),
             "reasoning_effort": runtime_config.get("llm.reasoning_effort", "none"),
+            "response_format": runtime_config.get("llm.response_format", "json_schema"),
             "extra_body": runtime_config.get("llm.extra_body", {}),
         }
 
@@ -100,17 +101,19 @@ class LLMManager:
         """Reconfigure main LLM client with new parameters."""
         valid_fields = {"model", "api_base", "temperature",
                        "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
-                       "tool_choice", "reasoning_effort", "extra_body"}
+                       "tool_choice", "reasoning_effort", "response_format", "extra_body"}
 
         # Store in runtime config (API keys stay in .env and are ignored here)
         for key, value in params.items():
             if key in valid_fields:
                 runtime_config.set(f"llm.{key}", value)
 
-        # Apply to client (tool_choice is runtime-only, not an LLMClient field)
+        # Apply to client (tool_choice/response_format are runtime-only, not
+        # LLMClient fields — the pipeline reads them from runtime each turn).
         self._apply_runtime_overrides(self._main_client, "llm")
         self._update_params_from_runtime("llm", self._main_params)
-        client_params = {k: v for k, v in params.items() if k not in ("tool_choice", "api_key")}
+        client_params = {k: v for k, v in params.items()
+                         if k not in ("tool_choice", "api_key", "response_format")}
         self._main_client.reconfigure(**client_params)
 
     # ─── Test Query ──────────────────────────────────────────

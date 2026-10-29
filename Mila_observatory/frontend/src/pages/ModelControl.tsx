@@ -40,6 +40,7 @@ export default function ModelControl() {
         max_tokens: String(m.max_tokens ?? ''),
         tool_choice: String(m.tool_choice || 'required'),
         reasoning_effort: String(m.reasoning_effort ?? 'none'),
+        response_format: String(m.response_format || 'json_schema'),
         extra_body: JSON.stringify(m.extra_body ?? {}, null, 2),
       });
       setNightForm({
@@ -80,6 +81,7 @@ export default function ModelControl() {
       if (mainForm.max_tokens) params.max_tokens = parseInt(mainForm.max_tokens);
       if (mainForm.tool_choice) params.tool_choice = mainForm.tool_choice;
       if (mainForm.reasoning_effort) params.reasoning_effort = mainForm.reasoning_effort;
+      if (mainForm.response_format) params.response_format = mainForm.response_format;
       params.extra_body = extraBody;
       await updateMainModel(params);
       setMsg('Main LLM updated');
@@ -153,6 +155,29 @@ export default function ModelControl() {
     );
   };
 
+  const renderResponseFormat = (
+    value: string,
+    onChange: (v: string) => void,
+  ) => (
+    <div style={styles.field}>
+      <label style={styles.label}>Формат ответа в диалоге (response_format)</label>
+      <select
+        style={styles.input}
+        value={value || 'json_schema'}
+        onChange={e => onChange(e.target.value)}
+      >
+        <option value="json_schema">json_schema — нативная схема (рекомендуется)</option>
+        <option value="json_object">json_object — нативный JSON mode</option>
+        <option value="prompt">prompt — без response_format, только инструкции в промпте</option>
+      </select>
+      <div style={styles.toggleHint}>
+        Если модель отвечает пустотой под нативной схемой (бывает на длинном
+        системном промпте), выберите «prompt». Пайплайн также сам повторяет
+        запрос без response_format, если получил пустой ответ.
+      </div>
+    </div>
+  );
+
   const renderReasoning = (
     effort: string,
     extraBody: string,
@@ -223,6 +248,10 @@ export default function ModelControl() {
           </div>
         </div>
         {renderToolChoiceToggle(mainForm.tool_choice || 'required', v => setMainForm({...mainForm, tool_choice: v}))}
+        {renderResponseFormat(
+          mainForm.response_format || 'json_schema',
+          v => setMainForm({...mainForm, response_format: v}),
+        )}
         {renderReasoning(
           mainForm.reasoning_effort || 'none',
           mainForm.extra_body || '{}',

@@ -2,122 +2,145 @@
 
 Mila использует **два слоя конфигурации**:
 
-1. **Статичный** — `config.py` (pydantic-settings), читается из `.env`
-2. **Динамический** — `RuntimeConfig` (`Mila_observatory/runtime.py`), хранится в `./runtime_config.json`, редактируется через API без перезапуска
+1. **Статичный** — `config.py` (pydantic-settings), читается из `.env`.
+2. **Динамический** — `RuntimeConfig` (`Mila_observatory/runtime.py`), хранится в `./runtime_config.json`, редактируется через API без перезапуска.
 
-## 1. Статичная конфигурация (config.py)
+Приоритет:
 
-**Файл**: `config.py`
-
-Класс `Settings(BaseSettings)` читает переменные из `.env`. Точный список полей:
-
-```python
-class Settings(BaseSettings):
-    # Telegram
-    API_ID: int
-    API_HASH: str
-    PHONE_NUMBER: str = ""
-    DEVICE_MODEL: str = "PC 64bit"
-    SYSTEM_VERSION: str = "Windows 11"
-    APP_VERSION: str = "5.0.1"
-
-    # TDLib (pytdbot)
-    TD_FILES_DIRECTORY: str = "data/tdlib"
-    TD_DATABASE_ENCRYPTION_KEY: str = "mila-tdlib-key-change-me"
-    TD_VERBOSITY: int = 2
-
-    # LLM
-    LLM_API_BASE: str
-    LLM_API_KEY: str
-    MAIN_LLM_MODEL: str
-    MAIN_LLM_MAX_TOKENS: int = 2048
-    MAIN_LLM_TEMPERATURE: float = 0.7
-
-    # Embeddings
-    EMBED_API_BASE: str
-    EMBED_API_KEY: str
-    EMBED_MODEL: str
-    EMBED_DIM: int = 384
-
-    # Local models (задел, пока не используются)
-    CLIP_MODEL_PATH: str = "models/clip-vit-base-patch32"
-    MOONDREAM_MODEL_PATH: str = "models/moondream-2b"
-
-    # FAISS & Reranker
-    FAISS_TEXT_PATH: str = "data/faiss_text.index"
-    FAISS_IMAGE_PATH: str = "data/faiss_image.index"
-    FAISS_SAVE_INTERVAL_MIN: int = 10
-    RERANKER_MODEL_PATH: str = "models/rerankers/BGE-Reranker-v2-m3"
-    RERANKER_THRESHOLD: float = 0.6
-
-    # Memory decay (читаются в runtime как pipeline.decay_lambda / forget_threshold)
-    DECAY_LAMBDA: float = 0.01
-    FORGET_THRESHOLD: float = 0.3
-
-    # Data
-    SQLITE_PATH: str = "data/mila.db"
-    PHOTOS_DIR: str = "data/photos"
-    MEDIA_DIR: str = "data/media"     # скачанные фото/войс для нативного входа в LLM
-    MAX_MEDIA_MB: int = 20            # лимит размера одного медиафайла
-    DAILY_REPORTS: str = "data/daily reports"
-
-    # Pipeline
-    MAX_CONTEXT_TOKENS: int = 10000
-    MAX_STM_MESSAGES: int = 30
-    SIMILARITY_THRESHOLD_IMAGE: float = 0.85
-    MAIN_LLM_THOUGHT_SENTENCES: int = 3
-    LOG_DIR: str = "logs"
-
-    # Context buffer
-    CONTEXT_DB_PATH: str = "data/context_buffer.db"
-    CONTEXT_MAX_TOKENS: int = 30000
-    CONTEXT_SUMMARIZE_CHUNK_TOKENS: int = 5000
-    CONTEXT_MAX_MESSAGES: int = 40      # legacy, токенный лимит в приоритете
-    CONTEXT_SUMMARIZE_CHUNK: int = 20   # legacy
-
-    # Часовой пояс для меток времени (IANA, например "Europe/Moscow").
-    # Пусто = системная зона (учитывает TZ / /etc/localtime в Docker).
-    LOCAL_TIMEZONE: str = ""
-
-    # Message batching / debounce + typing-aware ожидание
-    # (wake-on-every: debounce игнорируется, решение принимает сама Мила)
-    MESSAGE_DEBOUNCE_SECONDS: float = 2.0
-    ENABLE_TYPING_WAIT: bool = True
-    TYPING_WAIT_MAX_SECONDS: float = 8.0
-    TYPING_FRESHNESS_SECONDS: float = 6.0
-    TYPING_POLL_INTERVAL: float = 0.5
-    TYPING_GRACE_SECONDS: float = 2.0
-    TYPING_ABORT_GENERATION: bool = True
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"  # лишние поля .env (night_llm и др.) доступны через runtime
+```
+runtime_config.json (значение не null)  →  побеждает  →  config.py (.env)
 ```
 
-Вспомогательная функция `normalize_api_base(url)` достраивает `/v1` в конце `LLM_API_BASE`, если его нет (нужно для LM Studio; для OpenRouter ничего не меняет).
+`null` в runtime означает «используй значение из `.env`».
+
+## 1. Статичная конфигурация (`config.py`)
+
+Класс `Settings(BaseSettings)`, `env_file=".env"`, `extra="allow"` (лишние
+переменные не ломают старт и доступны runtime-слою).
+
+### Telegram / TDLib
+
+| Поле | По умолчанию | Описание |
+|------|--------------|----------|
+| `API_ID` | обязателен | `my.telegram.org/apps` |
+| `API_HASH` | обязателен | |
+| `PHONE_NUMBER` | `""` | Подсказка для auth; можно не указывать |
+| `DEVICE_MODEL` | `"PC 64bit"` | |
+| `SYSTEM_VERSION` | `"Windows 11"` | |
+| `APP_VERSION` | `"5.0.1"` | |
+| `TD_FILES_DIRECTORY` | `"data/tdlib"` | База TDLib + скачанные файлы |
+| `TD_DATABASE_ENCRYPTION_KEY` | `"mila-tdlib-key-change-me"` | Смена ключа делает существующую сессию нечитаемой |
+| `TD_VERBOSITY` | `2` | |
+
+### LLM (день)
+
+| Поле | По умолчанию |
+|------|--------------|
+| `LLM_API_BASE` | обязателен |
+| `LLM_API_KEY` | обязателен |
+| `MAIN_LLM_MODEL` | обязателен |
+| `MAIN_LLM_MAX_TOKENS` | `2048` |
+| `MAIN_LLM_TEMPERATURE` | `0.7` |
+
+### Эмбеддинги
+
+| Поле | По умолчанию |
+|------|--------------|
+| `EMBED_API_BASE` | обязателен |
+| `EMBED_API_KEY` | обязателен (может быть пустым для Ollama) |
+| `EMBED_MODEL` | обязателен |
+| `EMBED_DIM` | `384` (должна совпадать с моделью) |
+
+### FAISS / память / реранкер
+
+| Поле | По умолчанию |
+|------|--------------|
+| `FAISS_TEXT_PATH` | `data/faiss_text.index` |
+| `FAISS_IMAGE_PATH` | `data/faiss_image.index` (резерв, не используется) |
+| `FAISS_SAVE_INTERVAL_MIN` | `10` |
+| `RERANKER_MODEL_PATH` | `models/rerankers/BGE-Reranker-v2-m3` |
+| `RERANKER_THRESHOLD` | `0.6` |
+| `DECAY_LAMBDA` | `0.01` (сидирует runtime) |
+| `FORGET_THRESHOLD` | `0.3` (сидирует runtime) |
+
+### Данные и контекст
+
+| Поле | По умолчанию | Описание |
+|------|--------------|----------|
+| `SQLITE_PATH` | `data/mila.db` | |
+| `PHOTOS_DIR` | `data/photos` | Legacy-каталог |
+| `MEDIA_DIR` | `data/media` | Персистентные фото/войсы для истории |
+| `MAX_MEDIA_MB` | `20` | Лимит скачивания одного файла |
+| `DAILY_REPORTS` | `data/daily reports` | **Пробел в пути — квотировать** |
+| `MAX_CONTEXT_TOKENS` | `10000` | Сидирует `pipeline.max_context_tokens` |
+| `MAX_STM_MESSAGES` | `30` | Лимит `get_context()` по умолчанию |
+| `SIMILARITY_THRESHOLD_IMAGE` | `0.85` | Legacy |
+| `MAIN_LLM_THOUGHT_SENTENCES` | `3` | Legacy |
+| `LOG_DIR` | `logs` | Pipeline- и diary-логи |
+| `CONTEXT_DB_PATH` | `data/context_buffer.db` | |
+| `CONTEXT_MAX_TOKENS` | `30000` | Лимит токенов сообщений (без summary) |
+| `CONTEXT_SUMMARIZE_CHUNK_TOKENS` | `5000` | Сколько сжимать за раз |
+| `CONTEXT_MAX_MESSAGES` | `40` | Legacy |
+| `CONTEXT_SUMMARIZE_CHUNK` | `20` | Legacy |
+| `LOCAL_TIMEZONE` | `""` | IANA-зона; пусто = системная |
+
+### Observatory
+
+| Поле | По умолчанию | Описание |
+|------|--------------|----------|
+| `OBSERVATORY_USERNAME` | `admin` | Basic Auth |
+| `OBSERVATORY_PASSWORD` | `""` | Пусто = auth выключен |
+| `OBSERVATORY_HOST` | `""` | Пусто = `0.0.0.0` |
+| `OBSERVATORY_PORT` | не поле `Settings` | Порт берётся из `runtime system.observatory_port`; переменная может лежать в `.env` благодаря `extra="allow"`, но код её не читает |
+
+### Сообщения / typing
+
+| Поле | По умолчанию | Описание |
+|------|--------------|----------|
+| `MESSAGE_DEBOUNCE_SECONDS` | `2.0` | Legacy: wake-on-every игнорирует окно тишины |
+| `ENABLE_TYPING_WAIT` | `true` | Мастер-выключатель typing-логики |
+| `TYPING_WAIT_MAX_SECONDS` | `8.0` | Верхняя граница ожидания печати |
+| `TYPING_FRESHNESS_SECONDS` | `6.0` | Сколько typing-событие считается свежим |
+| `TYPING_POLL_INTERVAL` | `0.5` | Шаг опроса |
+| `TYPING_GRACE_SECONDS` | `2.0` | Ожидание сообщения после конца печати |
+| `TYPING_ABORT_GENERATION` | `true` | Отменять генерацию/отправку при печати |
+
+### Presence: авто-выход из диалога
+
+| Поле | По умолчанию | Описание |
+|------|--------------|----------|
+| `DIALOG_IDLE_TIMEOUT_SECONDS` | `300.0` | 5 минут тишины в focus-чате → rest |
+| `DIALOG_IDLE_CHECK_INTERVAL_SECONDS` | `30.0` | Период проверки watcher-а |
+
+### Локальные модели (задел)
+
+`CLIP_MODEL_PATH`, `MOONDREAM_MODEL_PATH` — в текущем коде не используются.
 
 ### Использование
 
 ```python
 from config import settings
 settings.LLM_API_BASE
-settings.MAIN_LLM_MODEL
 ```
 
-## 2. Динамическая конфигурация (RuntimeConfig)
+`normalize_api_base(url)` достраивает `/v1`, если его нет (LM Studio);
+OpenRouter с `/v1` не меняется.
 
-**Файл**: `Mila_observatory/runtime.py`
+## 2. Динамическая конфигурация (`RuntimeConfig`)
 
-Хранится в `./runtime_config.json` — **в корне проекта, не в `data/`** (чтобы переживать пересоздание `mila_data` volume через bind-mount `.:/app`). Файл gitignored, может содержать секреты.
+**Файл:** `Mila_observatory/runtime.py`
+**Хранилище:** `./runtime_config.json` в корне проекта (не в `data/`), gitignored.
 
-При старте `RuntimeConfig` сидируется из `config.py` (все `None` заполняются значениями `.env`), затем `night_llm.*` наследуются от `llm.*`, если не заданы.
+При старте `RuntimeConfig` загружает JSON, затем `_seed_from_settings()` заполняет
+оставшиеся `None` из `.env`. `night_llm.model/api_base/api_key` наследуются от
+`llm.*`; `night_llm.temperature/max_tokens` по умолчанию `0.3/4096`.
 
 ### Актуальная структура
 
 ```json
 {
   "llm": {
-    "model": "meta/muse-spark-...",
+    "model": "...",
     "api_base": "https://openrouter.ai/api/v1",
     "api_key": "...",
     "temperature": 0.8,
@@ -129,7 +152,7 @@ settings.MAIN_LLM_MODEL
   },
   "night_llm": {
     "model": "...",
-    "api_base": "https://openrouter.ai/api/v1",
+    "api_base": "...",
     "api_key": "...",
     "temperature": 0.3,
     "max_tokens": 4096,
@@ -140,11 +163,11 @@ settings.MAIN_LLM_MODEL
     "send_message": true,
     "silence": true,
     "write_diary": true,
-    "update_diary": true
+    "update_diary": true,
+    "presence": true,
+    "peek_recent": true
   },
-  "diary": {
-    "save_processed": false
-  },
+  "diary": { "save_processed": false },
   "persona": {
     "custom_text": "",
     "parameters": {
@@ -156,7 +179,7 @@ settings.MAIN_LLM_MODEL
   },
   "pipeline": {
     "max_context_tokens": 10000,
-    "max_think_iterations": 5,
+    "max_think_iterations": 7,
     "decay_lambda": 0.01,
     "forget_threshold": 0.3,
     "similarity_threshold": 0.85
@@ -166,30 +189,60 @@ settings.MAIN_LLM_MODEL
     "end_hour": null,
     "forced_awake": false
   },
+  "proactive": {
+    "enabled": true,
+    "idle_minutes": 27,
+    "check_interval_seconds": 60,
+    "sleep_minutes": 480,
+    "cooldown_minutes": 27,
+    "max_chats": 20,
+    "default_peek_limit": 10,
+    "command": {
+      "run_now": false,
+      "dry_run": false,
+      "force_action": null,
+      "needs_override": {},
+      "requested_at": null
+    },
+    "last_run": null
+  },
   "system": {
     "observatory_port": 8080,
     "log_level": "INFO"
   },
   "_meta": {
     "version": 1,
-    "last_updated": "2026-09-04T22:25:58.622149",
+    "last_updated": "...",
     "updated_by": "observatory"
   }
 }
 ```
 
-Замечания:
-- `tool_choice` (`"required"` / `"auto"`) читается пайплайном на каждой итерации (`runtime_config.get("llm.tool_choice", "required")`) и переключается из Observatory (ModelControl).
-- Отдельного `night_verifier_llm` **нет** — ночные процессы используют `night_llm` (генерация t=0.3, верификация t=0.1 задаются кодом).
-- `persona.parameters.*` (empathy/humor/formality/creativity) хранятся, но в текущий system prompt **не инжектятся** — persona собирается из файлов `core/llm/prompts/*.md` (см. [persona.md](persona.md)).
-- `pipeline.max_think_iterations` хранится, но цикл ограничен константой `MAX_THINK_ITERATIONS = 5` в `core/pipeline.py`.
-- `sleep.start_hour` / `end_hour` = `null` → автосон выключен; `forced_awake = true` запрещает даже ручной сон.
+### Важные замечания
+
+- **`llm.tool_choice`**: пайплайн всегда использует `auto`; `required` из runtime
+  принудительно переопределяется (direct-tools схема). Значение хранится и
+  отображается в Observatory, но не меняет поведение main-пайплайна.
+- **`night_llm.tool_choice`** реально используется ночными процессами.
+- **`pipeline.max_think_iterations`** читается на каждом запуске (по умолчанию 7);
+  константа `MAX_THINK_ITERATIONS = 7` — fallback.
+- **`persona.parameters.*`** хранятся и редактируются, но в system prompt
+  **не инжектятся**. Текст персоны собирается из `core/llm/prompts/*/*.md`.
+- **`proactive.command`** — одноразовая команда от Observatory к bot-процессу;
+  bot сбрасывает `run_now`, выполняет и пишет `proactive.last_run`.
+- **`sleep.start_hour/end_hour = null`** — автосон выключен; `forced_awake = true`
+  запрещает и ручной сон.
+- **`diary.save_processed`** больше не управляет резервным копированием: дневник
+  всегда сохраняется в `logs/diary_logs/` перед очисткой.
 
 ### Синхронизация между контейнерами
 
-`bot` и `observatory` — отдельные процессы со своими in-memory копиями. Мост — JSON-файл:
-- каждый `get()`/`get_all()`/`set()`/`update()` сначала проверяет `mtime` файла и перечитывает его при изменении (`_maybe_auto_reload`);
-- каждая запись сначала перечитывает файл, чтобы не затереть чужие изменения.
+`bot` и `observatory` — разные процессы со своими in-memory копиями. Мост — JSON-файл:
+
+- каждый `get()`/`get_all()`/`set()`/`update()` вызывает `_maybe_auto_reload()` и
+  перечитывает файл при изменении `mtime`;
+- каждая запись сначала перечитывает файл, чтобы не затереть чужие изменения;
+- `get_all()` содержит секреты, для API используется `get_public_copy()` с маскировкой.
 
 ### API для работы с конфигом
 
@@ -198,27 +251,29 @@ settings.MAIN_LLM_MODEL
 | `runtime_config.get(key)` | Dot-notation: `"llm.model"`, `"tools.search_memory"` |
 | `runtime_config.set(key, value)` | Установить значение |
 | `runtime_config.update(updates, prefix)` | Глубокий merge |
-| `runtime_config.get_all()` | Полный конфиг |
+| `runtime_config.get_all()` | Полный конфиг (с секретами) |
+| `runtime_config.get_public_copy()` | Копия с маскированными ключами |
 | `runtime_config.reload()` | Перезагрузить с диска |
 
 ### Эндпоинты API
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/config` | Полный runtime config |
-| PUT | `/api/config` | Обновление (merge) |
+| GET | `/api/config` | Полный runtime config (секреты маскированы) |
+| PUT | `/api/config` | Merge; значения-маски с `...` игнорируются |
 | POST | `/api/config/reload` | Перезагрузка с диска |
-| GET | `/api/runtime-state` | Config + live state |
+| GET | `/api/runtime-state` | Config + путь/наличие файла в `_live` |
 
-## Приоритет параметров
+### Маскировка секретов
 
-```
-runtime_config.json (не-null)  →  побеждает  →  config.py (.env)
-```
+`Mila_observatory/auth.py`:
 
-`null` в runtime = «используй значение из `.env`». Маппинг сидирования (`_seed_from_settings`): `llm.model→MAIN_LLM_MODEL`, `llm.api_base→LLM_API_BASE`, `llm.api_key→LLM_API_KEY`, `llm.temperature→MAIN_LLM_TEMPERATURE`, `llm.max_tokens→MAIN_LLM_MAX_TOKENS`, `pipeline.max_context_tokens→MAX_CONTEXT_TOKENS`, `pipeline.decay_lambda→DECAY_LAMBDA`, `pipeline.forget_threshold→FORGET_THRESHOLD`, `pipeline.similarity_threshold→SIMILARITY_THRESHOLD_IMAGE`.
+- `mask_secret("sk-or-v1-abcdef...wxyz")` → `sk-or-v1...wxyz`;
+- `should_keep_existing(value)` — `True`, если в строке есть `...`;
+- `strip_masked_secrets(updates)` выкидывает такие значения перед записью;
+- `mask_secrets_inplace()` маскирует `llm.api_key` и `night_llm.api_key`.
 
-## Файл .env
+## Файл `.env`
 
 ```ini
 API_ID=12345
@@ -232,18 +287,30 @@ MAIN_LLM_MODEL=llama3
 EMBED_API_BASE=http://127.0.0.1:11434
 EMBED_API_KEY=
 EMBED_MODEL=nomic-embed-text
+
+# Observatory (пусто = auth выключен, слушать только localhost)
+OBSERVATORY_USERNAME=admin
+OBSERVATORY_PASSWORD=
+# OBSERVATORY_HOST=0.0.0.0
+
+# Presence
+DIALOG_IDLE_TIMEOUT_SECONDS=300
+DIALOG_IDLE_CHECK_INTERVAL_SECONDS=30
 ```
 
-Смотри `.env.example` для полного списка (включая `NIGHT_LLM_*`, `LOCAL_TIMEZONE`, `TD_*`).
+Полный список — `.env.example`. `NIGHT_LLM_*` в `.env.example` носят справочный
+характер: рабочие ночные настройки живут в `runtime_config.json` (`night_llm.*`).
 
 ## Где применяется runtime config
 
 | Модуль | Что читает |
 |--------|------------|
 | `Mila_observatory/llm_manager.py` | `llm.*`, `night_llm.*` |
-| `core/pipeline.py` | `llm.tool_choice` (на каждой итерации) |
-| `core/tools/executor.py` | `tools.*` (enabled/disabled) |
+| `core/pipeline.py` | `llm.tool_choice` (переопределяет в auto), `pipeline.max_think_iterations` |
+| `core/tools/executor.py` | `tools.*`, `proactive.default_peek_limit/max_chats`, `presence_state` |
 | `core/llm/persona.py` | `persona.custom_text` (полностью заменяет статику) |
-| `core/sleep/manager.py` | `sleep.*` (start_hour/end_hour/forced_awake) |
+| `core/proactive.py` | `proactive.*` |
+| `core/sleep/manager.py` | `sleep.*` |
 | `core/sleep/processes.py` | `night_llm.*` |
-| `Mila_observatory/server.py` | `system.observatory_port` (порт по умолчанию 8080) |
+| `core/presence.py` | только `config.py` (`DIALOG_IDLE_*`) |
+| `Mila_observatory/server.py` | `system.observatory_port` |

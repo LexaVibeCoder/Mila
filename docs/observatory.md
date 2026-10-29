@@ -1,166 +1,209 @@
 # Mila Observatory
 
-**Директория**: `Mila_observatory/`
+**Директория:** `Mila_observatory/`
 
-Веб-панель для мониторинга и управления Милой. FastAPI бэкенд + React SPA фронтенд.
+Веб-панель для мониторинга и управления Милой. FastAPI-бэкенд + React SPA.
 
 ## Архитектура
 
 ```
 Mila_observatory/
-├── server.py            # FastAPI приложение, CORS, SPA-fallback
-├── runtime.py           # RuntimeConfig (синглтон, JSON-персистенция в ./runtime_config.json)
-├── llm_manager.py       # LLMManager (синглтон)
-├── models.py            # Pydantic модели API
-├── api/                 # Роутеры
-│   ├── config.py        # CRUD runtime config
-│   ├── dashboard.py     # Статус, события, дашборд
-│   ├── diary.py         # Просмотр дневника (файлы data/daily reports/*.md)
+├── server.py            # FastAPI, CORS, Basic Auth, SPA-fallback, health
+├── auth.py              # HTTP Basic Auth + маскировка секретов
+├── runtime.py           # RuntimeConfig (singleton, ./runtime_config.json)
+├── llm_manager.py       # LLMManager (main/night LLM)
+├── models.py            # Pydantic-модели API
+├── api/
+│   ├── config.py        # runtime config
+│   ├── dashboard.py     # статус, события, presence, dashboard
+│   ├── diary.py         # дневник (daily reports)
 │   ├── memory.py        # CRUD памяти + FAISS rebuild
-│   ├── model.py         # Настройки LLM (main/night) + тестовый запрос
-│   ├── needs.py         # State Agent роутер потребностей
-│   ├── personality.py   # Редактор персоны
-│   ├── pipeline.py      # Логи пайплайна + группировка по чатам
-│   ├── sleep.py         # Управление сном
-│   └── tools.py         # Включение/выключение тулзов
-└── frontend/            # React (TypeScript + Vite)
+│   ├── model.py         # main/night LLM + playground
+│   ├── needs.py         # State Agent + proactive trigger
+│   ├── personality.py   # персона
+│   ├── pipeline.py      # логи пайплайна + чаты
+│   ├── sleep.py         # сон
+│   ├── tools.py         # тумблеры тулзов
+│   └── users.py         # пользователи, отношение, память, портрет
+└── frontend/            # React + TypeScript + Vite
     └── src/
-        ├── App.tsx      # 9 роутов
-        ├── api/client.ts  # Полный API клиент
-        ├── components/Layout.tsx  # Боковая панель
-        └── pages/       # 9 страниц (см. ниже)
+        ├── App.tsx      # 11 маршрутов
+        ├── api/client.ts
+        ├── components/Layout.tsx
+        └── pages/
 ```
 
 ## Запуск
 
 ```bash
-# Standalone (из корня проекта)
-python -m Mila_observatory.server
+# Standalone из корня проекта
+.venv/bin/python -m Mila_observatory.server
 
-# Windows-лаунчер (venv + сервер + открытие браузера)
+# Windows-лаунчер (venv + сервер + браузер)
 Mila_Observatory.bat
 
-# Через Docker
-docker compose up observatory
+# Docker
+docker compose up -d observatory
 ```
 
-Порт по умолчанию: 8080 (runtime `system.observatory_port`; в compose проброшен `8080:8080`, команда — `uvicorn Mila_observatory.server:app --host 0.0.0.0 --port 8080 --reload`).
+Порт: `system.observatory_port` (по умолчанию 8080). Сервер слушает
+`0.0.0.0` (`OBSERVATORY_HOST` может переопределить); наружу в compose
+проброшен только `127.0.0.1:8080` — для LAN нужно поменять ports и включить
+пароль.
+
+## Авторизация и безопасность
+
+- HTTP Basic Auth, если задан `OBSERVATORY_PASSWORD`; логин —
+  `OBSERVATORY_USERNAME` (по умолчанию `admin`).
+- `/api/health` публичен; все остальные роутеры и SPA-fallback требуют auth.
+- Сравнение учётных данных — `secrets.compare_digest`.
+- Если пароль пуст, панель открыта; в консоль печатается предупреждение.
+- API не отдаёт полные ключи: `llm.api_key` и `night_llm.api_key` маскируются,
+  значения с `...` при PUT игнорируются.
+- CORS: не wildcard; разрешён regex
+  `https?://(localhost|127.0.0.1)(:\d+)?`, методы
+  `GET/POST/PUT/DELETE`, заголовки `Authorization/Content-Type`.
 
 ## API Эндпоинты
 
-### Dashboard
+### Health / Dashboard
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/health` | Health check |
-| GET | `/api/status` | Системный статус (uptime, кол-во чанков, модель, сон, presence Милы) |
-| GET | `/api/events` | Последние события (in-memory, макс 50) |
-| GET | `/api/dashboard` | Комбинированные данные дашборда |
-| GET | `/api/presence` | Текущее состояние Милы (`state/focus_chat_id/focus_user_name/note/updated_at`) |
+| GET | `/api/health` | Публичный health check |
+| GET | `/api/status` | Uptime, счётчики, модель, сон, presence |
+| GET | `/api/events?limit=` | Последние in-memory события (макс 50) |
+| GET | `/api/dashboard` | `status` + последние 10 событий |
+| GET | `/api/presence` | `state/focus_chat_id/focus_user_name/note/updated_at` |
 
 ### Модель
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/model` | Текущая конфигурация LLM (main + night, ключи маскированы) |
-| PUT | `/api/model/main` | Обновление main LLM (model/api_base/api_key/temperature/max_tokens/top_p/.../tool_choice) |
-| PUT | `/api/model/night` | Обновление night LLM (те же поля, сохраняется в runtime, подхватывается без рестарта) |
-| POST | `/api/model/test` | Тестовый запрос (playground; всегда через main-клиент, `max_retries=1`) |
+| GET | `/api/model` | main + night, ключи маскированы |
+| PUT | `/api/model/main` | model/api_base/api_key/temperature/max_tokens/top_p/.../tool_choice |
+| PUT | `/api/model/night` | те же поля; сохраняется в runtime |
+| POST | `/api/model/test` | Playground: всегда main-клиент, `max_retries=1` |
 
-`tool_choice` (`required/auto`) — runtime-only поле: в `LLMClient` не пробрасывается, читается пайплайном напрямую. Переключатель есть в ModelControl.
+`tool_choice` — runtime-only; пайплайн принудительно использует `auto` для
+main-пайплайна. Ночные процессы читают `night_llm.tool_choice`.
 
 ### Память
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/memory` | Список/поиск воспоминаний (пагинация, поиск) |
-| POST | `/api/memory` | Создание воспоминания + эмбеддинг + FAISS |
-| GET | `/api/memory/{mem_id}` | Детали воспоминания |
+| GET | `/api/memory` | Список/поиск (`query`, `category`, пагинация) |
+| POST | `/api/memory` | Создание + эмбеддинг + FAISS |
+| GET | `/api/memory/{mem_id}` | Детали |
 | PUT | `/api/memory/{mem_id}` | Обновление |
-| DELETE | `/api/memory/{mem_id}` | Удаление (soft) |
-| POST | `/api/memory/rebuild-faiss` | Перестроение FAISS индекса с переэмбеддингом |
+| DELETE | `/api/memory/{mem_id}` | Удаление строки (hard delete) |
+| POST | `/api/memory/rebuild-faiss` | Перестроение индекса с переэмбеддингом |
+
+### Пользователи
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/api/users?search=&sort=` | Список с агрегатами; sort: `last_activity/messages/memories/name` |
+| GET | `/api/users/{user_id}` | Профиль, отношение, чаты, память, сообщения |
+| PUT | `/api/users/{user_id}` | `user_name`, `preferred_name`, `relationship_type`, `sentiment`, `appearance_description` |
+| GET | `/api/users/{user_id}/memories` | Память пользователя (пагинация, поиск) |
+| POST | `/api/users/{user_id}/memories` | Добавить память |
+| GET | `/api/users/{user_id}/messages` | История `chunks` (пагинация) |
+| GET | `/api/users/{user_id}/attitude-history` | История sentiment/relationship |
+| POST | `/api/users/{user_id}/portrait` | LLM-портрет по памяти и сообщениям |
+
+`user_attitude_history` создаётся лениво при первом изменении отношения.
+`sentiment` ограничен `[-1, 1]`.
 
 ### Тулзы
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/tools` | Список 5 тулзов с состоянием enabled |
-| PUT | `/api/tools/{tool_name}` | Включить/выключить тулз (`{enabled: bool}`) |
+| GET | `/api/tools` | 7 ключей с состояниями |
+| PUT | `/api/tools/{tool_name}` | `{enabled: bool}` |
+
+Допустимые имена: `search_memory`, `send_message`, `silence`, `write_diary`,
+`update_diary`, `presence`, `peek_recent`.
 
 ### Персона
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/persona` | Настройки персоны (`custom_text` + `parameters`) |
-| PUT | `/api/persona` | Обновление персоны |
-| POST | `/api/persona/reset` | Сброс на defaults |
+| GET | `/api/persona` | `custom_text`, `parameters`, `using_custom` |
+| PUT | `/api/persona` | Обновление |
+| POST | `/api/persona/reset` | `custom_text = ""` |
 
 ### Пайплайн
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/pipeline/logs` | Список логов (пагинация `page/limit`, фильтры `success_only/chat_id`; имена чатов резолвятся из `chats/users`) |
-| GET | `/api/pipeline/chats` | Чаты с логами: `chat_id/display_name/count/last_timestamp/last_message` (для фильтра в UI) |
-| GET | `/api/pipeline/logs/{filename}` | Детали лога (`system_prompt/llm_messages/raw_llm_responses/...`; защита от path traversal) |
+| GET | `/api/pipeline/logs` | Пагинация, `success_only`, `chat_id`; display_name из `chats/users` |
+| GET | `/api/pipeline/chats` | Чаты с логами для фильтра |
+| GET | `/api/pipeline/logs/{filename}` | Детали; защита от path traversal; multimodal → метки |
 
 ### Конфиг
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/config` | Полный runtime config |
-| PUT | `/api/config` | Обновление config (merge) |
-| POST | `/api/config/reload` | Перезагрузка с диска |
-| GET | `/api/runtime-state` | Config + live state |
+| GET | `/api/config` | Публичная копия runtime config |
+| PUT | `/api/config` | Merge; маскированные секреты игнорируются |
+| POST | `/api/config/reload` | Перечитать `runtime_config.json` |
+| GET | `/api/runtime-state` | Config + `_live` (путь/наличие файла) |
 
 ### Дневник
 
-API читает **файлы** `data/daily reports/*.md` (не SQLite напрямую):
+Читает файлы `data/daily reports/*.md`:
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/diary` | Список дневных отчётов |
-| GET | `/api/diary/today` | Сегодняшняя запись |
-| GET | `/api/diary/{date}` | Запись по дате (формат ДД.ММ.ГГГГ) |
-
-Отдельной страницы дневника во фронтенде **нет** (только API).
+| GET | `/api/diary` | Список отчётов |
+| GET | `/api/diary/today` | Сегодняшний |
+| GET | `/api/diary/{date}` | По дате `ДД.ММ.ГГГГ` |
 
 ### Сон
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| POST | `/api/sleep/start` | Запуск сна |
-| POST | `/api/sleep/wake` | Пробуждение (rollback; запрещено в committing) |
-| GET | `/api/sleep/status` | Статус сна (state/stage/progress/elapsed/remaining/queue) |
-| GET | `/api/sleep/estimate` | Оценка времени |
-| GET | `/api/sleep/config` | Конфигурация сна |
-| POST | `/api/sleep/config` | Изменение конфигурации |
+| POST | `/api/sleep/start` | `duration_minutes?`, `triggered_by` |
+| POST | `/api/sleep/wake` | Пробуждение = rollback; запрещено в `committing` |
+| GET | `/api/sleep/status` | state/stage/progress/elapsed/remaining/queue |
+| GET | `/api/sleep/estimate` | Оценка по объёму данных |
+| GET | `/api/sleep/config` | `start_hour/end_hour/forced_awake/save_processed` |
+| POST | `/api/sleep/config` | Обновление конфигурации |
 | GET | `/api/sleep/queue-count` | Очередь сообщений |
 
-### State Agent
+### State Agent / Proactive
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/state-agent` | Статус трекера + текущие потребности |
-| POST | `/api/state-agent/run` | Запустить инференс |
-| POST | `/api/state-agent/needs` | Переопределить потребности + инференс |
+| GET | `/api/state-agent` | Модель, потребности, инференс |
+| POST | `/api/state-agent/run` | Принудительный инференс |
+| POST | `/api/state-agent/needs` | Override потребностей + инференс |
+| POST | `/api/state-agent/trigger` | Одноразовый проактивный запуск (dry-run/force_action) |
+| GET | `/api/state-agent/trigger` | Статус команды и `last_run` |
+
+Подробности про trigger — [proactive.md](proactive.md).
 
 ## Фронтенд
 
-React SPA на TypeScript + Vite. В dev-режиме проксирует API на :8080; в проде сервится FastAPI из `frontend/dist/`.
+React SPA на TypeScript + Vite. В dev-режиме проксирует API на `:8080`; в
+проде сервится FastAPI из `frontend/dist/`.
 
-### Страницы (9)
+### Маршруты (11)
 
 | Путь | Компонент | Описание |
 |------|-----------|----------|
-| `/` | Dashboard | Статус-карты + события (auto-refresh 5s) |
-| `/sleep` | SleepControl | Старт/вейк, прогресс, estimate, `forced_awake`/`save_processed`, очередь |
-| `/model` | ModelControl | Формы main/night + тоггл `tool_choice required/auto` + playground |
-| `/memory` | MemoryEditor | CRUD таблица, поиск, FAISS rebuild |
-| `/personality` | PersonalityEditor | Слайдеры empathy/humor/formality/creativity + `custom_text` |
-| `/tools` | ToolsControl | 5 тогглов (включая `update_diary`) |
-| `/pipeline` | PipelineViewer | Логи + фильтр по чатам (`/chats`) + модалка деталей |
-| `/config` | ConfigPage | Просмотр raw JSON |
-| `/state-agent` | StateAgentControl | Метры fatigue/social/boredom, инференс, override-слайдеры |
+| `/` | Dashboard | Статус, presence, модель, сообщения, события (refresh 5s) |
+| `/pipeline` | PipelineViewer | Логи, фильтр по чатам, модалка деталей, deep-link `?log=` |
+| `/users` | UsersList | Список пользователей, поиск, сортировка, sentiment |
+| `/users/:user_id` | UserDetail | Отношение, профиль, портрет, память, история, логи |
+| `/model` | ModelControl | main/night формы, `tool_choice`, playground |
+| `/sleep` | SleepControl | Старт/вейк, прогресс, estimate, конфиг, очередь |
+| `/memory` | MemoryEditor | CRUD, поиск, FAISS rebuild |
+| `/config` | ConfigPage | Runtime State JSON + reload |
+| `/tools` | ToolsControl | 7 тумблеров |
+| `/personality` | PersonalityEditor | `custom_text` + слайдеры parameters |
+| `/state-agent` | StateAgentControl | Потребности, инференс, trigger/dry-run |
 
 ### Сборка
 
@@ -169,38 +212,20 @@ cd Mila_observatory/frontend
 npm run build    # tsc -b && vite build → dist/
 ```
 
-Production-сборка копируется в `frontend/dist/` (в Docker — из stage `frontend-builder`) и сервится FastAPI как статика с SPA-fallback (`/*` → `index.html`).
-
-## RuntimeConfig
-
-**Файл**: `Mila_observatory/runtime.py`
-
-Синглтон, хранящий динамический конфиг в памяти + JSON на диске (**`./runtime_config.json` в корне**, не `data/`).
-
-```python
-runtime_config = RuntimeConfig()
-
-runtime_config.get("llm.model")          # dot-notation доступ
-runtime_config.set("tools.silence", False)
-runtime_config.update({"llm": {...}})    # глубокий merge
-runtime_config.get_all()                 # полный конфиг
-runtime_config.reload()                  # перезагрузка с диска
-```
-
-Thread-safe через `threading.RLock`. Bot и Observatory — разные процессы: синхронизация через `mtime` файла (auto-reload при чтении, re-read перед записью). Подробности — [config.md](config.md).
-
-## CORS
-
-В dev-режиме фронтенд на :5173, API на :8080 — CORS настроен на все origins.
+В Docker `dist` собирается в stage `frontend-builder` и копируется в образ; в
+dev-режиме можно собирать локально. `dist/` не коммитится.
 
 ## SPA Fallback
 
 ```python
-@app.get("/{path:path}")
-async def spa_fallback(path: str):
-    if path.startswith("api/"):
-        raise HTTPException(404)
-    return FileResponse("frontend/dist/index.html")
+@app.get("/{full_path:path}", dependencies=[Depends(require_auth)])
+async def spa_fallback(full_path: str):
+    if full_path.startswith("api/"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    file_path = os.path.join(frontend_dir, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    return FileResponse(os.path.join(frontend_dir, "index.html"))
 ```
 
-Все не-API маршруты отдают `index.html` для client-side routing.
+Статика `/assets` и `/icons` монтируется отдельно, если каталоги существуют.

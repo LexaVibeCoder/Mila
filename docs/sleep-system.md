@@ -1,6 +1,9 @@
 # Ночная рефлексия (Sleep System)
 
-Система ночной рефлексии — асинхронный фоновый процесс, запускаемый вручную, по расписанию или до таймаута. Состоит из трёх параллельных процессов, каждый использует двухстадийную LLM-проверку (генерация t=0.3 → верификация t=0.1, обе на `night_llm` из runtime).
+Система ночной рефлексии — фоновый цикл, запускаемый вручную, по расписанию или
+тулом `start_sleep`. Три процесса идут параллельно (`asyncio.gather`), каждый
+использует двухстадийную LLM-проверку: генерация (t=0.3) → верификация (t=0.1)
+на одном `night_llm`.
 
 ## Архитектура
 
@@ -21,96 +24,173 @@ awake ──→ sleeping ──→ committing ──→ awake
               └──→ sleep_error ──→ awake (rollback)
 ```
 
-Состояние — одна строка `sleep_state WHERE id=1` в `mila.db`: `state / session_id / current_stage / progress_pct / started_at / scheduled_end_at / completed_at / triggered_by / error_message`. Стадии `SleepStage`: `diary_analysis / dialog_summarization / user_fact_extraction / verification / committing / completed / idle`. Ручное пробуждение во время `sleeping` = rollback; во время `committing` пробуждение запрещено.
+Одна строка `sleep_state WHERE id=1` в `mila.db`:
+`state / session_id / current_stage / progress_pct / started_at /
+scheduled_end_at / completed_at / triggered_by / error_message / version`.
 
-## Процессы (запускаются параллельно через `asyncio.gather`)
+Стадии `SleepStage`: `diary_analysis / dialog_summarization /
+user_fact_extraction / verification / committing / completed / idle`.
+
+- ручное пробуждение во время `sleeping` = rollback;
+- во время `committing` пробуждение запрещено;
+- `scheduled_end_at` — wall-clock дедлайн, переживает рестарт;
+- «спящая» фаза после обработки помечается `stage=idle`, `progress≈90`.
+
+## Запуск и длительность
+
+`start_sleep(duration_minutes=None, triggered_by="manual")`:
+
+- отказывает, если уже `sleeping`/`committing` или `sleep.forced_awake=true`;
+- создаёт `session_id`, пишет `sleeping` + presence `sleep`, сбрасывает офсеты
+  потребностей;
+- запускает `_run_sleep_with_timeout`:
+  - с длительностью — таймаут `duration*60 + 300с`; по таймауту принудительный
+    wake (если не идёт commit);
+  - без длительности — сон до ручного пробуждения;
+- manual sleep отменяет ожидающую auto-sleep задачу.
+
+## Процессы
 
 ### 1. Анализ дневника (`process_diary_analysis`)
 
-**Цель**: LLM читает дневник Милы + её вечную память (`mila_memory_chunks`) и решает, нужно ли добавить/обновить/удалить чанки.
-
-**Тулзы**:
-- `add_memory_chunk(title, content_md, importance)` — создать чанк
-- `update_memory_chunk(chunk_id, title, content_md, importance)` — обновить
-- `delete_memory_chunk(chunk_id)` — мягкое удаление
-
-**Верификация**: второй проход тем же `night_llm` (t=0.1) через `approve_changes` / `reject_changes`. При rejection → ретрай генерации (до 3 попыток).
+- Если дневник пуст — успех без изменений.
+- LLM читает дневник + `mila_memory_chunks` + метаданные чанков.
+- Тулзы: `add_memory_chunk`, `update_memory_chunk`, `delete_memory_chunk`.
+- До `MAX_GENERATION_ITERATIONS = 3` попыток; если модель не вызвала тул —
+  system-ошибка и повтор.
+- Верификация: `approve_changes` / `reject_changes`, до
+  `MAX_VERIFICATION_RETRIES = 3`. При rejection — повторная генерация
+  (до 3 раз).
 
 ### 2. Суммаризация диалогов (`process_dialog_summarization`)
 
-**Цель**: для каждого чата с новыми сообщениями с прошлого сна LLM создаёт краткую суммаризацию или пропускает диалог.
+- Берёт чаты с сообщениями после прошлого сна (`completed_at`).
+- Пропускает чат, если сообщений меньше `SUMMARIZE_MIN_MESSAGES = 10` или
+  контекст пуст.
+- Тулзы: `save_dialog_summary`, `skip_dialog`.
+- `save_dialog_summary`:
+  - `push_summary(chat_id, summary)`;
+  - `pop_oldest_messages_by_tokens(chat_id, 50000)`;
+  - `detach_media_by_chunk_ids()` для summarized-away сообщений — очищает
+    `chunks.media_path` и удаляет файлы (включая `.wav`), чтобы старые
+    фото/аудио не подтягивались в будущие ходы;
+  - пишет `sleep_dialog_summary_log`;
+  - ставит staging-операцию для `context_buffer.chat_*`.
+- Верификация: approve/reject; при rejection результат помечается rejected.
 
-**Тулзы**:
-- `save_dialog_summary(chat_id, summary)` — сохранить (лог в `sleep_dialog_summary_log`)
-- `skip_dialog(chat_id)` — пропустить
+### 3. Извлечение фактов (`process_user_fact_extraction`)
 
-После суммаризации старые сообщения удаляются из контекстного буфера.
-
-### 3. Извлечение фактов о пользователях (`process_user_fact_extraction`)
-
-**Цель**: для каждого активного диалога LLM извлекает долгосрочные факты о пользователях.
-
-**Тулзы**:
-- `add_user_fact(user_id, fact_text, confidence)` — добавить факт (→ `memories`)
-- `skip_user_fact_extraction()` — пропустить
-
-Поддерживает групповые чаты (определение пользователя по `from_user_id`).
+- Берёт последние 200 `chunks` каждого активного чата.
+- Тулзы: `add_user_fact`, `skip_user_fact_extraction`.
+- `add_user_fact` пишет в `memories` (source_chat_id обязателен) и ставит
+  staging-операцию `insert` на `memories`.
+- Поддерживает групповые чаты: `user_id` берётся из префикса сообщения.
+- Верификация approve/reject; при rejection — до 3 повторных извлечений.
 
 ## Стейдж и атомарность
 
-Все изменения СНАЧАЛА записываются в `sleep_transaction_staging` как `{session_id, operation_type, target_table, target_id, payload(JSON), applied}`:
+Важный нюанс: операции **применяются к БД сразу** (chunk/memory/diary-summary
+создаются в процессе), а `sleep_transaction_staging` хранит запись о том, что
+нужно откатить. Это позволяет rollback удалить вставки и реактивировать
+удалённые чанки.
 
-- вставки/обновления/удаления чанков `mila_memory_chunks`
-- добавленные `memories`
-- очистка дневника, записи лога суммаризаций
+Записывается `{session_id, operation_type, target_table, target_id, payload,
+applied}`:
 
-**Commit** (`commit_all`): staged → applied, дневник сохраняется в `logs/diary_logs/` + `data/daily reports/`, очищается, состояние → `awake`.
-**Rollback** (`rollback_all`): обратные операции по `payload` → восстановление исходного состояния.
+- `insert/update/delete` по `mila_memory_chunks`;
+- `insert` по `memories`;
+- `insert` summary в `context_buffer.chat_*`.
+
+### Commit (`commit_all`)
+
+1. `state = committing`;
+2. все staging-операции помечаются `applied=1`;
+3. дневник сохраняется в `logs/diary_logs/`; при успехе — очищается;
+4. `state = awake`, presence → `rest`.
+
+Сами данные уже лежат в целевых таблицах; commit фиксирует их и убирает
+возможность rollback.
+
+### Rollback (`rollback_all`)
+
+1. Идёт по staging в обратном порядке:
+   - `insert` chunk → удалить строку;
+   - `delete` chunk → `is_active=1`;
+   - `insert` memory → удалить `mem_id`;
+   - `update` chunk **не откатывается автоматически** (пишется предупреждение);
+2. очищает staging сессии;
+3. всегда пытается сохранить дневник в `logs/diary_logs/`; очищает таблицу
+   только при успешном бэкапе;
+4. `state = awake`, presence → `rest`.
 
 ## Crash Recovery
 
-При старте `MilaUserbot.start()` вызывает `recover_from_crash()`:
-1. Читает `sleep_state` (id=1)
-2. `awake` → ничего не делать
-3. `sleeping` / `sleep_error` → `rollback_all()` → `awake`
-4. `committing`: staged пуст → все изменения применены → `awake`; иначе → `rollback_all()`
+`MilaUserbot.start()` → `recover_from_crash()`:
+
+- `awake` → ничего;
+- `sleeping`:
+  - если стадия `idle` и прогресс ≥ 89 — процессы уже завершены, сон
+    «дремлет»; при живом дедлайне — возобновить ожидание
+    (`_resume_sleep_until_deadline`), при истёкшем — commit;
+  - иначе — `rollback_all()` (сон прервался во время обработки);
+- `committing`:
+  - staging пуст → всё применено → `awake`;
+  - иначе → rollback;
+- `sleep_error` → rollback.
+
+Wall-clock дедлайн из БД авторитетнее in-memory таймера: после рестарта сон
+продолжается до `scheduled_end_at`, а не засыпает заново.
 
 ## Auto-sleep
 
-`start_auto_sleep_scheduler()` запускает `auto_sleep_scheduler()` — фоновый цикл с проверкой каждые 60 секунд (`_check_auto_sleep`):
+`start_auto_sleep_scheduler()` — цикл с проверкой каждые 60с:
 
 ```python
-start_hour = runtime_config.get("sleep.start_hour")  # например, 23 или None
-end_hour = runtime_config.get("sleep.end_hour")      # например, 7 или None
+start_hour = runtime_config.get("sleep.start_hour")
+end_hour = runtime_config.get("sleep.end_hour")
 forced_awake = runtime_config.get("sleep.forced_awake", False)
 ```
 
-- `forced_awake = true` → автосон выключен И ручной `start_sleep` отклоняется
-- `start_hour is None or end_hour is None` → автосон выключен (значение по умолчанию!)
-- иначе диапазон с поддержкой перехода через полночь → `start_sleep(triggered_by="automatic")`, сон без длительности (до ручного пробуждения/таймаута)
-- ручной `start_sleep` отменяет pending auto-task
+- `forced_awake = true` → автосон выключен **и** ручной `start_sleep`
+  отклоняется;
+- `start_hour is None or end_hour is None` → автосон выключен (дефолт);
+- диапазон поддерживает переход через полночь;
+- при попадании в окно и `state == awake` → `start_sleep(triggered_by="automatic")`
+  без длительности (до ручного пробуждения).
 
-Сна «по длительности из конфига» (`duration_minutes`) нет — длительность передаётся параметром `start_sleep(duration_minutes)` / API и используется только для таймаута (`duration*60 + 300с`).
+Длительность из конфига не читается: она передаётся параметром
+`start_sleep(duration_minutes)` / API и влияет только на таймаут.
 
 ## Очередь сообщений
 
-Во время сна `queue.py` не батчит, а кладёт сообщения в `sleep_message_queue` (`queue_incoming_message(chat_id, user_id, text)` с текущим `session_id`). Счётчик — `GET /api/sleep/queue-count`. Обработка очереди — после пробуждения/коммита.
+Во время сна `queue.py`:
+
+1. сохраняет сообщение в `chunks` и `context_buffer`;
+2. вызывает `queue_incoming_message(chat_id, user_id, placeholder)` с текущим
+   `session_id`;
+3. не запускает генерацию.
+
+Счётчик — `GET /api/sleep/queue-count`. Автоматического replay-консьюмера в
+текущем коде **нет**: после пробуждения сообщения уже находятся в `chunks` и
+буфере, поэтому следующий входящий ход строит контекст с их учётом. Вспомогательные
+функции `take_unprocessed_sleep_queue()` / `mark_messages_processed()` есть, но
+hot path их не вызывает.
 
 ## Управление через API
 
 | Эндпоинт | Описание |
 |----------|----------|
-| `POST /api/sleep/start` | Ручной запуск сна (отклоняется при `forced_awake`) |
-| `POST /api/sleep/wake` | Принудительное пробуждение (= rollback, запрещено в `committing`) |
-| `GET /api/sleep/status` | Состояние + стадия/прогресс/elapsed/remaining/queue_count |
-| `GET /api/sleep/estimate` | Оценка длительности |
-| `GET /api/sleep/config` | Конфигурация сна (`start_hour/end_hour/forced_awake`) |
+| `POST /api/sleep/start` | Ручной запуск (`duration_minutes?`, `triggered_by`) |
+| `POST /api/sleep/wake` | Пробуждение = rollback; запрещено в `committing` |
+| `GET /api/sleep/status` | state/stage/progress/elapsed/remaining/queue_count |
+| `GET /api/sleep/estimate` | Оценка по числу записей дневника и диалогов |
+| `GET /api/sleep/config` | `start_hour/end_hour/forced_awake/save_processed` |
 | `POST /api/sleep/config` | Изменение конфигурации |
 | `GET /api/sleep/queue-count` | Сообщений в очереди |
 
 ## LLM настройки для сна
 
-Единая секция `night_llm` из runtime (отдельного `night_verifier_llm` **нет**):
+Единая секция `night_llm` (отдельного `night_verifier_llm` нет):
 
 ```json
 {
@@ -125,4 +205,9 @@ forced_awake = runtime_config.get("sleep.forced_awake", False)
 }
 ```
 
-Наследование: незаданные `model/api_base/api_key` берутся из `llm.*` при старте; `temperature/max_tokens` по умолчанию `0.3/4096`. Верификационный проход использует тот же клиент с t=0.1.
+- незаданные `model/api_base/api_key` наследуются от `llm.*` при старте;
+- `temperature/max_tokens` по умолчанию `0.3/4096`;
+- верификатор — тот же клиент с `temperature=0.1`, `max_tokens=2048`;
+- `night_llm.tool_choice` читается на каждом генерационном/верификационном
+  вызове; если модель плохо переносит `required`, значение можно переключить
+  в Observatory.

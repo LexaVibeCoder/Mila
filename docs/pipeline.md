@@ -1,181 +1,175 @@
 # Основной пайплайн (ThinkPipeline)
 
-**Файл**: `core/pipeline.py`
+**Файл:** `core/pipeline.py`
 
-`ThinkPipeline` — ядро рассуждения Милы. Это одностадийный цикл, в котором LLM вызывается с `tool_choice` из runtime (`"required"` по умолчанию, переключается на `"auto"` из Observatory) и должна вызвать функцию `think()`, содержащую `thoughts` + JSON-список действий.
+`ThinkPipeline` — ядро рассуждения Милы. Это **direct-tools** цикл: LLM получает
+реальные функции (`enter_dialog`, `send_message`, `search_memory`, ...), а не
+обёртку `think()`. В диалоге ответ приходит обычным JSON-контентом
+`{"messages": [...]}`, пустой массив означает молчание.
+
+Название `ThinkPipeline` сохранено для совместимости; алиас — `MilaPipeline`.
 
 ## Логика работы
 
 ```
 process_message_stream() / process_message()
     │
-    ├── Сборка system_prompt (persona + контекст + presence-блок) — один раз на запуск
-    ├── tool_definitions = get_tool_definitions() — с учётом runtime tools.*
+    ├── req_user / req_chat — снимок хода (параллельные чаты не перетирают self.*)
     ├── messages = list(agent_internal_history)
-    │       (текущее сообщение уже в буфере; дублировать user_message НЕ нужно,
-    │        токенный лимит уже применён в _build_histories)
-    ├── Если передан media (photo/voice текущего уведомления):
-    │       _attach_media() — последнее user-сообщение становится
-    │       OpenAI content blocks (текст + image_url + input_audio);
-    │       история остаётся текстовой (плейсхолдеры). Плюс system-строка
-    │       с описанием события (llm_event_line)
+    │   ├── proactive_block? → system-блок с инструкциями и списком чатов
+    │   └── иначе → notification-блок для rest/working (последние 2000 символов)
+    ├── _attach_media(): текущие фото/аудио + последние 3 фото и 2 аудио из истории
     │
-    ├── while iteration < MAX_THINK_ITERATIONS (5):
+    ├── while iteration < max_iterations (runtime, по умолчанию 7):
+    │   ├── presence = get_presence()               (может меняться внутри цикла)
+    │   ├── system_prompt = build_main_llm_system_prompt(...)  (заново каждый раз)
+    │   ├── tools = get_tool_definitions(presence_state, include_proactive=...)
+    │   ├── если state == "dialog": response_format = json_schema(chat_messages)
+    │   ├── LLM.generate(messages, system_prompt, tools, tool_choice="auto")
     │   │
-    │   ├── 1. tool_choice = runtime_config.get("llm.tool_choice", "required")
-    │   ├── 2. LLM.generate(..., tool_choice) → think()
-    │   ├── 3. Валидация вызова think()
-    │   │       └── Нет tool_calls или вызвана не think():
-    │   │           итерация 1 → system-ошибка в messages + 1 ретрай,
-    │   │           итерация 2+ → break
-    │   ├── 4. _parse_think_call() → список actions (пусто → break)
-    │   ├── 5. Для каждого action → _execute_single_action():
-    │   │       ├── send_message → готов к отправке (отправляет bot/queue)
-    │   │       ├── search_memory(status=searched) → инъекция результатов → повтор
-    │   │       ├── enter_dialog/enter_rest/enter_working(status=switched) →
-    │   │       │   инъекция "Presence switched..." → повтор в новом состоянии
-    │   │       ├── start_sleep(status=sleeping) → остановка (как silence)
-    │   │       ├── silence → остановка пайплайна
-    │   │       ├── write_diary / update_diary → запись в дневник
-    │   │       └── после каждого: NeedsTracker.apply_action_effect(action_type)
-    │   └── 6. Если был search_memory со статусом searched
-    │           или presence-переключение:
-    │           └── инъекция результатов → повтор цикла
-    │       Иначе (или silence / start_sleep):
-    │           └── break — done
+    │   ├── нет tool_calls:
+    │   │   ├── dialog → parse_chat_messages(content)
+    │   │   │   ├── невалидный JSON → system-reminder + ретрай
+    │   │   │   ├── [] → silence
+    │   │   │   └── 1–3 пузыря → reply
+    │   │   └── rest/working:
+    │   │       ├── пусто → silence
+    │   │       └── текст → нарушение протокола → reminder + ретрай
+    │   │
+    │   └── есть tool_calls:
+    │       ├── контент этого хода НЕ отправляется (это рассуждение)
+    │       ├── для каждого action: execute_action → apply_action_effect
+    │       ├── start_sleep(sleeping) → silence
+    │       ├── enter_*/switched → system-сообщение → повтор в новом состоянии
+    │       ├── send_message(ready) → кандидат на финальный ответ
+    │       ├── search_memory → инъекция результатов/ошибки → повтор
+    │       ├── peek_recent_chats → инъекция чатов → повтор
+    │       ├── write/update_diary → инъекция результата → повтор
+    │       └── иначе → reminder и следующий круг
     │
-    └── yield "done" или "error" (stream) / return result (обычный)
+    └── yield "reply" / "silence" / "done" / "error"
 ```
 
-## Формат think()
+## Состояния и протокол
 
-LLM возвращает tool_call `think` с JSON. **Ключ `thoughts` обязан идти ПЕРЕД `actions`** (требование промпта; в логах порядок нормализуется `_reorder_think_args`):
+Поведение зависит от `presence.state`:
+
+| Состояние | Ответ | Инструменты |
+|-----------|-------|-------------|
+| `rest` | JSON-ответ невозможен; текст без тула игнорируется | `enter_dialog`, `send_message` (одна отмашка), `enter_working`, `start_sleep` |
+| `working` | то же | `enter_dialog`, `send_message`, `enter_rest`, `start_sleep` |
+| `dialog` | JSON `{"messages": [{"content": ...}]}` (1–3) или `{"messages": []}` | `search_memory`, `write_diary`, `update_diary`, presence-тулы, `start_sleep` |
+| `sleep` | пайплайн обычно не работает | `enter_dialog`, `start_sleep` |
+| proactive | `rest/working` + `peek_recent_chats` | те же + peek |
+
+После `enter_dialog` пайплайн **пересобирает system prompt и tools** и вызывает
+LLM снова — уже по правилам диалога. После `enter_rest`/`enter_working` — наоборот.
+
+## Формат ответа в диалоге
 
 ```json
-{
-  "thoughts": "краткое рассуждение",
-  "actions": [
-    { "action_type": "send_message", "params": { "text": "текст", "chat_id": "123" } },
-    { "action_type": "search_memory", "params": { "query": "что ищем" } }
-  ]
-}
+{"messages": [{"content": "первый пузырь"}, {"content": "второй пузырь"}]}
 ```
 
-### Поля
+- максимум `MAX_BUBBLES = 3`; лишние отбрасываются;
+- пустой массив — валидное молчание;
+- код-фенсы и текст вокруг JSON вырезаются парсером;
+- ведущий `[YYYY-MM-DD HH:MM:SS]`, скопированный из истории, удаляется;
+- при поддержке провайдера запрашивается `response_format={"type":"json_schema", ...}`;
+  если провайдер отверг `response_format`, один раз повторяется prompt-only.
 
-- `thoughts` — внутреннее рассуждение (в fallback-отправке может стать текстом ответа)
-- `actions` — массив действий для исполнения
-- Старого поля `is_direct_answer` **нет** в коде — игнорируется, если модель его вернёт
+## Стриминговые события
 
-## Доступные action_type
+`process_message_stream()` — асинхронный генератор (его потребляет `core/queue.py`
+и `core/proactive.py`):
 
-| Тип | Описание | Параметры |
-|-----|----------|-----------|
-| `send_message` | Отправить сообщение в чат | `text: str`, `chat_id?: str` (по умолчанию текущий) |
-| `search_memory` | Поиск в FAISS-памяти (top-10 → rerank → top-5 в контекст) | `query: str` |
-| `silence` | Промолчать, остановить пайплайн | `reason: str` |
-| `write_diary` | Новая запись в дневник | `entry: str` (fallback `text`), `category?: day_entries \| reflection_entries` |
-| `update_diary` | Обновить запись дневника по ID из промпта | `entry: str`, `entry_id: str`, `category?` |
-| `enter_dialog` | Перейти в диалог с человеком | `chat_id!: str`, `note?` → повтор LLM в новом состоянии |
-| `enter_rest` | Вернуться в отдых | `note?` → повтор LLM |
-| `enter_working` | Заняться своим делом | `note?` → повтор LLM |
-| `start_sleep` | Лечь спать (запускает ночной цикл) | `duration_minutes!: int` → стоп как silence |
+```
+thought       → {"type": "thought", "thoughts": "..."}
+action        → {"type": "action", "action": {...}}
+search_result → {"type": "search_result", "content": "..."}   (memory или peek)
+reply         → {"type": "reply", "texts": [...], "text": "...", "chat_id": "...", "via": "bubbles"|"send_message_brush_off"}
+silence       → {"type": "silence", "reason": "..."}
+done          → {"type": "done", "result": {...}}
+error         → {"type": "error", "error": "..."}
+```
 
-Набор `enum` собирается динамически: отключённые в runtime тулзы исключаются (`tools.presence` — все четыре presence-тула разом); если выключены все — остаётся `silence`.
+`process_message()` выполняет тот же цикл и возвращает `result` целиком.
 
-## ToolExecutor
-
-**Файл**: `core/tools/executor.py`
+## Результат
 
 ```python
-executor = ToolExecutor(
-    text_memory=self.text_memory,
-    embedding_client=self.emb_client,
-    current_user_id=self.user_id,
-    chat_id=self.chat_id,
-)
-result = await executor.execute_action(action)
-```
-
-- `_handle_send_message` — только готовит `{type, text, chat_id, status: "ready"}`; в Telegram отправляет `core/queue.py`, затем пишет `chunks` + `push_message(..., role="assistant")`
-- `_handle_search_memory` — эмбеддинг → `VectorMemory.search(k=10)` → `search_memories_by_faiss_ids` → `RerankerClient.rerank` → топ-5 в `context_addon`; статусы `searched` / `error`
-- `_handle_silence` → `{status: "silent"}`; пайплайн останавливается сразу
-- `_handle_write_diary` → `add_diary_entry(entry, category)`; принимает `entry` или `text`
-- `_handle_update_diary` → `update_diary_entry(entry_id, entry, category)`; статусы `updated` / `not_found` / `error`
-
-## Управление тулзами
-
-Тулзы включаются/выключаются через runtime config (`./runtime_config.json`):
-
-```json
 {
-  "tools": {
-    "search_memory": true,
-    "send_message": true,
-    "silence": true,
-    "write_diary": true,
-    "update_diary": true
-  }
+  "success": True,
+  "actions": [...],
+  "thoughts": "...",            # legacy: равен reply_text
+  "reply_text": "...",
+  "reply_texts": ["..."],
+  "reply_via": "bubbles" | "send_message_brush_off" | "",
+  "reply_chat_id": "...",
+  "silence_reason": "...",
+  "raw_llm_responses": [...],
+  "system_prompt": "",          # legacy-поле, не заполняется
+  "llm_messages": [],           # legacy-поле, не заполняется
+  "timing": {"total": "3.21s", "iterations": 2}
 }
 ```
 
-Отключённые тулзы не попадают в `get_tool_definitions()` и недоступны LLM. Переключение — `PUT /api/tools/{name}` или страница Tools в Observatory, применяется со следующего вызова LLM.
+## Медиа
+
+`_attach_media()`:
+
+- текущий батч (фото/аудио) вставляется в **последнее** user-сообщение;
+- последние `MAX_HISTORY_IMAGES = 3` фото и `MAX_HISTORY_AUDIOS = 2` аудио
+  подтягиваются из `chunks.media_path` и вставляются **в свои** сообщения по
+  плейсхолдерам `[фото...]` / `[голосовое...]`;
+- если сообщение уже вышло из контекста — байты отбрасываются, а не
+  приклеиваются к текущему ходу;
+- аудио конвертируется в wav/16kHz mono через ffmpeg; при отсутствии ffmpeg
+  нативный звук пропускается (плейсхолдер остаётся);
+- при ошибке провайдера на аудио `LLMClient` делает один текстовый ретрай.
 
 ## Логирование
 
-Каждый запуск сохраняется в `logs/pipeline_*.json` (`LOG_DIR` из config, по умолчанию `logs/`):
+Каждый прогон пишется в `logs/pipeline_*.json` (`LOG_DIR`), хранится 200 последних
+файлов. Основные поля:
 
 ```json
 {
-  "timestamp": "2026-01-01T12:00:00",
+  "timestamp": "2026-10-29T12:00:00",
   "user_id": "...",
   "chat_id": "...",
   "user_message": "...",
-  "system_prompt": "...",
-  "llm_messages": [...],
+  "system_prompt": "",
+  "llm_messages": [],
   "thoughts": "...",
+  "reply_text": "...",
+  "reply_texts": ["..."],
+  "reply_via": "bubbles",
+  "reply_chat_id": "...",
+  "silence_reason": "",
   "actions": [...],
   "raw_llm_responses": [
-    { "iteration": 1, "thoughts": "...",
-      "tool_calls": [{ "name": "think", "arguments": "{...}" }],
-      "finish_reason": "tool_calls" }
+    {"iteration": 1, "thoughts": "...", "tool_calls": [...], "finish_reason": "tool_calls"}
   ],
   "success": true,
   "error": null,
-  "timing": { "total": "3.21s", "iterations": 2 }
+  "timing": {"total": "3.21s", "iterations": 2}
 }
 ```
 
-Просмотр — `GET /api/pipeline/logs`, `/api/pipeline/logs/{file}`, группировка по чатам — `GET /api/pipeline/chats`, UI — страница Pipeline в Observatory. Детальный эндпоинт санитизирует мультимодальные `llm_messages` в plain-text (`[фото]`, `[голосовое сообщение]`, base64 выкидывается — в файле лога на диске всё сохраняется целиком), поэтому UI не падает на content-блоках (React error #31).
-
-## Потоковая обработка
-
-`process_message_stream()` — асинхронный генератор событий (именно его потребляет `core/queue.py`):
-
-```
-thought       → {"type": "thought", "thoughts": "рассуждение"}
-action        → {"type": "action", "action": <результат execute_action>}
-search_result → {"type": "search_result", "content": "context_addon"}
-done          → {"type": "done", "result": {...}}
-error         → {"type": "error", "error": "описание"}
-```
-
-Не-стрим `process_message()` выполняет тот же цикл и возвращает `result` целиком.
-
-В `queue.py` события обрабатываются так:
-- `send_message` (непустой `text`) → пауза 0.3–1.0с → отправка в Telegram → `add_chunk` + `push_message(role="assistant")`
-- `silence` → флаг, отправки не будет; пустой ответ сохраняется как `content=""` с `llm_full_response`
-- `write_diary` / `update_diary` → только лог (запись уже выполнена экзекутором)
-- `done.thoughts` без `send_message` и без `silence` → fallback: если `thoughts` длиннее 80 символов — автоотправка, иначе сохранение как молчаливого ответа
-- новое сообщение или печать собеседника **во время** генерации/перед отправкой → отмена прогона, рестарт батча (см. [messaging.md](messaging.md))
+Просмотр: `GET /api/pipeline/logs`, `/api/pipeline/logs/{file}`,
+`GET /api/pipeline/chats`; UI — страница Pipeline. Детальный эндпоинт заменяет
+мультимодальные content-блоки на метки `[фото]` / `[голосовое сообщение]`,
+base64 в ответ API не попадает.
 
 ## Важные константы
 
 | Константа | Значение | Где | Описание |
 |-----------|----------|-----|----------|
-| `MAX_THINK_ITERATIONS` | 5 | `core/pipeline.py` | Максимум итераций цикла |
-| `CONTEXT_MAX_TOKENS` | 30000 | `config.py` | Лимит контекстного буфера (сообщения; суммари вне лимита частично — см. context-buffer) |
-| `MAX_CONTEXT_TOKENS` | 10000 | `config.py` / `runtime pipeline.max_context_tokens` | Целевой лимит контекста |
-| `MAX_STM_MESSAGES` | 30 | `config.py` | Лимит `get_context()` по умолчанию |
-| `MAIN_LLM_MAX_TOKENS` | 2048 | `config.py` | Дефолт `max_tokens` генерации |
-| `MAIN_LLM_TEMPERATURE` | 0.7 | `config.py` | Дефолт температуры (перекрывается runtime `llm.temperature`) |
+| `MAX_THINK_ITERATIONS` | 7 | `core/pipeline.py` | Fallback-лимит, runtime может переопределить |
+| `MAX_BUBBLES` | 3 | `core/pipeline.py` | Максимум пузырей в диалоге |
+| `MAX_HISTORY_IMAGES` | 3 | `core/media.py` | Фото, остающиеся нативными в истории |
+| `MAX_HISTORY_AUDIOS` | 2 | `core/media.py` | Аудио, остающиеся нативными в истории |
+| `CONTEXT_MAX_TOKENS` | 30000 | `config.py` | Лимит токенов сообщений в буфере |
+| `MAX_CONTEXT_TOKENS` | 10000 | `config.py` | Целевой лимит выборки контекста |
+| `MAIN_LLM_MAX_TOKENS` | 2048 | `config.py` | Дефолт; пайплайн явно просит 2048 |

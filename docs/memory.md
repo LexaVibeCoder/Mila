@@ -1,44 +1,52 @@
 # Система памяти (Memory System)
 
-Система памяти Милы состоит из трёх уровней:
+Память Милы состоит из трёх уровней:
 
-1. **Векторная память** (FAISS) — быстрый поиск по семантической близости
-2. **SQLite memories** — долгосрочные факты о пользователях
-3. **Автобиографическая память** — собственные знания Милы о себе (используется ночью, в дневной промпт не инжектится — см. [persona.md](persona.md))
+1. **Векторная память (FAISS)** — быстрый семантический поиск.
+2. **SQLite `memories`** — долгосрочные факты о пользователях.
+3. **Автобиографическая память** — собственные знания Милы о себе
+   (`mila_memory_chunks`), используются ночью.
 
 ## 1. Векторная память (FAISS)
 
-**Файл**: `core/memory/vector.py`
-
-### Класс `VectorMemory`
+**Файл:** `core/memory/vector.py`
 
 ```python
-class VectorMemory:
-    def __init__(self, index_path: str, dim: int)
+VectorMemory(index_path: str, dim: int)
 ```
 
-- FAISS `IndexFlatL2` + `IndexIDMap` (прямой доступ по ID)
-- L2-дистанция для поиска ближайших соседей
-- Размерность: `EMBED_DIM` из config (**по умолчанию 384**, напр. nomic-embed-text; должна совпадать с моделью эмбеддингов)
-- В `MilaUserbot`: `VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)`, т.е. файл **`data/faiss_text.index`** (плюс зарезервированный `FAISS_IMAGE_PATH = data/faiss_image.index`, пока не используется)
+- FAISS `IndexFlatL2` + `IndexIDMap`;
+- размерность `EMBED_DIM` (по умолчанию **384**);
+- в боте: `VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)` —
+  `data/faiss_text.index`;
+- `data/faiss_image.index` зарезервирован, не используется.
 
 ### Операции
 
 | Метод | Описание |
 |-------|----------|
-| `load_or_create()` | Загружает индекс из файла или создаёт новый (вызывается в `__init__`) |
-| `add(vectors, ids)` | Добавляет векторы с указанными ID (`add_with_ids`, float32/int64) |
-| `search(query_vector, k=5)` | Поиск k ближайших; возвращает `(distances[0], indices[0])` |
-| `save()` | Сохраняет индекс, только если `ntotal > 0` |
-| `rebuild_from_active(active_ids, all_vectors)` | Перестроение индекса (после удаления записей) |
+| `load_or_create()` | Загружает индекс или создаёт новый |
+| `add(vectors, ids)` | `add_with_ids`, float32/int64 |
+| `search(query_vector, k=5)` | `(distances[0], indices[0])` |
+| `save()` | Атомарная запись через `.tmp` + `os.replace`, только при `ntotal > 0` |
+| `rebuild_from_active(active_ids, all_vectors)` | Перестроение индекса |
+
+### Отказоустойчивость
+
+- повреждённый индекс при загрузке **не роняет процесс**: файл
+  переименовывается в `*.corrupt-<timestamp>`, создаётся новый;
+- сохранение защищено межпроцессным `flock` (`*.lock`) — bot и Observatory не
+  перетирают файл;
+- запись атомарная: падение посреди `save()` оставляет старый индекс целым.
 
 ### Периодическое сохранение
 
-В `MilaUserbot.periodic_save()` — каждые `FAISS_SAVE_INTERVAL_MIN` минут (по умолчанию 10). Сохраняет только текстовый индекс.
+`MilaUserbot.periodic_save()` — каждые `FAISS_SAVE_INTERVAL_MIN` минут (10).
+При `stop()` индекс сохраняется ещё раз.
 
 ## 2. SQLite Memories
 
-**Файл**: `core/db.py` (таблица `memories`). Актуальная схема (TEXT-идентификаторы, UUID):
+**Файл:** `core/db.py`, таблица `memories` (TEXT UUID).
 
 ```sql
 CREATE TABLE memories (
@@ -46,7 +54,7 @@ CREATE TABLE memories (
     user_id TEXT NOT NULL,
     faiss_id INTEGER,                 -- связь с FAISS (может быть NULL)
     type TEXT DEFAULT 'fact',
-    tag TEXT,                         -- JSON (поле называется tag, не tags)
+    tag TEXT,                         -- JSON (поле tag, не tags)
     content TEXT,
     importance REAL DEFAULT 0.5,
     confidence_source TEXT DEFAULT 'llm_extraction',
@@ -58,16 +66,20 @@ CREATE TABLE memories (
 );
 ```
 
-Полей `is_active / access_count / created_at / updated_at / confidence` **нет** — это устаревшие имена из старой документации.
-
 ### Основные операции
 
 | Функция | Описание |
 |---------|----------|
-| `add_memory(user_id, content, importance, tags, source_chat_id, source_message_id, faiss_id)` | Создание записи (возвращает `mem_id`); эмбеддинг+FAISS делает вызывающий код/Observatory, не сама функция |
+| `add_memory(...)` | Создание записи, возвращает `mem_id`; эмбеддинг/FAISS делает вызывающий |
 | `search_memories_by_ids(mem_ids)` | Загрузка по `mem_id` |
-| `search_memories_by_faiss_ids(faiss_ids)` | Загрузка по FAISS ID (пустой вход → `[]`) |
-| `update_memory_access(mem_ids)` | Обновление `last_accessed_at` (без счётчиков) |
+| `search_memories_by_faiss_ids(faiss_ids, user_id=None)` | Загрузка по FAISS ID; `user_id` обязателен для изоляции |
+| `update_memory_access(mem_ids)` | Обновление `last_accessed_at` |
+
+### Изоляция по пользователю
+
+`ToolExecutor._handle_search_memory()` передаёт `user_id` в
+`search_memories_by_faiss_ids()`. Legacy-строки с `NULL user_id` видны только
+если per-user совпадений нет — это осознанный backward-compat, а не общий доступ.
 
 ### Интеграция с FAISS
 
@@ -78,33 +90,34 @@ sequenceDiagram
     participant EmbeddingClient
     participant VectorMemory
     participant SQLite
+    participant Reranker
 
     LLM->>ToolExecutor: search_memory(query)
     ToolExecutor->>EmbeddingClient: embed(query)
     EmbeddingClient-->>ToolExecutor: vector
     ToolExecutor->>VectorMemory: search(vector, k=10)
-    VectorMemory-->>ToolExecutor: [(distance, faiss_id), ...]
-    ToolExecutor->>SQLite: search_memories_by_faiss_ids([...])
+    VectorMemory-->>ToolExecutor: [faiss_id, ...]
+    ToolExecutor->>SQLite: search_memories_by_faiss_ids(ids, user_id)
     SQLite-->>ToolExecutor: [{content, mem_id, ...}]
-    ToolExecutor->>RerankerClient: rerank(query, documents)
-    RerankerClient-->>ToolExecutor: filtered+ranked (порог 0.6)
-    ToolExecutor-->>LLM: context_addon (топ-5) → повтор вызова
+    ToolExecutor->>Reranker: rerank(query, documents)
+    Reranker-->>ToolExecutor: filtered+ranked (порог 0.6)
+    ToolExecutor-->>LLM: context_addon (топ-5) → повторный вызов
 ```
 
 ## 3. Автобиографическая память Милы
 
-**Файл**: `core/memory/eternal.py`
+**Файл:** `core/memory/eternal.py`
 
-Таблица `mila_memory_chunks` создаётся **лениво** в `eternal._ensure_table()` (не в `init_db()`):
+Таблица создаётся лениво `_ensure_table()`:
 
 ```sql
 CREATE TABLE mila_memory_chunks (
-    chunk_id TEXT PRIMARY KEY,        -- uuid4, не INTEGER id
+    chunk_id TEXT PRIMARY KEY,        -- uuid4
     title TEXT NOT NULL,
     content_md TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
-    version INTEGER DEFAULT 1,        -- +1 при каждом update
+    version INTEGER DEFAULT 1,        -- +1 при update
     is_active INTEGER DEFAULT 1,      -- мягкое удаление
     importance REAL DEFAULT 0.5
 );
@@ -114,53 +127,68 @@ CREATE TABLE mila_memory_chunks (
 
 | Функция | Описание |
 |---------|----------|
-| `add_chunk(title, content_md, importance)` | Добавить чанк → возвращает `chunk_id` (str) |
-| `update_chunk(chunk_id, title?, content_md?, importance?)` | Обновить (версия +1), `False` если не найден |
-| `deactivate_chunk(chunk_id)` | Мягкое удаление (`is_active=0`) |
+| `add_chunk(title, content_md, importance)` | Добавить → `chunk_id` |
+| `update_chunk(chunk_id, title?, content_md?, importance?)` | Версия +1 |
+| `deactivate_chunk(chunk_id)` | Мягкое удаление |
 | `get_all_active_chunks()` | Все активные чанки |
 | `get_chunk(chunk_id)` | Один чанк |
-| `get_chunks_metadata()` | Метаданные (без content) |
-| `get_all_chunks_markdown()` | Полный markdown-документ |
-| `get_chunk_count()` | Количество активных чанков |
+| `get_chunks_metadata()` | Метаданные без content |
+| `get_all_chunks_markdown()` | Полный Markdown-документ |
+| `get_chunk_count()` | Количество активных |
 
 ### Использование
 
-> Важно: вопреки старым версиям документации, `persona.py` **не** инжектит `get_all_chunks_markdown()` в дневной system prompt. Чанки читает/меняет ночная рефлексия (`process_diary_analysis`, двухстадийная проверка) со стейджингом и атомарным коммитом/откатом (см. [sleep-system.md](sleep-system.md)).
+`persona.py` **не** инжектит чанки в дневной prompt. Их читает и меняет ночная
+рефлексия (`process_diary_analysis`) через staging + commit/rollback
+(см. [sleep-system.md](sleep-system.md)).
 
 ## 4. EmbeddingClient
 
-**Файл**: `core/llm/embeddings.py`
+**Файл:** `core/llm/embeddings.py`
 
-Двухрежимный клиент:
-
-- **Ollama**: POST `/api/embed` (определяется по порту 11434 или "ollama" в hostname)
-- **OpenAI-compatible**: `openai.AsyncOpenAI.embeddings.create()`
-
-Автоматическое определение + fallback между режимами при ошибке. `embed([query])` возвращает список векторов.
+- **Ollama**: POST `/api/embed` (порт 11434 или `ollama` в hostname);
+- **OpenAI-compatible**: `AsyncOpenAI.embeddings.create()`;
+- порядок попыток зависит от URL; при ошибке — fallback на второй режим;
+- OpenAI-путь делает до 3 попыток с backoff 1с/2с;
+- `embed([text])` возвращает `np.ndarray`.
 
 ## 5. RerankerClient
 
-**Файл**: `core/llm/reranker.py`
+**Файл:** `core/llm/reranker.py`
 
-BGE-Reranker-v2-m3 через sentence-transformers `CrossEncoder`.
+- BGE-Reranker-v2-m3 через `sentence_transformers.CrossEncoder`;
+- загружается лениво при первом использовании;
+- порог `RERANKER_THRESHOLD = 0.6`;
+- путь `models/rerankers/BGE-Reranker-v2-m3`;
+- установка: `python install_reranker.py`;
+- если модели нет — конструктор бросает `FileNotFoundError`, поиск памяти
+  вернёт `status: "error"`.
 
-- Загружается лениво (при первом использовании)
-- Порог фильтрации: `RERANKER_THRESHOLD = 0.6` (config.py)
-- Путь модели: `RERANKER_MODEL_PATH = models/rerankers/BGE-Reranker-v2-m3`
-- Установка: `python install_reranker.py` (HuggingFace `snapshot_download` репозитория `BAAI/bge-reranker-v2-m3` именно в этот путь)
+## 6. Медиа и память контекста
 
-## Настройки (config.py)
+Фото/войсы хранятся не в FAISS, а как файлы + `chunks.media_path`.
 
-| Параметр | Значение по умолч. | Описание |
-|----------|-------------------|----------|
-| `EMBED_API_BASE` | (обязателен) | Базовый URL для эмбеддингов |
-| `EMBED_API_KEY` | (обязателен) | API ключ |
-| `EMBED_MODEL` | (обязателен) | Модель эмбеддингов |
-| `EMBED_DIM` | `384` | Размерность (должна совпадать с моделью!) |
-| `FAISS_TEXT_PATH` | `data/faiss_text.index` | Рабочий текстовый индекс |
-| `FAISS_IMAGE_PATH` | `data/faiss_image.index` | Зарезервирован, не используется |
-| `FAISS_SAVE_INTERVAL_MIN` | `10` | Интервал автосохранения |
-| `RERANKER_MODEL_PATH` | `models/rerankers/BGE-Reranker-v2-m3` | Путь к реранкеру |
-| `RERANKER_THRESHOLD` | `0.6` | Порог фильтрации |
+- при входящем сообщении файл копируется в `MEDIA_DIR`;
+- пайплайн повторно подключает последние 3 фото и 2 аудио к их сообщениям;
+- после ночной суммаризации старых сообщений `detach_media_by_chunk_ids()`
+  очищает `media_path`, а файлы (включая сконвертированный `.wav`) удаляются —
+  чтобы старые фото/аудио не выглядели свежими в следующих ходах;
+- текстовые плейсхолдеры и summary остаются.
 
-Старого `FAISS_INDEX_PATH = data/faiss.index` и размерности 768 в коде нет.
+## Настройки (`config.py`)
+
+| Параметр | По умолч. | Описание |
+|----------|-----------|----------|
+| `EMBED_API_BASE` | обязателен | |
+| `EMBED_API_KEY` | обязателен | |
+| `EMBED_MODEL` | обязателен | |
+| `EMBED_DIM` | `384` | Должна совпадать с моделью |
+| `FAISS_TEXT_PATH` | `data/faiss_text.index` | Рабочий индекс |
+| `FAISS_IMAGE_PATH` | `data/faiss_image.index` | Резерв |
+| `FAISS_SAVE_INTERVAL_MIN` | `10` | Автосохранение |
+| `RERANKER_MODEL_PATH` | `models/rerankers/BGE-Reranker-v2-m3` | |
+| `RERANKER_THRESHOLD` | `0.6` | Порог |
+| `MEDIA_DIR` | `data/media` | Файлы для истории |
+| `MAX_MEDIA_MB` | `20` | Лимит скачивания |
+
+Старых `FAISS_INDEX_PATH = data/faiss.index` и размерности 768 в коде нет.

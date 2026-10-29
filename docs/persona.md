@@ -1,126 +1,179 @@
 # Персона и системный промпт
 
-**Файл**: `core/llm/persona.py`
+**Файл:** `core/llm/persona.py`
 
-Сборка системного промпта для LLM. **Текст промптов живёт не в коде, а в Markdown-файлах `core/llm/prompts/*.md`** (23 файла) — `persona.py` только загружает их (`_load_prompt`, статика кэшируется через `lru_cache`) и склеивает с runtime-контекстом.
+System prompt собирается из Markdown-фрагментов `core/llm/prompts/` и
+runtime-контекста. Текст персоны живёт **только** в `.md`-файлах; Python-код
+загружает и склеивает их.
 
-## Фрагменты (core/llm/prompts/)
+## Структура промптов
 
-**Статика** (порядок в `_STATIC_PARTS`, склейка через `\n\n---\n\n`):
+```
+core/llm/prompts/
+├── persona/        # кто Мила есть — статика, всегда включена
+│   ├── prefs.md
+│   ├── bio.md
+│   ├── identity.md
+│   ├── closeness.md
+│   ├── voice.md
+│   ├── banned.md
+│   ├── memory.md
+│   ├── style.md
+│   └── no_roleplay.md
+├── diary/
+│   └── guide.md    # инструкция дневника (статика)
+├── relationship/   # строка отношений под текущего пользователя
+│   ├── block.md
+│   ├── friend.md
+│   ├── acq_warm.md
+│   ├── acq_cold.md
+│   ├── neutral.md
+│   └── stranger.md
+├── context/        # динамические блоки
+│   ├── header.md
+│   ├── history_note.md
+│   ├── media_note.md
+│   ├── needs.md
+│   ├── diary_block.md
+│   ├── session.md
+│   └── session_time.md
+└── states/         # ровно один файл под текущий presence
+    ├── rest.md
+    ├── dialog.md
+    └── working.md
+```
 
-| Файл | Роль |
-|------|------|
-| `MILA_PREFERENCES.md` | Базовый голос |
-| `MILA_BIO.md` | Биография (со своим заголовком) |
-| `IDENTITY.md` | Стабильное ядро личности |
-| `CLOSENESS_TIERS.md` | Дистанции + примеры |
-| `VOICE_MECHANICS.md` | Механика голоса |
-| `BANNED_AI_ISMS.md` | Запрещённые AI-штампы |
-| `MEMORY_HONESTY.md` | Честность памяти |
-| `SILENT_MODE.md` | Молчание в истории |
-| `STYLE_STABILITY.md` | Стабильность стиля |
-| `NO_ROLEPLAY.md` | Без отыгрыша ролей |
-| `DIARY_GUIDE.md` | Инструкция дневника (статика) |
+`_load(name)` принимает путь без расширения (`persona/voice`). Для старых плоских
+имён есть `LEGACY_MAP` (`MILA_BIO` → `persona/bio`, `HEADER` → `context/header`
+и т.д.).
 
-**Динамические шаблоны** (плейсхолдеры `{...}` заполняются в рантайме):
+## Статический префикс
 
-| Файл | Плейсхолдеры |
-|------|--------------|
-| `HEADER.md` | `{now}`, `{user_name}`, `{chat_id}` |
-| `RELATIONSHIP_BLOCK.md` | `{relationship}` |
-| `RELATIONSHIP_FRIEND.md` / `RELATIONSHIP_ACQUAINTANCE_WARM.md` / `RELATIONSHIP_NEUTRAL.md` / `RELATIONSHIP_ACQUAINTANCE_COLD.md` / `RELATIONSHIP_STRANGER_COLD.md` | `{user_name}` — выбор по sentiment (см. ниже) |
-| `NEEDS_BLOCK.md` | `{needs_summary}` |
-| `DIARY_BLOCK.md` | `{diary_context}` (только если дневник не пуст) |
-| `SESSION_BLOCK.md` + `SESSION_TIME.md` | `{session_time}` ← `User responded after {formatted}` (только если пауза ≥ 30с) |
-| `FUNCTION_CALLING.md` | `{chat_id}` — протокол `think` (send/search/silence/diary + enter_dialog/enter_rest/enter_working/start_sleep) |
+`_STATIC_PERSONA` (порядок важен):
 
-Чтобы поменять характер Милы — правьте `.md` файлы (перезапуск не нужен для динамики, статика кэширована в процессе бота).
+1. `persona/prefs`
+2. `persona/bio`
+3. `persona/identity`
+4. `persona/closeness`
+5. `persona/voice`
+6. `persona/banned`
+7. `persona/memory`
+8. `persona/style`
+9. `persona/no_roleplay`
+10. `diary/guide`
 
-## Компоненты системного промпта
+Склеиваются через `\n\n---\n\n`, кэшируются `lru_cache(maxsize=1)`.
+
+Если `runtime_config["persona.custom_text"]` непуст — статический префикс
+**полностью заменяется** этим текстом (а не дополняется).
+
+## Порядок сборки
 
 ```
 build_main_llm_system_prompt(user_id, chat_id, my_user_id)
     │
-    ├── 1. Статический префикс (lru_cache, 11 блоков через ---)
-    │       └── НО: если runtime persona.custom_text непуст —
-    │           статика ЦЕЛИКОМ заменяется им
-    │
-    ├── 2. HEADER {now, user_name, chat_id}
-    ├── 3. RELATIONSHIP_BLOCK
-    │       └── _get_profile_context(user_id): users.preferred_name/user_name,
-    │           sentiment → выбор варианта:
-    │           >0.6 friend, >0.2 acquaintance_warm, <-0.6 stranger_cold,
-    │           <-0.2 acquaintance_cold, иначе neutral
-    ├── 4. NEEDS_BLOCK ← NeedsTracker.get_needs_summary()
-    │       (fatigue/social/boredom high/medium/low + подсказки)
-    ├── 4b. PRESENCE-блок ← core/presence.format_state_block()
-    │       (rest/dialog+focus/working/sleep + кто пишет: имена, не id;
-    │       собирается в коде, не .md-файл; при чужом уведомлении в диалоге —
-    │       явная пометка + напоминание про enter_dialog/silence)
-    ├── 5. DIARY_BLOCK ← get_today_diary_context() (до 30 записей,
-    │       группировка day/reflection, каждая с [ID: N] для update_diary)
-    ├── 6. SESSION_BLOCK ← пауза с последнего ответа Милы (чанк от my_user_id
-    │       с time_start; пропуск, если < 30с)
-    └── 7. FUNCTION_CALLING ← протокол think + chat_id
+    ├── 1. static_prefix (или custom_text)
+    ├── 2. context/history_note      — о двойных сообщениях и паузах
+    ├── 3. context/media_note        — как смотреть фото и слушать голосовые
+    ├── 4. relationship/block        — выбранная строка отношений
+    ├── 5. format_state_block()      — где Мила и кто пишет (код, не .md)
+    ├── 6. states/{rest|dialog|working}.md — поведение ровно для текущего состояния
+    ├── 7. context/diary_block       — только если дневник не пуст
+    ├── 8. context/needs             — fatigue/social/boredom + подсказки
+    ├── 9. context/header           — «Ты Мила...», время, чат, имя
+    └── 10. context/session          — только если пауза ≥ 30с
 ```
 
-Финальный порядок частей: `[header, static|custom, relationship, needs, presence, diary?, session?, function_calling]`.
+Финал: `"\n\n".join(parts).strip()`.
 
-## Что в документации раньше было неверно
+## Выбор отношений
 
-- **Автобиографическая память (`get_all_chunks_markdown()`) в system prompt НЕ инжектится.** `persona.py` её не вызывает — чанки `mila_memory_chunks` используются только ночным `process_diary_analysis`. В дневной генерации у модели есть дневник + `search_memory`, но не вечная память целиком.
-- **Поля `persona.custom_prompt` не существует.** Реальное поле — `persona.custom_text`, и оно не «добавляется», а **полностью заменяет** статические 11 блоков.
-- **Слайдеры `persona.parameters` (empathy/humor/formality/creativity) сейчас ни на что не влияют** — в `persona.py` нет кода, который вставлял бы их в промпт. Значения хранятся и редактируются через API, применение — задача будущих изменений.
-- Биография/предпочтения — это тексты `MILA_BIO.md` / `MILA_PREFERENCES.md`, а не константы в коде; точное содержимое смотрите в этих файлах.
+`_get_profile_context(user_id)`:
 
-## _get_session_time_info()
+- имя: `preferred_name` → `user_name` → `"user"`;
+- sentiment → шаблон:
 
-Ищет в последних 50 чанках чата последний ответ самой Милы (`user_id == my_user_id` с `time_start`), считает дельту от `now (UTC)`. Формат `_format_time_delta`: `"{d} days {h} hours {m} minutes"` / `"{h} hours {m} minutes"` / `"{m} minutes"`. Дельта < 30 секунд → блок опускается.
+| Sentiment | Файл | Tier |
+|-----------|------|------|
+| `> 0.6` | `relationship/friend` | ДРУГ |
+| `> 0.2` | `relationship/acq_warm` | тёплый знакомый |
+| `< -0.6` | `relationship/stranger` | чужой/конфликт |
+| `< -0.2` | `relationship/acq_cold` | знакомый с холодком |
+| иначе | `relationship/neutral` | знакомый/чужой по истории |
+
+Плейсхолдер `{user_name}` подставляется в выбранный шаблон.
+
+## Состояния (`states/`)
+
+Модель видит **только один** файл состояния:
+
+- `rest.md` — три варианта: `enter_dialog`, разовый `send_message`, промолчать;
+- `dialog.md` — формат JSON `{"messages": [...]}`, 1–3 пузыря, `[]` = молчание;
+- `working.md` — как rest, но с «занята».
+
+Неизвестное состояние падает в `rest`. Блок `format_state_block()` только
+описывает локацию и собеседника; правила поведения — в `states/*.md`.
+
+## Динамические блоки
+
+### `context/header.md`
+
+Плейсхолдеры: `{now}`, `{user_name}`, `{chat_id}`.
+
+### `context/needs.md`
+
+`{needs_summary}` ← `NeedsTracker.get_needs_summary()`:
+
+```
+• Fatigue: high (0.82)
+• Need for Social Interaction: medium (0.55)
+• Boredom: low (0.21)
+```
+
+Плюс подсказки при значениях > 0.7. Состояние влияет на тон и длину ответа, но
+не перечисляется в самом ответе.
+
+### `context/diary_block.md`
+
+`{diary_context}` ← `get_today_diary_context()` (до 30 записей, группировка
+`day_entries` / `reflection_entries`, у каждой `[ID: N]`).
+
+### `context/session.md` + `session_time.md`
+
+`_get_session_time_info(chat_id, my_user_id)`:
+
+- берёт последние 50 `chunks` чата;
+- ищет последнее сообщение самой Милы (`user_id == my_user_id`);
+- считает дельту от `now (UTC)`;
+- < 30 секунд → блок опускается;
+- формат: `"N days H hours M minutes"` / `"H hours M minutes"` / `"M minutes"`.
+
+## Что важно помнить
+
+- **Автобиографическая память (`mila_memory_chunks`) в дневной prompt не
+  инжектится.** Её читает/меняет только ночная рефлексия.
+- **Поля `persona.custom_prompt` нет.** Реальное — `persona.custom_text`.
+- **Слайдеры `persona.parameters` (empathy/humor/formality/creativity) не влияют
+  на промпт** — они хранятся и редактируются, но код их не подставляет.
+- **`FUNCTION_CALLING.md` больше нет**: протокол вызова тулзов описан в
+  `states/*.md` и в definitions инструментов.
+- Изменения `.md` подхватываются без рестарта для динамических блоков; статика
+  кэширована в процессе (`lru_cache`) — после правки статики нужен рестарт.
 
 ## Редактирование через API
 
-### Эндпоинты
-
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/persona` | Текущие настройки |
-| PUT | `/api/persona` | Обновление (`custom_text`, `parameters.*`) |
-| POST | `/api/persona/reset` | Сброс на defaults |
-
-### Пример запроса
+| GET | `/api/persona` | `custom_text`, `parameters`, `using_custom` |
+| PUT | `/api/persona` | Обновление `custom_text` / `parameters.*` |
+| POST | `/api/persona/reset` | Сброс `custom_text` в `""` |
 
 ```json
 PUT /api/persona
 {
-  "custom_text": "Ты — Мила. Ты сегодня особенно задумчива...",
-  "parameters": { "empathy": 0.8, "humor": 0.3, "formality": 0.4, "creativity": 0.9 }
+  "custom_text": "Ты — Мила. ...",
+  "parameters": {"empathy": 0.8, "humor": 0.3, "formality": 0.4, "creativity": 0.9}
 }
 ```
 
-Пустой `custom_text` (`""`) = вернуться к сборке из `.md` файлов.
-
-## Интеграция с пайплайном
-
-System prompt собирается при каждом запуске `process_message()` / `process_message_stream()`, так как меняются время, `needs_summary`, дневник и `custom_text`. Статика кэширована (`lru_cache`), динамика — свежая каждый раз.
-
-## Пример структуры финального system prompt
-
-```
-[HEADER: кто ты, дата/время now, с кем говоришь user_name, chat_id]
----
-[MILA_PREFERENCES]
----
-[MILA_BIO]
----
-[IDENTITY / CLOSENESS_TIERS / VOICE_MECHANICS / ...]
----
-[RELATIONSHIP_BLOCK: строка отношений по sentiment]
----
-[NEEDS_BLOCK: fatigue/social/boredom + подсказки]
----
-[DIARY_BLOCK: записи за сегодня с [ID: N]]            (если есть)
----
-[SESSION_BLOCK: User responded after ...]             (если пауза ≥ 30с)
----
-[FUNCTION_CALLING: протокол think, chat_id]
-```
+Пустой `custom_text` = вернуться к сборке из `.md`-файлов.

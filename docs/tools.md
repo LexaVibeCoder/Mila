@@ -1,182 +1,172 @@
 # Система тулзов (Tools)
 
-**Файл**: `core/tools/executor.py`
+**Файл:** `core/tools/executor.py`
 
-Система инструментов — механизм, через который LLM взаимодействует с внешним миром. Модель вызывает функцию `think()` на каждом шаге пайплайна (`tool_choice` из runtime: `"required"` по умолчанию, `"auto"` — опция из Observatory).
+LLM вызывает **настоящие функции** (direct tools). Набор зависит от текущего
+`presence`-состояния, поэтому Мила видит только то, что уместно сейчас.
 
-## Определения тулзов
+```python
+get_tool_definitions(presence_state="rest", include_proactive=False) -> list[dict]
+```
 
-`get_tool_definitions()` возвращает OpenAI-совместимые definitions. Читает `runtime_config.get("tools")`, исключает отключённые. Если выключены все — остаётся `silence`, чтобы модель всегда могла завершить ход.
+`silence` остался в runtime-конфиге для совместимости, но **не входит** в
+definitions: молчание = пустой ответ / `{"messages": []}`.
 
-### think()
+## Доступные действия
 
-Единственная функция, доступная LLM:
+| Действие | Состояния | Параметры | Что делает |
+|----------|-----------|-----------|------------|
+| `enter_dialog` | rest, working, dialog | `chat_id!`, `note?` | Переключает presence в диалог; пайплайн перевызывает LLM |
+| `enter_rest` | working, dialog | `note?` | Возврат в rest |
+| `enter_working` | rest, dialog | `note?` | Переход в working |
+| `start_sleep` | все | `duration_minutes!` (1–720), `note?` | Запускает ночной цикл |
+| `send_message` | rest, working | `text!`, `chat_id?` | Одна короткая «отмашка», не диалог |
+| `search_memory` | dialog | `query!` | FAISS top-10 → rerank → top-5 |
+| `write_diary` | dialog | `entry!`, `category?` | Новая запись дневника |
+| `update_diary` | dialog | `entry!`, `entry_id!`, `category?` | Обновление записи |
+| `peek_recent_chats` | proactive (rest/working) | `limit_per_chat?`, `chat_ids?` | Последние сообщения по всем чатам |
+
+> В диалоге ответ — JSON-контент, а не tool call. `send_message` в диалоге
+> отсутствует. В состоянии `sleep` доступны `enter_dialog` и `start_sleep`
+> (пайплайн там почти не работает).
+
+## Динамический набор
+
+`get_tool_definitions()` читает `runtime_config.get("tools")`:
 
 ```json
 {
-  "name": "think",
-  "description": "Express your internal thoughts and optionally perform actions. You MUST call this function EVERY turn. 'thoughts' MUST appear BEFORE 'actions'.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "thoughts": { "type": "string", "description": "Private reasoning, never visible to user" },
-      "actions": {
-        "type": "array",
-        "items": {
-          "type": "object",
-          "properties": {
-            "action_type": {
-              "type": "string",
-              "enum": ["send_message", "search_memory", "silence", "write_diary", "update_diary",
-                       "enter_dialog", "enter_rest", "enter_working", "start_sleep"]
-            },
-            "params": {
-              "type": "object",
-              "description": "Parameters for the action",
-              "properties": {
-                "chat_id": { "type": "string", "description": "Telegram chat ID (send_message). По умолчанию текущий чат" },
-                "text": { "type": "string", "description": "Текст сообщения (только send_message)" },
-                "query": { "type": "string", "description": "Поисковый запрос (только search_memory)" },
-                "reason": { "type": "string", "description": "Причина молчания (только silence)" },
-                "entry": { "type": "string", "description": "Текст записи 1-3 предложения от первого лица (write_diary / update_diary)" },
-                "category": { "type": "string", "enum": ["day_entries", "reflection_entries"], "description": "Категория дневника" },
-                "entry_id": { "type": "string", "description": "ID записи из блока дневника в промпте (только update_diary)" },
-                "duration_minutes": { "type": "integer", "description": "На сколько минут спать (только start_sleep, обязателен)" },
-                "note": { "type": "string", "description": "Причина/комментарий (presence-тулы)" }
-              }
-            }
-          },
-          "required": ["action_type", "params"]
-        }
-      }
-    },
-    "required": ["thoughts", "actions"]
-  }
+  "search_memory": true,
+  "send_message": true,
+  "silence": true,
+  "write_diary": true,
+  "update_diary": true,
+  "presence": true,
+  "peek_recent": true
 }
 ```
 
-Состав `enum` динамический — равен включённым в runtime тулзам.
+- `presence` выключает все четыре presence-тула разом (`enter_dialog`,
+  `enter_rest`, `enter_working`, `start_sleep`);
+- `peek_recent` действует только при `include_proactive=True` (проактивный ход);
+- отключённые тулзы не попадают в definitions и недоступны модели.
 
-## Доступные типы действий
+## Поведение executor-а
 
-### send_message
-
-```json
-{ "action_type": "send_message", "params": { "text": "Привет! Как дела?", "chat_id": "123" } }
-```
-
-**Параметры**: `text` (обязателен, непустой), `chat_id` (опционален — по умолчанию текущий чат).
-
-**Обработка** (две стадии):
-1. `ToolExecutor._handle_send_message` только возвращает `{type, text, chat_id, status: "ready"}` — в Telegram **не отправляет**.
-2. `core/queue.py` отправляет через `tg_adapter.send_text()`, затем `add_chunk(..., type='raw')` + `push_message(..., role="assistant")`.
-
-### search_memory
+### `enter_dialog`
 
 ```json
-{ "action_type": "search_memory", "params": { "query": "Что Мила думает про программирование?" } }
+{"action_type": "enter_dialog", "params": {"chat_id": "123", "note": "хочу поговорить"}}
 ```
 
-**Pipeline** (`_handle_search_memory`):
-1. Эмбеддинг запроса через `EmbeddingClient`
-2. Поиск top-10 в FAISS (`VectorMemory.search(k=10)`, отсев `idx == -1`)
-3. Загрузка содержимого из `memories` по `faiss_id`
-4. Переранжирование через `RerankerClient` (BGE CrossEncoder, порог `RERANKER_THRESHOLD = 0.6`)
-5. Топ-5 в `context_addon` → инъекция `Search results in memory:\n...` в messages → повторный вызов LLM
-6. Статусы: `searched` (повтор цикла) / `error` (цикл завершается)
+- `chat_id` обязателен;
+- имя берётся из `users.preferred_name/user_name`;
+- возвращает `{type, chat_id, user_name, state, status: "switched"}`;
+- пайплайн инжектит system-сообщение и вызывает LLM уже в диалоге.
 
-**Runtime config**: `tools.search_memory` — вкл/выкл.
+### `enter_rest` / `enter_working`
 
-### silence
+Меняют `presence_state`, возвращают `status: "switched"`. После этого набор
+тулзов и системный промпт пересобираются.
+
+### `start_sleep`
+
+- `duration_minutes` обязателен, клиппится в `1..720`;
+- presence сначала переводится в `sleep`, затем вызывается
+  `sleep.manager.start_sleep(triggered_by="mila_tool")`;
+- если сон отклонён (например, `forced_awake`), presence восстанавливается в
+  предыдущее состояние;
+- успех → `status: "sleeping"`, пайплайн завершается как при silence.
+
+### `send_message`
+
+Не отправляет сообщение сам. Возвращает:
 
 ```json
-{ "action_type": "silence", "params": { "reason": "Нет необходимости отвечать" } }
+{"type": "send_message", "text": "...", "chat_id": "...", "status": "ready"}
 ```
 
-Останавливает пайплайн немедленно (остальные actions в списке не исполняются). В `queue.py`:
-- `has_silence_action = True` → отправки нет, ответ сохраняется как `content=""` с `llm_full_response=thoughts`;
-- авто-silence до LLM: при `fatigue > 0.85` ночью (см. [messaging.md](messaging.md)).
+В rest/working это финальная короткая отмашка: пайплайн отдаёт `reply_tool`,
+`queue.py` отправляет один пузырь. В диалоге инструмента нет.
 
-### write_diary
+### `search_memory`
 
-```json
-{ "action_type": "write_diary", "params": { "entry": "Сегодня был интересный разговор о...", "category": "day_entries" } }
-```
+1. Эмбеддинг запроса (`EmbeddingClient`).
+2. `VectorMemory.search(k=10)`.
+3. Загрузка `memories` по `faiss_id` **с фильтром `user_id`** — чужие факты не
+   попадают в промпт. Legacy-записи с `NULL user_id` доступны только если
+   per-user совпадений нет.
+4. `RerankerClient.rerank(query, documents)` с порогом `0.6`.
+5. Топ-5 строк → `context_addon`; статус `searched` или `error`.
 
-Вызывает `add_diary_entry(entry, category)` из `core/diary/manager.py`. Поле `entry` обязательно; пустое `entry` fallback'ится на `text` (защита от путаницы модели), `category` вне `day_entries|reflection_entries` → `day_entries`. Возвращает `{entry_number, entry_id, category, status: "written"}`.
+Без установленного reranker-а поиск вернёт ошибку — `search_memory` не работает
+без `install_reranker.py`.
 
-### update_diary
+### `write_diary` / `update_diary`
 
-```json
-{ "action_type": "update_diary", "params": { "entry": "Уточнённый текст", "entry_id": "2", "category": "reflection_entries" } }
-```
+- текст принимается как `entry`, fallback — `text`;
+- `category` нормализуется в `day_entries` / `reflection_entries`;
+- `update_diary` требует `entry_id` из блока дневника `[ID: N]`;
+- статусы: `written`, `updated`, `not_found`, `error`.
 
-Вызывает `update_diary_entry(entry_id, entry, category)`; ID берётся из блока `[ID: N]` в system prompt. Статусы: `updated` / `not_found` / `error` (нет `entry` или `entry_id`). `category` опционален — без него меняется только текст.
+### `peek_recent_chats`
 
-### Presence-тулы (состояния Милы)
+Только для проактивного хода:
 
-Переключают `core/presence.py`. После `enter_*` со статусом `switched` пайплайн инжектит системное сообщение и **перевызывает LLM**, чтобы она решила что делать уже в новом состоянии. `start_sleep` со статусом `sleeping` останавливает пайплайн как `silence`.
+- возвращает чаты от старых к свежим, свежие внизу;
+- `limit_per_chat` по умолчанию `proactive.default_peek_limit` (10), клиппится
+  в `1..50`;
+- `chat_ids` опционально ограничивает список;
+- текст сообщений **не обрезается**;
+- статус `peeked` → `context_addon` инжектится в контекст, LLM выбирает один чат.
 
-```json
-{ "action_type": "enter_dialog", "params": { "chat_id": "123", "note": "хочу поговорить" } }
-{ "action_type": "enter_rest", "params": {} }
-{ "action_type": "enter_working", "params": { "note": "пишу главу" } }
-{ "action_type": "start_sleep", "params": { "duration_minutes": 480 } }
-```
+## После каждого действия
 
-- `enter_dialog` — `chat_id` обязателен (чат человека из уведомления); имя подтягивается из `users`. Возвращает `{chat_id, user_name, state, status: "switched"}` или `error` без `chat_id`.
-- `enter_rest` — возврат в отдых (дефолт), сбрасывает фокус.
-- `enter_working` — своё дело; в v1 видимость уведомлений как у rest.
-- `start_sleep` — `duration_minutes` обязателен (1–720, клиппится); пишет намерение в presence и `await start_sleep(duration, triggered_by="mila_tool")` — дальше работает ночной цикл (рефлексия, запоминание). Ошибка sleep manager → `{status: "error"}`.
+Пайплайн вызывает `NeedsTracker.apply_action_effect(action_type)`:
 
-**Runtime config**: `tools.presence` — вкл/выкл все четыре разом; если выключены все тулзы вообще — остаётся `silence`.
-
-## ToolExecutor
-
-**Класс**: `ToolExecutor` в `core/tools/executor.py`
-
-```python
-class ToolExecutor:
-    def __init__(self, text_memory, embedding_client, current_user_id: str, chat_id: str):
-        ...
-
-    async def execute_action(self, action) -> dict:
-        # роутинг по action_type на _handle_*; неизвестный → {"status": "unknown"}
-```
-
-Каждый хендлер возвращает dict с `type` + `status` для пайплайна и логов (`pipeline_*.json`).
-
-После каждого исполненного action пайплайн вызывает `NeedsTracker.apply_action_effect(action_type)` (социалка/усталость/скука корректируются офсетами): `enter_dialog` ≈ `send_message` (social −0.1), `enter_rest`/`start_sleep` ≈ `silence` (fatigue −0.05/−0.1).
-
-## Пайплайн интеграция
-
-```
-LLM → think(thoughts, actions) → парсинг JSON → список actions
-                                                  │
-                     ┌────────────┬───────────────┼───────────────┬───────────────┐
-                     ▼            ▼               ▼               ▼               ▼
-             send_message   search_memory      silence    write/update_diary  presence-тулы
-                     │            │               │               │               │
-                     ▼            ▼               ▼               ▼               ▼
-              queue.send    FAISS top-10 →   остановка      diary_entries   enter_*: повтор LLM
-              в Telegram    rerank → top-5    пайплайна      + daily .md     в новом состоянии
-                     │            │                                          start_sleep: стоп
-                     ▼            ▼                                           (ночной цикл)
-               chunks +      результаты →
-               контекст      инъекция →
-                             повтор LLM
-```
+| Действие | Эффект |
+|----------|--------|
+| `send_message` | social −0.15 |
+| `enter_dialog` | social −0.1 |
+| `silence` / `enter_rest` | fatigue −0.05 |
+| `start_sleep` | fatigue −0.1 |
+| `search_memory` / `peek_recent_chats` | boredom −0.1 |
+| `write_diary` | boredom −0.08, fatigue +0.03 |
+| `update_diary` | boredom −0.04 |
 
 ## Управление через API
 
-`PUT /api/tools/{tool_name}` — включить/выключить тулз:
+`GET /api/tools` — список 7 ключей с описаниями.
+`PUT /api/tools/{tool_name}`:
 
 ```json
 { "enabled": false }
 ```
 
-Изменения применяются немедленно — при следующем вызове `get_tool_definitions()` исключит отключённые тулзы из `enum`. UI — страница Tools в Observatory.
+Допустимые имена: `search_memory`, `send_message`, `silence`, `write_diary`,
+`update_diary`, `presence`, `peek_recent`. Изменения применяются со следующего
+вызова `get_tool_definitions()`. UI — страница Tools.
 
-## Специальные тулзы для сна
+## Тулзы сна
 
-В `core/sleep/tools.py` определены отдельные наборы тулзов для каждого из трёх ночных процессов (`add/update/delete_memory_chunk`, `save_dialog_summary/skip_dialog`, `add_user_fact/skip_user_fact_extraction`, `approve/reject_changes`). Они НЕ доступны в основном пайплайне — только во сне (см. [sleep-system.md](sleep-system.md)).
+В `core/sleep/tools.py` — отдельные наборы, недоступные в основном пайплайне:
+
+- `add_memory_chunk`, `update_memory_chunk`, `delete_memory_chunk`;
+- `save_dialog_summary`, `skip_dialog`;
+- `add_user_fact`, `skip_user_fact_extraction`;
+- `approve_changes`, `reject_changes`.
+
+Подробности — [sleep-system.md](sleep-system.md).
+
+## Пайплайн-интеграция
+
+```
+LLM → tool_calls
+        │
+        ├── enter_dialog/rest/working → presence switch → перевызов LLM
+        ├── send_message (rest/working) → reply_tool → отправка одного пузыря
+        ├── search_memory / peek_recent_chats → контекст → перевызов LLM
+        ├── write/update_diary → подтверждение → перевызов LLM
+        ├── start_sleep → ночной цикл → завершение как silence
+        └── нет тулзов в dialog → JSON {"messages": [...]} → reply
+```

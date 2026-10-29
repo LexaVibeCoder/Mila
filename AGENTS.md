@@ -6,7 +6,8 @@
 ## Что это
 
 Mila — Telegram-**юзербот** (не бот-аккаунт) на pytdbot/TDLib. Отвечает в личных
-сообщениях от имени живого аккаунта, «думает» через LLM (`think()` + tool calls),
+сообщениях от имени живого аккаунта, «думает» через LLM (прямые tool calls
+`enter_dialog`/`send_message`/...),
 помнит через FAISS + SQLite, ведёт дневник, ночью рефлексирует, имеет потребности
 (State Agent) и веб-панель Observatory (FastAPI + React).
 
@@ -52,7 +53,7 @@ cd state_agent && python train_state_agent.py # обучение MLP (свой r
 |------|-----------|
 | `main.py`, `config.py` | точка входа; статичный `Settings` из `.env` |
 | `core/bot.py`, `queue.py`, `tg_adapter.py`, `events.py` | TDLib-клиент, per-chat воркеры, нормализация сообщений |
-| `core/pipeline.py`, `tools/executor.py` | цикл `think()`, 9 действий, парсинг tool calls |
+| `core/pipeline.py`, `tools/executor.py` | direct-tools цикл, 9 действий (+ legacy `silence`), JSON-ответы в диалоге |
 | `core/llm/` | клиент, эмбеддинги, reranker, токены, сборка персоны |
 | `core/llm/prompts/` | **контент персоны** (`.md`), код только склеивает |
 | `core/memory/`, `context/`, `diary/` | FAISS + `memories`, per-chat буфер, дневник |

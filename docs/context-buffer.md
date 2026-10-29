@@ -1,68 +1,83 @@
 # Контекстный буфер (Context Buffer)
 
-**Файл**: `core/context/buffer.py`
+**Файл:** `core/context/buffer.py`
 
-Per-chat SQLite-буфер, хранящий историю сообщений и суммаризаций. Обеспечивает токен-аварную ротацию контекста.
+Per-chat SQLite-буфер, хранящий историю сообщений и суммаризаций. Обеспечивает
+токен-аварную ротацию контекста.
 
-## Архитектура
+## Схема
 
-Каждый чат имеет отдельную таблицу в `context_buffer.db` (имя санитизируется: не-алфанумерик → `_`):
+Каждый чат — отдельная таблица в `context_buffer.db` (имя санитизируется:
+не-алфанумерик → `_`):
 
 ```sql
 CREATE TABLE [chat_{chat_id}] (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,           -- у медиа: плейсхолдер ([фото: ...], [голосовое сообщение])
     type TEXT NOT NULL CHECK(type IN ('message', 'summary')),
-    source_chunk_id TEXT,          -- ссылка на chunks.chunk_id (TEXT UUID) из mila.db
-    token_count INTEGER DEFAULT 0, -- считается через tiktoken при вставке
-    role TEXT NOT NULL DEFAULT '', -- 'user' | 'assistant' (пусто у старых summary)
-    kind TEXT DEFAULT 'text',      -- text | photo | voice | ... (миграция в ensure_chat_table)
+    source_chunk_id TEXT,            -- ссылка на chunks.chunk_id (TEXT UUID) из mila.db
+    token_count INTEGER DEFAULT 0,   -- tiktoken при вставке
+    role TEXT NOT NULL DEFAULT '',   -- 'user' | 'assistant' ('' у старых summary)
+    kind TEXT DEFAULT 'text',        -- text | photo | voice | ...
     created_at TEXT DEFAULT (datetime('now'))  -- локальное время, см. LOCAL_TIMEZONE
 );
 ```
 
-Нативные байты (image/audio) в буфере НЕ хранятся — только плейсхолдеры; байты текущего уведомления подкладываются в LLM отдельно (`ThinkPipeline._attach_media`).
+Нативные байты (image/audio) в буфере **не хранятся** — только плейсхолдеры;
+байты подкладываются в LLM в `ThinkPipeline._attach_media()`.
 
-Метки времени — **локальные** (`now_local()`, `strftime("%Y-%m-%d %H:%M:%S")`): используется `LOCAL_TIMEZONE` из config, иначе системная зона (Docker-safe через `/etc/localtime`).
+Метки времени — **локальные** (`now_local()`, `strftime("%Y-%m-%d %H:%M:%S")`):
+`LOCAL_TIMEZONE` из config, иначе системная зона (Docker-safe через
+`/etc/localtime`).
 
 ## API
 
-| Функция | Сигнатура | Описание |
-|---------|-----------|----------|
-| `ensure_chat_table(chat_id)` | `(chat_id: str)` | Создать таблицу чата + ALTER-миграции `token_count`/`role`/`kind` |
-| `push_message(chat_id, content, source_chunk_id, role, kind)` | `role="user"`, `kind="text"` по умолч. | Добавить сообщение, авто-подсчёт токенов |
-| `push_summary(chat_id, summary_text)` | — | Добавить суммаризацию (`type='summary'`, `role=''`) |
-| `get_context(chat_id, limit)` | `limit=MAX_STM_MESSAGES (30)` | Последние N записей хронологически |
-| `get_total_entries(chat_id)` | — | Общее количество записей |
-| `get_total_message_tokens(chat_id)` | — | Сумма `token_count` только `type='message'` |
-| `get_context_within_token_limit(chat_id, max_tokens)` | — | Всегда включает суммаризации, затем новейшие сообщения в лимите |
-| `pop_oldest_messages_by_tokens(chat_id, target_tokens)` | — | Удалить старейшие сообщения до освобождения target_tokens, вернуть их |
-| `pop_oldest_messages(chat_id, count)` | — | Удалить N старейших сообщений, вернуть их |
-| `get_all_chat_ids()` | — | Имена таблиц `chat_*` |
-| `get_raw_content_for_llm(chat_id, limit)` | — | Сырой текст: `[summary...]` + `[latest messages...]` |
+| Функция | Описание |
+|---------|----------|
+| `ensure_chat_table(chat_id)` | Создать таблицу + ALTER-миграции `token_count/role/kind` |
+| `push_message(chat_id, content, source_chunk_id, role, kind)` | Добавить сообщение, авто-подсчёт токенов |
+| `push_summary(chat_id, summary_text)` | Добавить суммаризацию (`type='summary'`, `role=''`) |
+| `get_context(chat_id, limit)` | Последние N записей хронологически (`MAX_STM_MESSAGES` = 30) |
+| `get_total_entries(chat_id)` | Общее количество записей |
+| `get_total_message_tokens(chat_id)` | Сумма `token_count` только `type='message'` |
+| `get_context_within_token_limit(chat_id, max_tokens)` | Summary целиком + новейшие сообщения в лимите |
+| `peek_oldest_messages_by_tokens(chat_id, target_tokens)` | **Только чтение** старейших ~N токенов |
+| `delete_messages_by_ids(chat_id, ids)` | Удалить строки по `id` |
+| `pop_oldest_messages_by_tokens(chat_id, target_tokens)` | Legacy: peek + delete атомарно |
+| `pop_oldest_messages(chat_id, count)` | Legacy: удалить N старейших |
+| `get_all_chat_ids()` | Имена таблиц `chat_*` |
+| `get_raw_content_for_llm(chat_id, limit)` | Сырой текст: summary + latest messages |
 
-## Сжатие контекста (Compression)
+## Сжатие контекста
 
-В `MilaUserbot._compress_context()` (вызывается из `queue.py` **перед каждой генерацией**):
+Вызывается из `queue.py` **перед каждой генерацией**
+(`MilaUserbot._compress_context()`):
 
 ```python
 total = get_total_message_tokens(chat_id)
-if total > settings.CONTEXT_MAX_TOKENS:          # 30000
-    oldest = pop_oldest_messages_by_tokens(chat_id, settings.CONTEXT_SUMMARIZE_CHUNK_TOKENS)  # 5000
-    summary = await summarizer.generate("Summarize ... 2-3 sentences ...", temperature=0.3, max_tokens=300)
-    push_summary(chat_id, summary)
+if total > settings.CONTEXT_MAX_TOKENS:                 # 30000
+    oldest = peek_oldest_messages_by_tokens(chat_id, 5000)   # без удаления
+    summary = await summarizer.generate(...)                  # 2–3 предложения
+    push_summary(chat_id, summary)                            # сначала summary
+    delete_messages_by_ids(chat_id, [m["id"] for m in oldest])
 ```
 
-**Процесс**:
-1. Проверка суммы токенов **только сообщений** (суммари в лимит не входят)
-2. Извлечение старейших сообщений на ~`CONTEXT_SUMMARIZE_CHUNK_TOKENS` токенов (формат строк: `[ГГГГ-ММ-ДД] первые 500 символов`)
-3. LLM-суммаризация через ленивый `_ensure_summarizer()` — обычный `LLMClient` на `MAIN_LLM_MODEL` (отдельной «дешёвой» модели в коде нет)
-4. Ошибка/пустой ответ → плейсхолдер `[Summary previous conversation]`
-5. Вставка `push_summary()` — суммари копятся и всегда отдаются первыми
+Порядок важен:
+
+1. Проверяется сумма токенов **только сообщений** (summary в лимит не входят).
+2. Старейшие сообщения **сначала читаются**, не удаляются.
+3. LLM-суммаризация через ленивый `_ensure_summarizer()` — обычный `LLMClient`
+   на `MAIN_LLM_MODEL` (отдельной «дешёвой» модели нет).
+4. Если LLM упал или вернул пустой текст — исходные сообщения **остаются**,
+   попытка повторится на следующем сообщении. Плейсхолдера-заглушки больше нет.
+5. `push_summary()` вызывается **до** удаления: падение между шагами даёт
+   дублирование контекста (безопасно), а не потерю.
+6. `delete_messages_by_ids()` удаляет ровно те строки, которые сжимались.
 
 ## Построение истории
 
-В `MilaUserbot._build_histories()` (источник — **только** контекстный буфер, не `chunks`):
+`MilaUserbot._build_histories()` (источник — **только** контекстный буфер, не
+`chunks`):
 
 ```python
 entries = get_context_within_token_limit(chat_id, settings.CONTEXT_MAX_TOKENS)
@@ -76,51 +91,43 @@ for entry in entries:
         → одинаковая запись в user_visible и agent_internal
 ```
 
-Отличия от старых версий документации:
-- `_resolve_roles_in_histories()` — **pass-through**: роли уже лежат в буфере (`push_message(..., role)`), кросс-ссылки с `chunks` нет.
-- Молчаливые ответы ассистента (`content=""`) попадают в буфер как обычные `message` с `role="assistant"` (фильтрации пустых на чтении нет; префикс `[ts]` не добавляется к summary).
-- `user_visible` и `agent_internal` сейчас **идентичны** (разделение оставлено для будущих изменений).
+Особенности:
+
+- `user_visible` и `agent_internal` сейчас **идентичны** (разделение оставлено
+  для будущих изменений);
+- `_resolve_roles_in_histories()` — pass-through: роли уже в буфере;
+- префикс времени не добавляется к summary;
+- «молчаливые» ответы Милы (`content=""`) в буфер **не попадают**: при silence
+  `queue.py` пишет только `chunks`, без `push_message`; в истории они
+  отсутствуют;
+- пустые assistant-записи, если всё же оказались в буфере, не фильтруются на
+  чтении.
 
 ## Токен-аварная выборка
 
 `get_context_within_token_limit()`:
 
 ```
-1. Загрузить ВСЁ по id ASC
-2. summaries → в результат целиком (лимит уменьшается на их токены,
-   может уйти в минус — тогда сообщения не влезут вообще)
+1. Загрузить всё по id ASC.
+2. summaries → в результат целиком; remaining = max_tokens - их токены.
 3. messages от новых к старым: брать, пока влезают; на первом
-   невместившемся — break (старые дальше не проверяются)
-4. Вернуть [суммаризации..., отобранные сообщения...] хронологически
+   невместившемся — break (более старые не проверяются).
+4. Вернуть [summaries..., отобранные messages...] хронологически.
 ```
 
-## Настройки (config.py)
+Если summary съели весь лимит, `remaining` может стать отрицательным — тогда
+сообщения не попадут в историю вообще.
 
-| Параметр | Значение по умолчанию | Описание |
-|----------|----------------------|----------|
+## Настройки (`config.py`)
+
+| Параметр | По умолч. | Описание |
+|----------|-----------|----------|
 | `CONTEXT_DB_PATH` | `data/context_buffer.db` | Путь к БД |
 | `CONTEXT_MAX_TOKENS` | `30000` | Лимит токенов сообщений |
-| `CONTEXT_SUMMARIZE_CHUNK_TOKENS` | `5000` | Сколько токенов сжимать за раз |
-| `CONTEXT_MAX_MESSAGES` | `40` | Legacy (используется только как fallback-лимит в `get_raw_content_for_llm` через `get_context`) |
-| `CONTEXT_SUMMARIZE_CHUNK` | `20` | Legacy, в коде не используется |
+| `CONTEXT_SUMMARIZE_CHUNK_TOKENS` | `5000` | Сколько сжимать за раз |
+| `CONTEXT_MAX_MESSAGES` | `40` | Legacy; fallback-лимит `get_context` |
+| `CONTEXT_SUMMARIZE_CHUNK` | `20` | Legacy, не используется |
 | `MAX_STM_MESSAGES` | `30` | Лимит `get_context()` по умолчанию |
-| `LOCAL_TIMEZONE` | `""` | IANA-зона для меток; пусто = системная |
+| `LOCAL_TIMEZONE` | `""` | IANA-зона; пусто = системная |
 
 Старых `CONTEXT_CHUNK_SIZE` / `CONTEXT_POP_CHUNKS` в коде нет.
-
-## Схема БД
-
-```
-context_buffer.db
-├── chat_{chat_id}  (по таблице на чат)
-│   ├── id               INTEGER PRIMARY KEY
-│   ├── content          TEXT
-│   ├── type             TEXT ('message' | 'summary')
-│   ├── source_chunk_id  TEXT (UUID chunks.chunk_id или NULL у ответов Милы)
-│   ├── token_count      INTEGER
-│   ├── role             TEXT ('user' | 'assistant' | '')
-│   └── created_at       TEXT (локальное время)
-│
-└── diary_entries     (см. diary.md)
-    ├── id, entry_number, content_md, category, created_at, updated_at
-```

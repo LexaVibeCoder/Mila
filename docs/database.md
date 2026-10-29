@@ -2,30 +2,46 @@
 
 Mila использует два SQLite-файла и FAISS-индекс.
 
-## 1. mila.db (основная БД)
+## 1. `mila.db` (основная БД)
 
-**Файл**: `data/mila.db` (путь — `SQLITE_PATH` в config.py)
+**Файл:** `data/mila.db` (`SQLITE_PATH`).
 
-Управляется модулем `core/db.py` (`init_db()`), плюс ленивые таблицы сна (`core/sleep/state.py`) и вечной памяти (`core/memory/eternal.py`).
+Управляется `core/db.py` (`init_db()`), плюс ленивые таблицы:
+`presence_state` (`core/presence.py`), `mila_memory_chunks`
+(`core/memory/eternal.py`), таблицы сна (`core/sleep/state.py`),
+`user_attitude_history` (`Mila_observatory/api/users.py`).
 
-> Важно: все идентификаторы — **TEXT (UUID4)**, не INTEGER. Ниже — актуальные схемы из кода.
+> Все идентификаторы — **TEXT (UUID4)**, не INTEGER. `init_db()` идемпотентен;
+> миграции — ad-hoc `ALTER TABLE`.
 
-### Таблицы
+`get_conn()` включает:
 
-#### users
+```sql
+PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=30000;
+PRAGMA foreign_keys=ON;
+```
+
+`timeout=30` в `sqlite3.connect` — bot и Observatory не падают на
+«database is locked».
+
+### users
+
 ```sql
 CREATE TABLE users (
     user_id TEXT PRIMARY KEY,
     user_name TEXT,
-    preferred_name TEXT,       -- как Мила обращается
+    preferred_name TEXT,
     relationship_type TEXT DEFAULT 'friend',
     sentiment REAL DEFAULT 0.0,
-    appearance_description TEXT -- (поле называется appearance_description, не appearance)
+    appearance_description TEXT
 );
 ```
-Нет полей `is_bot / language_code / created_at / updated_at`, `id` — это `user_id` (TEXT).
 
-#### chats
+`id` — это `user_id`; полей `is_bot/language_code/created_at/updated_at` нет.
+
+### chats
+
 ```sql
 CREATE TABLE chats (
     chat_id TEXT PRIMARY KEY,
@@ -33,44 +49,50 @@ CREATE TABLE chats (
     created_at TEXT DEFAULT (datetime('now'))
 );
 ```
-Поля `type/title/username` нет — только `chat_name` (пишется из Telegram через `tg_adapter`).
 
-#### chat_members
+### chat_members
+
 ```sql
 CREATE TABLE chat_members (
     chat_id TEXT,
     user_id TEXT,
-    role TEXT DEFAULT 'user',   -- (поле role есть, joined_at нет)
-    PRIMARY KEY (chat_id, user_id)
+    role TEXT DEFAULT 'user',
+    PRIMARY KEY (chat_id, user_id),
+    FOREIGN KEY(chat_id) REFERENCES chats(chat_id),
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
 );
 ```
 
-#### chunks (все сообщения)
+### chunks (все сообщения)
+
 ```sql
 CREATE TABLE chunks (
-    chunk_id TEXT PRIMARY KEY,  -- uuid4
+    chunk_id TEXT PRIMARY KEY,      -- uuid4
     chat_id TEXT NOT NULL,
     user_id TEXT,
-    content TEXT,               -- пусто ("") у молчаливых ответов; плейсхолдер ([фото], [голосовое сообщение]) у медиа
-    llm_full_response TEXT,     -- полный thoughts/ответ LLM
-    type TEXT DEFAULT 'raw',    -- всегда 'raw' в текущем коде
-    faiss_id INTEGER,           -- обычно NULL (эмбеддинги чанков не строятся)
-    token_count INTEGER,        -- всегда 0 (подсчёт не ведётся)
-    time_start TEXT,            -- UTC isoformat создания
-    time_end TEXT,              -- не заполняется
-    kind TEXT DEFAULT 'text',   -- text | photo | voice | video | sticker | ... (миграция в init_db)
-    media_path TEXT             -- локальный путь скачанного файла (photo/voice) или NULL
+    content TEXT,                   -- "" у молчаливых ответов; плейсхолдер у медиа
+    llm_full_response TEXT,         -- полный thoughts/ответ LLM
+    type TEXT DEFAULT 'raw',        -- всегда 'raw'
+    faiss_id INTEGER,               -- обычно NULL
+    token_count INTEGER,            -- обычно 0
+    time_start TEXT,                -- UTC isoformat
+    time_end TEXT,                  -- не заполняется
+    kind TEXT DEFAULT 'text',       -- text | photo | voice | ... (миграция)
+    media_path TEXT                 -- путь к файлу в data/media
 );
 ```
 
-#### memories (долгосрочные воспоминания)
+`kind`/`media_path` добавляются миграцией `_migrate_multimedia()`.
+
+### memories
+
 ```sql
 CREATE TABLE memories (
-    mem_id TEXT PRIMARY KEY,    -- uuid4
+    mem_id TEXT PRIMARY KEY,        -- uuid4
     user_id TEXT NOT NULL,
-    faiss_id INTEGER,           -- связь с FAISS
+    faiss_id INTEGER,
     type TEXT DEFAULT 'fact',
-    tag TEXT,                   -- JSON (поле tag, не tags)
+    tag TEXT,                       -- JSON (поле tag, не tags)
     content TEXT,
     importance REAL DEFAULT 0.5,
     confidence_source TEXT DEFAULT 'llm_extraction',
@@ -78,12 +100,15 @@ CREATE TABLE memories (
     last_accessed_at TEXT,
     time TEXT DEFAULT (datetime('now')),
     source_chat_id TEXT,
-    source_message_id TEXT
+    source_message_id TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
 );
 ```
-Нет `is_active / access_count / created_at / updated_at / confidence / source` — это старые имена.
 
-#### media_logs
+Поиск по памяти всегда фильтруется по `user_id` (см. [memory.md](memory.md)).
+
+### media_logs
+
 ```sql
 CREATE TABLE media_logs (
     media_id TEXT PRIMARY KEY,
@@ -91,31 +116,56 @@ CREATE TABLE media_logs (
     user_id TEXT,
     timestamp TEXT DEFAULT (datetime('now')),
     file_path TEXT,
-    vlm_description TEXT
+    vlm_description TEXT,
+    FOREIGN KEY(chat_id) REFERENCES chats(chat_id),
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
 );
 ```
-Заполняется при каждом скачанном фото/войсе (`log_media()` из `queue.handle()`); `vlm_description` — плейсхолдер текста (отдельного капшенера в v1 нет, описание даёт main LLM нативно).
 
-#### presence_state (состояния Милы)
+Заполняется при скачивании фото/войса; `vlm_description` — плейсхолдер текста
+(отдельного captioner-а нет, описание даёт main LLM нативно).
+
+### presence_state
+
 ```sql
 CREATE TABLE presence_state (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     state TEXT NOT NULL DEFAULT 'rest',  -- rest | dialog | working | sleep
-    focus_chat_id TEXT,                  -- чат диалога (только dialog)
-    focus_user_name TEXT,                -- имя собеседника для промпта
+    focus_chat_id TEXT,
+    focus_user_name TEXT,
     note TEXT DEFAULT '',
     updated_at TEXT
 );
 ```
-Одна строка `id=1`, создаётся лениво в `core/presence.py`. Сон как цикл принадлежит `sleep_state`/`sleep manager` — здесь только намерение.
-```
-Полей `media_type / file_id / caption / created_at` нет; таблица создана, но кодом бота пока не пишется (задел под фото/VLM).
 
-#### mila_memory_chunks (автобиографическая память)
+Одна строка `id=1`, создаётся лениво. Сон как цикл принадлежит `sleep_state`;
+здесь только намерение/локация.
+
+### user_attitude_history
+
+Создаётся лениво при первом обращении к истории отношения или первом изменении:
+
+```sql
+CREATE TABLE user_attitude_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    sentiment REAL DEFAULT 0.0,
+    relationship_type TEXT DEFAULT 'friend',
+    changed_by TEXT DEFAULT 'manual',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+```
+
+Пишется, когда `PUT /api/users/{id}` меняет `sentiment` или
+`relationship_type`; используется графиком отношения.
+
+### mila_memory_chunks (автобиографическая память)
+
 Создаётся лениво `core/memory/eternal.py::_ensure_table()`:
+
 ```sql
 CREATE TABLE mila_memory_chunks (
-    chunk_id TEXT PRIMARY KEY,  -- uuid4
+    chunk_id TEXT PRIMARY KEY,      -- uuid4
     title TEXT NOT NULL,
     content_md TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
@@ -126,13 +176,14 @@ CREATE TABLE mila_memory_chunks (
 );
 ```
 
-#### Таблицы сна (все в mila.db, создаются в `core/sleep/state.py`)
+### Таблицы сна
+
+Создаются `core/sleep/state.py::_ensure_sleep_tables()`:
 
 ```sql
--- Одна строка (id=1), состояния: awake|sleeping|committing|sleep_error (строчные!)
 CREATE TABLE sleep_state (
     id INTEGER PRIMARY KEY CHECK(id = 1),
-    state TEXT NOT NULL DEFAULT 'awake',
+    state TEXT NOT NULL DEFAULT 'awake',  -- awake|sleeping|committing|sleep_error
     session_id TEXT,
     current_stage TEXT DEFAULT 'idle',
     progress_pct REAL DEFAULT 0.0,
@@ -144,7 +195,6 @@ CREATE TABLE sleep_state (
     version INTEGER DEFAULT 1
 );
 
--- Очередь сообщений во сне (есть session_id + user_id + received_at/processed)
 CREATE TABLE sleep_message_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -155,19 +205,17 @@ CREATE TABLE sleep_message_queue (
     processed INTEGER DEFAULT 0
 );
 
--- Стейдж изменений (универсальный payload-JSON, не old_data/new_data)
 CREATE TABLE sleep_transaction_staging (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
-    operation_type TEXT NOT NULL,  -- insert|update|delete по разным target_table
-    target_table TEXT NOT NULL,    -- mila_memory_chunks | memories | diary | context_buffer ...
+    operation_type TEXT NOT NULL,  -- insert|update|delete
+    target_table TEXT NOT NULL,    -- mila_memory_chunks | memories | context_buffer.chat_...
     target_id TEXT,
     payload TEXT NOT NULL,         -- JSON с данными операции
     created_at TEXT DEFAULT (datetime('now')),
     applied INTEGER DEFAULT 0
 );
 
--- Лог суммаризаций
 CREATE TABLE sleep_dialog_summary_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -178,15 +226,15 @@ CREATE TABLE sleep_dialog_summary_log (
 );
 ```
 
-## 2. context_buffer.db (буфер контекста)
+## 2. `context_buffer.db` (буфер контекста)
 
-**Файл**: `data/context_buffer.db` (`CONTEXT_DB_PATH`)
+**Файл:** `data/context_buffer.db` (`CONTEXT_DB_PATH`).
 
-Управляется `core/context/buffer.py` (таблицы чатов) + `core/diary/manager.py` (дневник).
+Управляется `core/context/buffer.py` и `core/diary/manager.py`.
 
-### Таблицы
+### Таблицы чатов
 
-Для каждого чата создаётся отдельная таблица (имя санитизируется):
+Для каждого чата — отдельная таблица (имя санитизируется):
 
 ```sql
 CREATE TABLE [chat_{chat_id}] (
@@ -195,19 +243,20 @@ CREATE TABLE [chat_{chat_id}] (
     type TEXT NOT NULL CHECK(type IN ('message', 'summary')),
     source_chunk_id TEXT,       -- chunks.chunk_id (TEXT) или NULL
     token_count INTEGER DEFAULT 0,
-    role TEXT NOT NULL DEFAULT '',  -- 'user' | 'assistant' | '' (старые summary)
+    role TEXT NOT NULL DEFAULT '',  -- 'user' | 'assistant' | ''
+    kind TEXT DEFAULT 'text',
     created_at TEXT DEFAULT (datetime('now'))  -- локальное время
 );
 ```
 
-Общая таблица дневника (с категориями):
+### diary_entries
 
 ```sql
 CREATE TABLE diary_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entry_number INTEGER NOT NULL,
     content_md TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT 'day_entries',  -- day_entries | reflection_entries
+    category TEXT NOT NULL DEFAULT 'day_entries',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -215,36 +264,48 @@ CREATE TABLE diary_entries (
 
 ## 3. FAISS индекс
 
-**Файл**: `data/faiss_text.index` (`FAISS_TEXT_PATH`; зарезервирован `data/faiss_image.index`, не используется)
+**Файл:** `data/faiss_text.index` (`FAISS_TEXT_PATH`; `faiss_image.index`
+зарезервирован, не используется).
 
-Бинарный файл FAISS `IndexIDMap(IndexFlatL2)`. Размерность `EMBED_DIM` (по умолчанию **384**, не 768).
+- бинарный `IndexIDMap(IndexFlatL2)`;
+- размерность `EMBED_DIM` (по умолчанию **384**, не 768);
+- `id` FAISS = `memories.faiss_id`;
+- `save()` пишет только при `ntotal > 0`, атомарно (`.tmp` + `os.replace`) под
+  межпроцессным `flock`;
+- повреждённый индекс при старте переименовывается в `.corrupt-<ts>`;
+- автосейв каждые `FAISS_SAVE_INTERVAL_MIN` минут и при `bot.stop()`;
+- перестроение — `POST /api/memory/rebuild-faiss` (переэмбеддинг всех
+  `memories.content`).
 
-- `id` в FAISS соответствует `faiss_id` в таблице `memories`
-- Старого пути `data/faiss.index` в коде нет
-- `save()` пишет файл только при `ntotal > 0`; автосейв каждые `FAISS_SAVE_INTERVAL_MIN` минут
-- При удалении воспоминания: soft delete + `rebuild_from_active()` (через Observatory `POST /api/memory/rebuild-faiss` с переэмбеддингом)
-
-## Связи между таблицами
+## Связи
 
 ```
-memories.faiss_id ──→ FAISS index id
-chunks.chunk_id (TEXT UUID) ──→ context_buffer.chat_*.source_chunk_id
-memories.user_id ──→ users.user_id
-chunks.chat_id ──→ chats.chat_id
-chunks.user_id ──→ users.user_id
-sleep_message_queue.session_id ──→ sleep_state.session_id
+memories.faiss_id              ──→ FAISS index id
+chunks.chunk_id (TEXT UUID)     ──→ context_buffer.chat_*.source_chunk_id
+chunks.media_path               ──→ файл в data/media
+memories.user_id                ──→ users.user_id
+chunks.chat_id                  ──→ chats.chat_id
+chunks.user_id                  ──→ users.user_id
+user_attitude_history.user_id   ──→ users.user_id
+sleep_message_queue.session_id  ──→ sleep_state.session_id
 sleep_transaction_staging.session_id ──→ sleep_state.session_id
 ```
 
-Связи `chunks.faiss_id → FAISS` и `chunks.id → source_chunk_id` из старых версий документации неверны: у чанков ключ `chunk_id` (TEXT), `faiss_id` обычно NULL.
+У чанков ключ `chunk_id` (TEXT); `chunks.faiss_id` обычно NULL — эмбеддинги
+строятся только для `memories`.
 
 ## Инициализация
 
-В `main.py`:
-
 ```python
 from core.db import init_db
-init_db()  # создаёт users/chats/chat_members/chunks/memories/media_logs, если их нет
+init_db()  # users/chats/chat_members/chunks/memories/media_logs
 ```
 
-Остальное создаётся лениво: таблицы чатов — `ensure_chat_table()` при первом обращении, `mila_memory_chunks` — при первом вызове eternal-памяти, сон — `_ensure_sleep_tables()`, дневник — `_ensure_diary_table()`.
+Остальное создаётся лениво:
+
+- таблицы чатов — `ensure_chat_table()`;
+- `diary_entries` — `_ensure_diary_table()`;
+- `mila_memory_chunks` — `_ensure_table()`;
+- `presence_state` — `_ensure_table()` при первом обращении;
+- сон — `_ensure_sleep_tables()`;
+- `user_attitude_history` — при первом изменении отношения / запросе истории.

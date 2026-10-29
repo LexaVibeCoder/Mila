@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
-from config import settings
+from config import settings, get_night_llm_api_key
 from core.llm.client import LLMClient
 from core.db import get_conn as get_mila_conn
 from core.diary.manager import get_diary_markdown, get_diary_entry_count
@@ -49,20 +49,18 @@ def _create_night_llm() -> LLMClient:
         night_config = runtime_config.get("night_llm", {})
         model = night_config.get("model")
         api_base = night_config.get("api_base")
-        api_key = night_config.get("api_key")
         temperature = night_config.get("temperature", 0.3)
         max_tokens = night_config.get("max_tokens", 4096)
     except ImportError:
         model = settings.MAIN_LLM_MODEL
         api_base = settings.LLM_API_BASE
-        api_key = settings.LLM_API_KEY
         temperature = 0.3
         max_tokens = 4096
 
     return LLMClient(
         model=model,
         api_base=api_base,
-        api_key=api_key,
+        api_key=get_night_llm_api_key(),
         temperature=temperature,
         max_tokens=max_tokens
     )
@@ -74,16 +72,14 @@ def _create_verifier_llm() -> LLMClient:
         night_config = runtime_config.get("night_llm", {})
         model = night_config.get("model")
         api_base = night_config.get("api_base")
-        api_key = night_config.get("api_key")
     except ImportError:
         model = settings.MAIN_LLM_MODEL
         api_base = settings.LLM_API_BASE
-        api_key = settings.LLM_API_KEY
 
     return LLMClient(
         model=model,
         api_base=api_base,
-        api_key=api_key,
+        api_key=get_night_llm_api_key(),
         temperature=0.1,
         max_tokens=2048
     )

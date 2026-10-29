@@ -4,9 +4,10 @@ Mila Observatory — authentication helpers.
 - HTTP Basic Auth, credentials from .env (OBSERVATORY_USERNAME / OBSERVATORY_PASSWORD).
 - If OBSERVATORY_PASSWORD is empty, auth is disabled: keep the panel
   localhost-only via docker-compose ports ("127.0.0.1:8080:8080").
-- Secrets masking: API responses never contain full keys, only
-  "abcd1234...wxyz" sentinels. Incoming values containing "..." are
-  treated as "leave unchanged" and must be dropped before persisting.
+- Secrets masking: runtime config no longer stores API keys (they come from
+  .env only). The helpers below remain as defense-in-depth for legacy files:
+  responses never contain full keys, only "abcd1234...wxyz" sentinels, and
+  incoming values containing "..." are treated as "leave unchanged".
 """
 
 import secrets

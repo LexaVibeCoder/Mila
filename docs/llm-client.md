@@ -24,6 +24,8 @@ LLMClient(
 
 `None`-параметры берутся из `config.py`: `LLM_API_BASE`, `LLM_API_KEY`,
 `MAIN_LLM_MODEL`, `MAIN_LLM_MAX_TOKENS` (2048), `MAIN_LLM_TEMPERATURE` (0.7).
+`api_key` можно передать только из `.env`-значений (ночной LLM использует
+`get_night_llm_api_key()`); runtime config ключи не хранит.
 `top_p/frequency_penalty/presence_penalty` по умолчанию `None` — не отправляются,
 пока не заданы. Внутри создаётся `openai.AsyncOpenAI`.
 
@@ -87,15 +89,15 @@ result = await client.generate(
 client.reconfigure(
     model="new-model",
     api_base="http://new-url/v1",
-    api_key="new-key",
     temperature=0.5,
     max_tokens=2048,
     timeout=120.0,
 )
 ```
 
-Меняет только переданные (`not None`) параметры. Смена `api_base` или `api_key`
-пересоздаёт `AsyncOpenAI`.
+Меняет только переданные (`not None`) параметры. Смена `api_base` пересоздаёт
+`AsyncOpenAI` с ключом из `.env` (`settings.LLM_API_KEY`); API-ключ через
+`reconfigure()` не меняется.
 
 ## LLMManager
 
@@ -105,22 +107,23 @@ client.reconfigure(
 
 ```python
 get_main_client() -> LLMClient       # применяет runtime overrides
-get_main_params() -> dict            # ключ замаскирован
-get_night_params() -> dict           # только runtime night_llm
+get_main_params() -> dict            # без api_key
+get_night_params() -> dict           # только runtime night_llm, без api_key
 configure_main(params)               # runtime + reconfigure клиента
 configure_night(params)              # только runtime (подхват без рестарта)
 test_query(prompt, client_type="main", params=None) -> dict
 ```
 
-Допустимые поля: `model/api_base/api_key/temperature/max_tokens/top_p/
+Допустимые поля: `model/api_base/temperature/max_tokens/top_p/
 frequency_penalty/presence_penalty/tool_choice`. `tool_choice` хранится в
 runtime, но в `LLMClient` не пробрасывается (его читает пайплайн).
+`api_key` через API не передаётся и не меняется: ключи только из `.env`.
 
 ### Runtime overrides
 
 При каждом `get_main_client()`:
 
-1. читаются `llm.{model,api_base,api_key,temperature,max_tokens,top_p,
+1. читаются `llm.{model,api_base,temperature,max_tokens,top_p,
    frequency_penalty,presence_penalty}`;
 2. не-`None` значения применяются через `reconfigure()`;
 3. `None` → остаётся значение из `config.py`.
@@ -191,7 +194,6 @@ MAIN_LLM_MAX_TOKENS = 2048
   "llm": {
     "model": "override-model",
     "api_base": "http://override-url/v1",
-    "api_key": "...",
     "temperature": 0.5,
     "max_tokens": 2048,
     "tool_choice": "auto"
@@ -204,3 +206,5 @@ MAIN_LLM_MAX_TOKENS = 2048
   }
 }
 ```
+
+Ключи (`LLM_API_KEY`, опциональный `NIGHT_LLM_API_KEY`) живут только в `.env`.

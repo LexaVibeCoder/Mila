@@ -57,7 +57,7 @@ class LLMClient:
         self.default_presence_penalty = presence_penalty
         self.timeout = timeout
 
-    def reconfigure(self, model: str = None, api_base: str = None, api_key: str = None,
+    def reconfigure(self, model: str = None, api_base: str = None,
                     max_tokens: int = None, temperature: float = None,
                     top_p: float = None, frequency_penalty: float = None,
                     presence_penalty: float = None, timeout: float | None = None):
@@ -66,15 +66,10 @@ class LLMClient:
         if model is not None:
             self.model = model
         if api_base is not None:
+            # The key always comes from .env; runtime config cannot override it.
             self.client = openai.AsyncOpenAI(
                 base_url=normalize_api_base(api_base),
-                api_key=api_key or settings.LLM_API_KEY,
-                timeout=self.timeout,
-            )
-        if api_key is not None:
-            self.client = openai.AsyncOpenAI(
-                base_url=normalize_api_base(api_base or settings.LLM_API_BASE),
-                api_key=api_key,
+                api_key=settings.LLM_API_KEY,
                 timeout=self.timeout,
             )
         if max_tokens is not None:

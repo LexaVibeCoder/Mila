@@ -55,7 +55,6 @@ export const getEvents = (limit = 10) => request<EventItem[]>(`/events?limit=${l
 export interface ModelParams {
   model?: string;
   api_base?: string;
-  api_key?: string;
   temperature?: number;
   max_tokens?: number;
   top_p?: number;

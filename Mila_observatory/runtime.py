@@ -23,7 +23,8 @@ from copy import deepcopy
 # Stored in the project root (not data/) so it persists on the host via the
 # docker-compose bind mount (.:/app) instead of the mila_data named volume.
 # gitignored because it may contain secrets.
-RUNTIME_CONFIG_PATH = os.path.join(
+# MILA_RUNTIME_CONFIG_PATH lets tests point at a temp file (never the real one).
+RUNTIME_CONFIG_PATH = os.environ.get("MILA_RUNTIME_CONFIG_PATH") or os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "runtime_config.json"
 )
@@ -42,6 +43,9 @@ class RuntimeConfig:
 
     _instance = None
     _lock = threading.RLock()
+
+    # Secrets are never stored in runtime config: they come from .env only.
+    _SECRET_KEYS = frozenset({"llm.api_key", "night_llm.api_key"})
 
     def __new__(cls):
         if cls._instance is None:
@@ -64,7 +68,6 @@ class RuntimeConfig:
             "llm": {
                 "model": None,
                 "api_base": None,
-                "api_key": None,
                 "temperature": None,
                 "max_tokens": None,
                 "top_p": None,
@@ -76,7 +79,6 @@ class RuntimeConfig:
             "night_llm": {
                 "model": None,
                 "api_base": None,
-                "api_key": None,
                 "temperature": None,
                 "max_tokens": None,
                 "tool_choice": "required",
@@ -185,6 +187,9 @@ class RuntimeConfig:
     def set(self, key: str, value: Any, updated_by: str = "observatory") -> bool:
         """Set a config value by dot-notation key. Returns True if changed."""
         with self._lock:
+            if self._is_secret_key(key):
+                # API keys are read from .env only and cannot be changed here.
+                return False
             # Re-read the file first: the other container may have written
             # newer values that aren't in our in-memory copy yet. Otherwise
             # we'd overwrite them with stale data on save.
@@ -205,8 +210,11 @@ class RuntimeConfig:
         """Update multiple values at once. Keys can be dot-notation or nested dict."""
         with self._lock:
             self._maybe_auto_reload()
+            updates = self._strip_secret_updates(updates, prefix)
             for key, value in updates.items():
                 full_key = f"{prefix}.{key}" if prefix else key
+                if self._is_secret_key(full_key):
+                    continue
                 keys = full_key.split(".")
                 ptr = self._config
                 for k in keys[:-1]:
@@ -248,6 +256,7 @@ class RuntimeConfig:
                     saved = json.load(f)
                 # Deep merge saved into defaults
                 self._deep_merge(self._config, saved)
+                self._drop_secret_keys()
                 try:
                     self._last_mtime = os.path.getmtime(RUNTIME_CONFIG_PATH)
                 except OSError:
@@ -282,7 +291,6 @@ class RuntimeConfig:
         mapping = {
             "llm.model": "MAIN_LLM_MODEL",
             "llm.api_base": "LLM_API_BASE",
-            "llm.api_key": "LLM_API_KEY",
             "llm.temperature": "MAIN_LLM_TEMPERATURE",
             "llm.max_tokens": "MAIN_LLM_MAX_TOKENS",
             "pipeline.max_context_tokens": "MAX_CONTEXT_TOKENS",
@@ -301,7 +309,7 @@ class RuntimeConfig:
                     changed = True
 
         # Seed night_llm from main llm values (if still None)
-        for field in ["model", "api_base", "api_key"]:
+        for field in ["model", "api_base"]:
             if self._deep_get(self._config, f"night_llm.{field}") is None:
                 llm_val = self._deep_get(self._config, f"llm.{field}")
                 if llm_val is not None:
@@ -318,6 +326,39 @@ class RuntimeConfig:
 
         if changed:
             self._save()
+
+    @classmethod
+    def _is_secret_key(cls, key: str) -> bool:
+        """True for keys that must come from .env, never from runtime config."""
+        return key in cls._SECRET_KEYS
+
+    @classmethod
+    def _strip_secret_updates(cls, updates: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+        """Recursively drop secret keys from an update dict before persisting."""
+        cleaned: Dict[str, Any] = {}
+        for key, value in updates.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            if cls._is_secret_key(full_key):
+                continue
+            if isinstance(value, dict):
+                nested = cls._strip_secret_updates(value, full_key)
+                if nested:
+                    cleaned[key] = nested
+                continue
+            cleaned[key] = value
+        return cleaned
+
+    def _drop_secret_keys(self) -> None:
+        """Drop legacy api_key values loaded from disk (kept out of memory).
+
+        No save here: an old runtime_config.json may still contain the key
+        until the user removes it or the next regular config write rewrites
+        the file without it.
+        """
+        for section in ("llm", "night_llm"):
+            section_cfg = self._config.get(section)
+            if isinstance(section_cfg, dict):
+                section_cfg.pop("api_key", None)
 
     @staticmethod
     def _deep_get(d: dict, key: str, default: Any = None) -> Any:

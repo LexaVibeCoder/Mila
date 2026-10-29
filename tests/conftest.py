@@ -34,6 +34,8 @@ _DUMMY_ENV = {
     "LOG_DIR": str(_TMP_ROOT / "logs"),
     "RERANKER_MODEL_PATH": str(_TMP_ROOT / "reranker"),
     "LOCAL_TIMEZONE": "UTC",
+    # Never read/write the developer's real runtime_config.json.
+    "MILA_RUNTIME_CONFIG_PATH": str(_TMP_ROOT / "runtime_config.json"),
 }
 # Force overrides: a real exported variable must not leak into tests.
 os.environ.update(_DUMMY_ENV)

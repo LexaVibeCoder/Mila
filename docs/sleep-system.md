@@ -197,7 +197,6 @@ hot path их не вызывает.
   "night_llm": {
     "model": "...",
     "api_base": "https://openrouter.ai/api/v1",
-    "api_key": "...",
     "temperature": 0.3,
     "max_tokens": 4096,
     "tool_choice": "required"
@@ -205,7 +204,9 @@ hot path их не вызывает.
 }
 ```
 
-- незаданные `model/api_base/api_key` наследуются от `llm.*` при старте;
+- ключ ночного LLM берётся из `.env`: `NIGHT_LLM_API_KEY`, если задан, иначе
+  `LLM_API_KEY`; в runtime config ключа нет;
+- незаданные `model/api_base` наследуются от `llm.*` при старте;
 - `temperature/max_tokens` по умолчанию `0.3/4096`;
 - верификатор — тот же клиент с `temperature=0.1`, `max_tokens=2048`;
 - `night_llm.tool_choice` читается на каждом генерационном/верификационном

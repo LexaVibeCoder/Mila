@@ -58,8 +58,9 @@ docker compose up -d observatory
 - `/api/health` публичен; все остальные роутеры и SPA-fallback требуют auth.
 - Сравнение учётных данных — `secrets.compare_digest`.
 - Если пароль пуст, панель открыта; в консоль печатается предупреждение.
-- API не отдаёт полные ключи: `llm.api_key` и `night_llm.api_key` маскируются,
-  значения с `...` при PUT игнорируются.
+- API не отдаёт и не принимает API-ключи: `llm.api_key`/`night_llm.api_key`
+  в runtime config отсутствуют, ключи берутся только из `.env`. Старые
+  значения с `...` и любые попытки записи `api_key` игнорируются.
 - CORS: не wildcard; разрешён regex
   `https?://(localhost|127.0.0.1)(:\d+)?`, методы
   `GET/POST/PUT/DELETE`, заголовки `Authorization/Content-Type`.
@@ -80,8 +81,8 @@ docker compose up -d observatory
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/model` | main + night, ключи маскированы |
-| PUT | `/api/model/main` | model/api_base/api_key/temperature/max_tokens/top_p/.../tool_choice |
+| GET | `/api/model` | main + night, без `api_key` |
+| PUT | `/api/model/main` | model/api_base/temperature/max_tokens/top_p/.../tool_choice |
 | PUT | `/api/model/night` | те же поля; сохраняется в runtime |
 | POST | `/api/model/test` | Playground: всегда main-клиент, `max_retries=1` |
 

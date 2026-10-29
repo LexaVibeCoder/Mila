@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.llm.client import LLMClient
 from config import settings, normalize_api_base
-from Mila_observatory.auth import mask_secret, should_keep_existing
 from Mila_observatory.runtime import runtime_config
 
 
@@ -48,11 +47,10 @@ class LLMManager:
             temperature=settings.MAIN_LLM_TEMPERATURE,
         )
 
-        # Track current parameters for display (api_key masked, never the real key)
+        # Track current parameters for display (secrets are never exposed)
         self._main_params = {
             "model": settings.MAIN_LLM_MODEL,
             "api_base": settings.LLM_API_BASE,
-            "api_key": mask_secret(settings.LLM_API_KEY),
             "temperature": settings.MAIN_LLM_TEMPERATURE,
             "max_tokens": settings.MAIN_LLM_MAX_TOKENS,
             "top_p": None,
@@ -69,18 +67,15 @@ class LLMManager:
         return self._main_client
 
     def get_main_params(self) -> Dict[str, Any]:
-        """Get current main LLM parameters (api_key masked)."""
+        """Get current main LLM parameters (API key is never exposed)."""
         self._update_params_from_runtime("llm", self._main_params)
-        params = dict(self._main_params)
-        params["api_key"] = mask_secret(params.get("api_key"))
-        return params
+        return dict(self._main_params)
 
     def get_night_params(self) -> Dict[str, Any]:
         """Get current night LLM parameters (runtime config is source of truth)."""
         night = {
             "model": runtime_config.get("night_llm.model"),
             "api_base": runtime_config.get("night_llm.api_base"),
-            "api_key": mask_secret(runtime_config.get("night_llm.api_key")),
             "temperature": runtime_config.get("night_llm.temperature"),
             "max_tokens": runtime_config.get("night_llm.max_tokens"),
             "tool_choice": runtime_config.get("night_llm.tool_choice", "required"),
@@ -90,32 +85,28 @@ class LLMManager:
     def configure_night(self, params: Dict[str, Any]) -> None:
         """Reconfigure night LLM (persisted to runtime config; picked up by
         night worker on next run via auto-reload — no restart needed)."""
-        valid_fields = {"model", "api_base", "api_key", "temperature",
+        valid_fields = {"model", "api_base", "temperature",
                        "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
                        "tool_choice"}
         for key, value in params.items():
             if key in valid_fields:
-                if key == "api_key" and should_keep_existing(value):
-                    continue  # masked sentinel echoed from GET — keep real key
                 runtime_config.set(f"night_llm.{key}", value)
 
     def configure_main(self, params: Dict[str, Any]) -> None:
         """Reconfigure main LLM client with new parameters."""
-        valid_fields = {"model", "api_base", "api_key", "temperature",
+        valid_fields = {"model", "api_base", "temperature",
                        "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
                        "tool_choice"}
 
-        # Store in runtime config (masked sentinels never overwrite the real key)
+        # Store in runtime config (API keys stay in .env and are ignored here)
         for key, value in params.items():
             if key in valid_fields:
-                if key == "api_key" and should_keep_existing(value):
-                    continue
                 runtime_config.set(f"llm.{key}", value)
 
         # Apply to client (tool_choice is runtime-only, not an LLMClient field)
         self._apply_runtime_overrides(self._main_client, "llm")
         self._update_params_from_runtime("llm", self._main_params)
-        client_params = {k: v for k, v in params.items() if k != "tool_choice"}
+        client_params = {k: v for k, v in params.items() if k not in ("tool_choice", "api_key")}
         self._main_client.reconfigure(**client_params)
 
     # ─── Test Query ──────────────────────────────────────────
@@ -174,7 +165,7 @@ class LLMManager:
     def _apply_runtime_overrides(self, client: LLMClient, config_prefix: str) -> None:
         """Apply runtime config overrides to an LLM client."""
         overrides = {}
-        for field in ["model", "api_base", "api_key", "temperature",
+        for field in ["model", "api_base", "temperature",
                        "max_tokens", "top_p", "frequency_penalty", "presence_penalty"]:
             value = runtime_config.get(f"{config_prefix}.{field}")
             if value is not None:

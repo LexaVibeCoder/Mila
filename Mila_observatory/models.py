@@ -44,7 +44,6 @@ class DashboardResponse(BaseModel):
 class ModelParams(BaseModel):
     model: Optional[str] = None
     api_base: Optional[str] = None
-    api_key: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None

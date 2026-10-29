@@ -38,6 +38,7 @@ runtime_config.json (значение не null)  →  побеждает  →  
 |------|--------------|
 | `LLM_API_BASE` | обязателен |
 | `LLM_API_KEY` | обязателен |
+| `NIGHT_LLM_API_KEY` | пусто = `LLM_API_KEY` |
 | `MAIN_LLM_MODEL` | обязателен |
 | `MAIN_LLM_MAX_TOKENS` | `2048` |
 | `MAIN_LLM_TEMPERATURE` | `0.7` |
@@ -132,8 +133,13 @@ OpenRouter с `/v1` не меняется.
 **Хранилище:** `./runtime_config.json` в корне проекта (не в `data/`), gitignored.
 
 При старте `RuntimeConfig` загружает JSON, затем `_seed_from_settings()` заполняет
-оставшиеся `None` из `.env`. `night_llm.model/api_base/api_key` наследуются от
+оставшиеся `None` из `.env`. `night_llm.model/api_base` наследуются от
 `llm.*`; `night_llm.temperature/max_tokens` по умолчанию `0.3/4096`.
+
+API-ключи в runtime config **не хранятся**: `llm.api_key` и `night_llm.api_key`
+всегда берутся из `.env` (`LLM_API_KEY`, `NIGHT_LLM_API_KEY` с fallback на
+`LLM_API_KEY`), значения из старого `runtime_config.json` игнорируются и
+вырезаются из памяти при загрузке; запись через `set()/update()` невозможна.
 
 ### Актуальная структура
 
@@ -142,7 +148,6 @@ OpenRouter с `/v1` не меняется.
   "llm": {
     "model": "...",
     "api_base": "https://openrouter.ai/api/v1",
-    "api_key": "...",
     "temperature": 0.8,
     "max_tokens": 2048,
     "top_p": null,
@@ -153,7 +158,6 @@ OpenRouter с `/v1` не меняется.
   "night_llm": {
     "model": "...",
     "api_base": "...",
-    "api_key": "...",
     "temperature": 0.3,
     "max_tokens": 4096,
     "tool_choice": "required"
@@ -271,7 +275,8 @@ OpenRouter с `/v1` не меняется.
 - `mask_secret("sk-or-v1-abcdef...wxyz")` → `sk-or-v1...wxyz`;
 - `should_keep_existing(value)` — `True`, если в строке есть `...`;
 - `strip_masked_secrets(updates)` выкидывает такие значения перед записью;
-- `mask_secrets_inplace()` маскирует `llm.api_key` и `night_llm.api_key`.
+- `mask_secrets_inplace()` оставлен как защита на случай старых данных, но
+  API-ключи в runtime config больше не хранятся (только `.env`).
 
 ## Файл `.env`
 
@@ -283,6 +288,8 @@ PHONE_NUMBER=+79001234567
 LLM_API_BASE=http://127.0.0.1:1234
 LLM_API_KEY=sk-...
 MAIN_LLM_MODEL=llama3
+# опционально: отдельный ключ для ночного LLM (иначе LLM_API_KEY)
+# NIGHT_LLM_API_KEY=
 
 EMBED_API_BASE=http://127.0.0.1:11434
 EMBED_API_KEY=
@@ -298,8 +305,10 @@ DIALOG_IDLE_TIMEOUT_SECONDS=300
 DIALOG_IDLE_CHECK_INTERVAL_SECONDS=30
 ```
 
-Полный список — `.env.example`. `NIGHT_LLM_*` в `.env.example` носят справочный
-характер: рабочие ночные настройки живут в `runtime_config.json` (`night_llm.*`).
+Полный список — `.env.example`. `NIGHT_LLM_API_KEY` — единственная рабочая
+переменная из `NIGHT_LLM_*` (ключ ночного LLM, fallback на `LLM_API_KEY`);
+остальные `NIGHT_LLM_*` в `.env.example` носят справочный характер: рабочие
+ночные настройки живут в `runtime_config.json` (`night_llm.*`).
 
 ## Где применяется runtime config
 

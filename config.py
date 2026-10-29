@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # LLM Models
     LLM_API_BASE: str
     LLM_API_KEY: str
+    # Optional separate key for the night LLM. Empty = use LLM_API_KEY.
+    NIGHT_LLM_API_KEY: str = ""
     
     # Main LLM (Brain - daytime)
     MAIN_LLM_MODEL: str
@@ -122,3 +124,8 @@ class Settings(BaseSettings):
         extra = "allow"  # Allow extra fields from .env (night_llm, sleep, etc.) to be used by runtime_config
 
 settings = Settings()
+
+
+def get_night_llm_api_key() -> str:
+    """API key for the night LLM: NIGHT_LLM_API_KEY from .env, else LLM_API_KEY."""
+    return (getattr(settings, "NIGHT_LLM_API_KEY", "") or "").strip() or settings.LLM_API_KEY

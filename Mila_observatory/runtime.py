@@ -74,6 +74,12 @@ class RuntimeConfig:
                 "frequency_penalty": None,
                 "presence_penalty": None,
                 "tool_choice": "auto",
+                # "none" disables reasoning; providers accept none/low/medium/high
+                # (OpenRouter also minimal/xhigh/max). Sent on every request.
+                "reasoning_effort": "none",
+                # Raw extra_body for provider-specific knobs (e.g. llama.cpp
+                # chat_template_kwargs), merged with the reasoning field.
+                "extra_body": {},
             },
             # Night LLM
             "night_llm": {
@@ -82,6 +88,8 @@ class RuntimeConfig:
                 "temperature": None,
                 "max_tokens": None,
                 "tool_choice": "required",
+                "reasoning_effort": "none",
+                "extra_body": {},
             },
             # Tools (enabled/disabled)
             # silence is legacy (empty content = silence now), kept for compat.

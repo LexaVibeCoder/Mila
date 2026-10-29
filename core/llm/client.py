@@ -1,6 +1,39 @@
+import copy
 import openai
 from typing import List, Dict, Any, Optional
 from config import settings, normalize_api_base
+
+
+def _is_openrouter(api_base: Optional[str]) -> bool:
+    return "openrouter.ai" in (api_base or "").lower()
+
+
+def _reasoning_kwargs(api_base: Optional[str], reasoning_effort: Optional[str],
+                      extra_body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build request kwargs for reasoning/extra-body options.
+
+    OpenAI-compatible servers (OpenAI, LM Studio, Ollama, llama.cpp) take a
+    flat `reasoning_effort`. OpenRouter expects the nested
+    `{"reasoning": {"effort": ...}}` object, which the SDK only forwards via
+    `extra_body`.
+    """
+    body = copy.deepcopy(extra_body) if isinstance(extra_body, dict) and extra_body else None
+    effort = (reasoning_effort or "").strip().lower()
+    out: Dict[str, Any] = {}
+
+    if effort:
+        if _is_openrouter(api_base):
+            body = body or {}
+            existing = body.get("reasoning")
+            reasoning = dict(existing) if isinstance(existing, dict) else {}
+            reasoning["effort"] = effort
+            body["reasoning"] = reasoning
+        else:
+            out["reasoning_effort"] = effort
+
+    if body:
+        out["extra_body"] = body
+    return out
 
 
 def _retry_wait(exc: Exception, attempt: int, base_delay: float) -> float:
@@ -42,8 +75,11 @@ class LLMClient:
     def __init__(self, model: str = None, api_base: str = None, api_key: str = None,
                  max_tokens: int = None, temperature: float = None,
                  top_p: float = None, frequency_penalty: float = None,
-                 presence_penalty: float = None, timeout: float = 90.0):
+                 presence_penalty: float = None, timeout: float = 90.0,
+                 reasoning_effort: Optional[str] = None,
+                 extra_body: Optional[Dict[str, Any]] = None):
         base = api_base or settings.LLM_API_BASE
+        self.api_base = base
         self.client = openai.AsyncOpenAI(
             base_url=normalize_api_base(base),
             api_key=api_key or settings.LLM_API_KEY,
@@ -55,23 +91,32 @@ class LLMClient:
         self.default_top_p = top_p
         self.default_frequency_penalty = frequency_penalty
         self.default_presence_penalty = presence_penalty
+        self.default_reasoning_effort = reasoning_effort
+        self.default_extra_body = extra_body
         self.timeout = timeout
 
     def reconfigure(self, model: str = None, api_base: str = None,
                     max_tokens: int = None, temperature: float = None,
                     top_p: float = None, frequency_penalty: float = None,
-                    presence_penalty: float = None, timeout: float | None = None):
+                    presence_penalty: float = None, timeout: float | None = None,
+                    reasoning_effort: Optional[str] = None,
+                    extra_body: Optional[Dict[str, Any]] = None):
         if timeout is not None:
             self.timeout = timeout
         if model is not None:
             self.model = model
         if api_base is not None:
             # The key always comes from .env; runtime config cannot override it.
+            self.api_base = api_base
             self.client = openai.AsyncOpenAI(
                 base_url=normalize_api_base(api_base),
                 api_key=settings.LLM_API_KEY,
                 timeout=self.timeout,
             )
+        if reasoning_effort is not None:
+            self.default_reasoning_effort = reasoning_effort
+        if extra_body is not None:
+            self.default_extra_body = extra_body
         if max_tokens is not None:
             self.default_max_tokens = max_tokens
         if temperature is not None:
@@ -120,6 +165,10 @@ class LLMClient:
             kwargs["frequency_penalty"] = self.default_frequency_penalty
         if self.default_presence_penalty is not None:
             kwargs["presence_penalty"] = self.default_presence_penalty
+
+        kwargs.update(_reasoning_kwargs(
+            self.api_base, self.default_reasoning_effort, self.default_extra_body
+        ))
 
         if tools:
             kwargs["tools"] = tools
@@ -181,10 +230,27 @@ class LLMClient:
                 "role": message.role,
                 "thoughts": message.content or "",
                 "tool_calls": tool_calls,
-                "finish_reason": choice.finish_reason
+                "finish_reason": choice.finish_reason,
+                # OpenRouter returns `reasoning`, local servers `reasoning_content`.
+                "reasoning": _extract_reasoning(message),
             }
 
         raise last_error or Exception("Empty response from LLM API")
+
+
+def _extract_reasoning(message) -> Any:
+    """Best-effort reasoning text; SDK versions expose it differently."""
+    for attr in ("reasoning", "reasoning_content"):
+        value = getattr(message, attr, None)
+        if value:
+            return value
+    extra = getattr(message, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning", "reasoning_content"):
+            value = extra.get(key)
+            if value:
+                return value
+    return ""
 
 
 def _contains_audio_part(messages) -> bool:

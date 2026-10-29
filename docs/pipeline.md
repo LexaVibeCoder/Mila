@@ -149,13 +149,19 @@ error         → {"type": "error", "error": "..."}
   "silence_reason": "",
   "actions": [...],
   "raw_llm_responses": [
-    {"iteration": 1, "thoughts": "...", "tool_calls": [...], "finish_reason": "tool_calls"}
+    {"iteration": 1, "thoughts": "...", "reasoning": "...", "tool_calls": [...], "finish_reason": "tool_calls"}
   ],
   "success": true,
   "error": null,
   "timing": {"total": "3.21s", "iterations": 2}
 }
 ```
+
+`raw_llm_responses[].reasoning` — «мысли» модели (`message.reasoning` у
+OpenRouter, `reasoning_content` у локальных серверов), best-effort. Поле
+появляется только если провайдер его вернул, то есть при
+`reasoning_effort != "none"`. В UI на странице Pipeline оно показывается
+отдельным блоком **Mila's reasoning** по итерациям.
 
 Просмотр: `GET /api/pipeline/logs`, `/api/pipeline/logs/{file}`,
 `GET /api/pipeline/chats`; UI — страница Pipeline. Детальный эндпоинт заменяет

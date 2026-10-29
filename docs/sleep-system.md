@@ -199,7 +199,9 @@ hot path их не вызывает.
     "api_base": "https://openrouter.ai/api/v1",
     "temperature": 0.3,
     "max_tokens": 4096,
-    "tool_choice": "required"
+    "tool_choice": "required",
+    "reasoning_effort": "none",
+    "extra_body": {}
   }
 }
 ```
@@ -211,4 +213,7 @@ hot path их не вызывает.
 - верификатор — тот же клиент с `temperature=0.1`, `max_tokens=2048`;
 - `night_llm.tool_choice` читается на каждом генерационном/верификационном
   вызове; если модель плохо переносит `required`, значение можно переключить
-  в Observatory.
+  в Observatory;
+- `night_llm.reasoning_effort` (по умолчанию `none`) применяется и к
+  генератору, и к верификатору; `night_llm.extra_body` добавляет
+  провайдерские поля. Меняется через Observatory `/model` без рестарта.

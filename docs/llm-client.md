@@ -19,6 +19,8 @@ LLMClient(
     frequency_penalty=None,
     presence_penalty=None,
     timeout=90.0,
+    reasoning_effort=None,   # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    extra_body=None,         # dict провайдерских полей
 )
 ```
 
@@ -49,6 +51,7 @@ result = await client.generate(
 - `tools`/`tool_choice` отправляются только если передан `tools`;
 - `response_format` передаётся провайдеру как есть (пайплайн использует
   `json_schema` в диалоге);
+- `reasoning_effort`/`extra_body` добавляются, если заданы (см. ниже);
 - возвращает:
 
 ```python
@@ -56,9 +59,29 @@ result = await client.generate(
     "role": "assistant",
     "thoughts": "...",           # message.content (поле называется thoughts, не content)
     "tool_calls": [...] | None,
-    "finish_reason": "tool_calls" | "stop" | "length"
+    "finish_reason": "tool_calls" | "stop" | "length",
+    "reasoning": "..." | "",      # message.reasoning / reasoning_content, best-effort
 }
 ```
+
+### Think effort / reasoning
+
+`reasoning_effort` — строка (`none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`); пустое/`None` — параметр не отправляется.
+
+- **OpenRouter** (`api_base` содержит `openrouter.ai`): SDK не принимает
+  `reasoning_effort` верхнего уровня, поэтому значение уходит как
+  `extra_body={"reasoning": {"effort": ...}}`; существующий `extra_body`
+  мержится.
+- **OpenAI / LM Studio / Ollama / llama.cpp**: плоский `reasoning_effort`.
+  Для нестандартных полей (например
+  `{"chat_template_kwargs": {"enable_thinking": true}}`) используйте
+  `extra_body`.
+- `reasoning_effort="none"` отправляется явно: это важно для моделей, которые
+  размышляют по умолчанию (gpt-5.x), но может не поддерживаться некоторыми
+  не-reasoning моделями.
+- Ответное reasoning возвращается в ключе `reasoning`, но в историю
+  пайплайна не добавляется.
 
 ### Ретраи
 
@@ -92,6 +115,8 @@ client.reconfigure(
     temperature=0.5,
     max_tokens=2048,
     timeout=120.0,
+    reasoning_effort="medium",
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
 )
 ```
 
@@ -115,8 +140,10 @@ test_query(prompt, client_type="main", params=None) -> dict
 ```
 
 Допустимые поля: `model/api_base/temperature/max_tokens/top_p/
-frequency_penalty/presence_penalty/tool_choice`. `tool_choice` хранится в
-runtime, но в `LLMClient` не пробрасывается (его читает пайплайн).
+frequency_penalty/presence_penalty/tool_choice/reasoning_effort/extra_body`.
+`tool_choice` хранится в runtime, но в `LLMClient` не пробрасывается (его
+читает пайплайн). `reasoning_effort/extra_body` хранятся в runtime и
+пробрасываются в клиент.
 `api_key` через API не передаётся и не меняется: ключи только из `.env`.
 
 ### Runtime overrides
@@ -124,7 +151,7 @@ runtime, но в `LLMClient` не пробрасывается (его чита�
 При каждом `get_main_client()`:
 
 1. читаются `llm.{model,api_base,temperature,max_tokens,top_p,
-   frequency_penalty,presence_penalty}`;
+   frequency_penalty,presence_penalty,reasoning_effort,extra_body}`;
 2. не-`None` значения применяются через `reconfigure()`;
 3. `None` → остаётся значение из `config.py`.
 
@@ -196,13 +223,17 @@ MAIN_LLM_MAX_TOKENS = 2048
     "api_base": "http://override-url/v1",
     "temperature": 0.5,
     "max_tokens": 2048,
-    "tool_choice": "auto"
+    "tool_choice": "auto",
+    "reasoning_effort": "none",
+    "extra_body": {}
   },
   "night_llm": {
     "model": "...",
     "temperature": 0.3,
     "max_tokens": 4096,
-    "tool_choice": "required"
+    "tool_choice": "required",
+    "reasoning_effort": "none",
+    "extra_body": {}
   }
 }
 ```

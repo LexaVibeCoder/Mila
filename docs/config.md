@@ -153,14 +153,18 @@ API-ключи в runtime config **не хранятся**: `llm.api_key` и `ni
     "top_p": null,
     "frequency_penalty": null,
     "presence_penalty": null,
-    "tool_choice": "auto"
+    "tool_choice": "auto",
+    "reasoning_effort": "none",
+    "extra_body": {}
   },
   "night_llm": {
     "model": "...",
     "api_base": "...",
     "temperature": 0.3,
     "max_tokens": 4096,
-    "tool_choice": "required"
+    "tool_choice": "required",
+    "reasoning_effort": "none",
+    "extra_body": {}
   },
   "tools": {
     "search_memory": true,
@@ -227,6 +231,13 @@ API-ключи в runtime config **не хранятся**: `llm.api_key` и `ni
   принудительно переопределяется (direct-tools схема). Значение хранится и
   отображается в Observatory, но не меняет поведение main-пайплайна.
 - **`night_llm.tool_choice`** реально используется ночными процессами.
+- **`llm.reasoning_effort` / `night_llm.reasoning_effort`** — «think effort»
+  (`none/minimal/low/medium/high/xhigh/max`), по умолчанию `none` (модель не
+  размышляет). Значение отправляется в каждом запросе. Транспорт выбирается по
+  `api_base`: OpenRouter получает `extra_body.reasoning.effort`, остальные —
+  плоский `reasoning_effort`. `extra_body` (JSON-объект) добавляет
+  провайдерские поля (например `chat_template_kwargs` для llama.cpp) и
+  объединяется с reasoning-настройкой. UI — `/model`.
 - **`pipeline.max_think_iterations`** читается на каждом запуске (по умолчанию 7);
   константа `MAX_THINK_ITERATIONS = 7` — fallback.
 - **`persona.parameters.*`** хранятся и редактируются, но в system prompt

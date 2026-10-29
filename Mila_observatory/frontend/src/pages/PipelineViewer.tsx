@@ -76,6 +76,17 @@ function chatLabel(displayName: string | undefined, chatId: string): string {
   return shortChat(chatId);
 }
 
+// Reasoning is normally a string; some gateways return structured details.
+function renderReasoning(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === null || value === undefined) return '';
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 // Multimodal messages arrive as OpenAI content blocks
 // ([{type:'text',text},{type:'image_url',...},{type:'input_audio',...}]).
 // No preview needed — short labels only. Never return an object
@@ -157,6 +168,9 @@ export default function PipelineViewer() {
     const messages = Array.isArray(d.llm_messages) ? d.llm_messages : [];
     const actions = Array.isArray(d.actions) ? d.actions : [];
     const rawResponses = Array.isArray(d.raw_llm_responses) ? d.raw_llm_responses : [];
+    const reasoningEntries = rawResponses
+      .map((r, i) => ({ iteration: r.iteration ?? i + 1, text: renderReasoning(r.reasoning) }))
+      .filter(r => r.text.trim());
     const detailName =
       logs.find(l => l.filename === selected.filename)?.display_name ||
       chats.find(c => c.chat_id === d.chat_id)?.display_name ||
@@ -199,6 +213,21 @@ export default function PipelineViewer() {
             </summary>
             <pre style={styles.pre}>{d.system_prompt || '—'}</pre>
           </details>
+
+          <div style={styles.sectionTitle}>Mila's reasoning · {reasoningEntries.length}</div>
+          {reasoningEntries.length === 0 && (
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Нет reasoning: reasoning_effort=none, старый лог или провайдер не вернул мысли.
+            </div>
+          )}
+          {reasoningEntries.map(r => (
+            <div key={r.iteration} style={styles.msgCard}>
+              <span style={{ ...styles.roleBadge, ...roleStyle('assistant') }}>
+                iteration {r.iteration}
+              </span>
+              <pre style={{ ...styles.pre, marginTop: '8px' }}>{r.text}</pre>
+            </div>
+          ))}
 
           <div style={styles.sectionTitle}>Thoughts</div>
           <pre style={styles.pre}>{d.thoughts || '—'}</pre>

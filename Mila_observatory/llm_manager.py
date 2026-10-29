@@ -57,6 +57,8 @@ class LLMManager:
             "frequency_penalty": None,
             "presence_penalty": None,
             "tool_choice": runtime_config.get("llm.tool_choice", "auto"),
+            "reasoning_effort": runtime_config.get("llm.reasoning_effort", "none"),
+            "extra_body": runtime_config.get("llm.extra_body", {}),
         }
 
     # ─── Main LLM ────────────────────────────────────────────
@@ -79,6 +81,8 @@ class LLMManager:
             "temperature": runtime_config.get("night_llm.temperature"),
             "max_tokens": runtime_config.get("night_llm.max_tokens"),
             "tool_choice": runtime_config.get("night_llm.tool_choice", "required"),
+            "reasoning_effort": runtime_config.get("night_llm.reasoning_effort", "none"),
+            "extra_body": runtime_config.get("night_llm.extra_body", {}),
         }
         return night
 
@@ -87,7 +91,7 @@ class LLMManager:
         night worker on next run via auto-reload — no restart needed)."""
         valid_fields = {"model", "api_base", "temperature",
                        "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
-                       "tool_choice"}
+                       "tool_choice", "reasoning_effort", "extra_body"}
         for key, value in params.items():
             if key in valid_fields:
                 runtime_config.set(f"night_llm.{key}", value)
@@ -96,7 +100,7 @@ class LLMManager:
         """Reconfigure main LLM client with new parameters."""
         valid_fields = {"model", "api_base", "temperature",
                        "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
-                       "tool_choice"}
+                       "tool_choice", "reasoning_effort", "extra_body"}
 
         # Store in runtime config (API keys stay in .env and are ignored here)
         for key, value in params.items():
@@ -166,7 +170,8 @@ class LLMManager:
         """Apply runtime config overrides to an LLM client."""
         overrides = {}
         for field in ["model", "api_base", "temperature",
-                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty"]:
+                       "max_tokens", "top_p", "frequency_penalty", "presence_penalty",
+                       "reasoning_effort", "extra_body"]:
             value = runtime_config.get(f"{config_prefix}.{field}")
             if value is not None:
                 overrides[field] = value

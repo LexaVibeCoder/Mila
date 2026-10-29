@@ -61,6 +61,8 @@ export interface ModelParams {
   frequency_penalty?: number;
   presence_penalty?: number;
   tool_choice?: 'required' | 'auto' | 'none';
+  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  extra_body?: Record<string, unknown>;
 }
 
 export interface ModelData {
@@ -202,6 +204,7 @@ export interface PipelineMessage {
 export interface PipelineRawResponse {
   iteration: number;
   thoughts: string;
+  reasoning?: string;
   tool_calls: { name: string; arguments: string }[];
   finish_reason?: string;
 }

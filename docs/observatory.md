@@ -86,12 +86,17 @@ docker compose up -d observatory
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/api/model` | main + night, без `api_key` |
-| PUT | `/api/model/main` | model/api_base/temperature/max_tokens/top_p/.../tool_choice |
+| PUT | `/api/model/main` | model/api_base/temperature/max_tokens/top_p/.../tool_choice/reasoning_effort/extra_body |
 | PUT | `/api/model/night` | те же поля; сохраняется в runtime |
 | POST | `/api/model/test` | Playground: всегда main-клиент, `max_retries=1` |
 
 `tool_choice` — runtime-only; пайплайн принудительно использует `auto` для
 main-пайплайна. Ночные процессы читают `night_llm.tool_choice`.
+
+`reasoning_effort` — «think effort» (`none/minimal/low/medium/high/xhigh/max`,
+по умолчанию `none`); `extra_body` — JSON-объект провайдерских полей. Оба
+применяются к main и night LLM; для OpenRouter effort автоматически уходит в
+`extra_body.reasoning.effort`.
 
 ### Память
 
@@ -200,10 +205,10 @@ React SPA на TypeScript + Vite. В dev-режиме проксирует API �
 | Путь | Компонент | Описание |
 |------|-----------|----------|
 | `/` | Dashboard | Статус, presence, модель, сообщения, события (refresh 5s) |
-| `/pipeline` | PipelineViewer | Логи, фильтр по чатам, модалка деталей, deep-link `?log=` |
+| `/pipeline` | PipelineViewer | Логи, фильтр по чатам, модалка деталей (включая блок Mila's reasoning), deep-link `?log=` |
 | `/users` | UsersList | Список пользователей, поиск, сортировка, sentiment |
 | `/users/:user_id` | UserDetail | Отношение, профиль, портрет, память, история, логи |
-| `/model` | ModelControl | main/night формы, `tool_choice`, playground |
+| `/model` | ModelControl | main/night формы, `tool_choice`, `reasoning_effort`, `extra_body`, playground |
 | `/sleep` | SleepControl | Старт/вейк, прогресс, estimate, конфиг, очередь |
 | `/memory` | MemoryEditor | CRUD, поиск, FAISS rebuild |
 | `/config` | ConfigPage | Runtime State JSON + reload |

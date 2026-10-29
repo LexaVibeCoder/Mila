@@ -51,18 +51,24 @@ def _create_night_llm() -> LLMClient:
         api_base = night_config.get("api_base")
         temperature = night_config.get("temperature", 0.3)
         max_tokens = night_config.get("max_tokens", 4096)
+        reasoning_effort = night_config.get("reasoning_effort", "none")
+        extra_body = night_config.get("extra_body")
     except ImportError:
         model = settings.MAIN_LLM_MODEL
         api_base = settings.LLM_API_BASE
         temperature = 0.3
         max_tokens = 4096
+        reasoning_effort = "none"
+        extra_body = None
 
     return LLMClient(
         model=model,
         api_base=api_base,
         api_key=get_night_llm_api_key(),
         temperature=temperature,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
     )
 
 
@@ -72,16 +78,22 @@ def _create_verifier_llm() -> LLMClient:
         night_config = runtime_config.get("night_llm", {})
         model = night_config.get("model")
         api_base = night_config.get("api_base")
+        reasoning_effort = night_config.get("reasoning_effort", "none")
+        extra_body = night_config.get("extra_body")
     except ImportError:
         model = settings.MAIN_LLM_MODEL
         api_base = settings.LLM_API_BASE
+        reasoning_effort = "none"
+        extra_body = None
 
     return LLMClient(
         model=model,
         api_base=api_base,
         api_key=get_night_llm_api_key(),
         temperature=0.1,
-        max_tokens=2048
+        max_tokens=2048,
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
     )
 
 

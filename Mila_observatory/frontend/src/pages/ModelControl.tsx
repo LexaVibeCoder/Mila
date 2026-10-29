@@ -39,6 +39,8 @@ export default function ModelControl() {
         temperature: String(m.temperature ?? ''),
         max_tokens: String(m.max_tokens ?? ''),
         tool_choice: String(m.tool_choice || 'required'),
+        reasoning_effort: String(m.reasoning_effort ?? 'none'),
+        extra_body: JSON.stringify(m.extra_body ?? {}, null, 2),
       });
       setNightForm({
         model: String(n.model || ''),
@@ -46,11 +48,30 @@ export default function ModelControl() {
         temperature: String(n.temperature ?? ''),
         max_tokens: String(n.max_tokens ?? ''),
         tool_choice: String(n.tool_choice || 'required'),
+        reasoning_effort: String(n.reasoning_effort ?? 'none'),
+        extra_body: JSON.stringify(n.extra_body ?? {}, null, 2),
       });
     });
   }, []);
 
+  const parseExtraBody = (raw: string): Record<string, unknown> | null => {
+    if (!raw.trim()) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setMsg('Extra Body must be a JSON object');
+        return null;
+      }
+      return parsed as Record<string, unknown>;
+    } catch (e: unknown) {
+      setMsg(`Invalid Extra Body JSON: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  };
+
   const saveMain = async () => {
+    const extraBody = parseExtraBody(mainForm.extra_body || '');
+    if (extraBody === null) return;
     try {
       const params: Record<string, unknown> = {};
       if (mainForm.model) params.model = mainForm.model;
@@ -58,12 +79,16 @@ export default function ModelControl() {
       if (mainForm.temperature) params.temperature = parseFloat(mainForm.temperature);
       if (mainForm.max_tokens) params.max_tokens = parseInt(mainForm.max_tokens);
       if (mainForm.tool_choice) params.tool_choice = mainForm.tool_choice;
+      if (mainForm.reasoning_effort) params.reasoning_effort = mainForm.reasoning_effort;
+      params.extra_body = extraBody;
       await updateMainModel(params);
       setMsg('Main LLM updated');
     } catch (e: unknown) { setMsg(`Error: ${e instanceof Error ? e.message : e}`); }
   };
 
   const saveNight = async () => {
+    const extraBody = parseExtraBody(nightForm.extra_body || '');
+    if (extraBody === null) return;
     try {
       const params: Record<string, unknown> = {};
       if (nightForm.model) params.model = nightForm.model;
@@ -71,6 +96,8 @@ export default function ModelControl() {
       if (nightForm.temperature) params.temperature = parseFloat(nightForm.temperature);
       if (nightForm.max_tokens) params.max_tokens = parseInt(nightForm.max_tokens);
       if (nightForm.tool_choice) params.tool_choice = nightForm.tool_choice;
+      if (nightForm.reasoning_effort) params.reasoning_effort = nightForm.reasoning_effort;
+      params.extra_body = extraBody;
       await updateNightModel(params);
       setMsg('Night LLM updated');
     } catch (e: unknown) { setMsg(`Error: ${e instanceof Error ? e.message : e}`); }
@@ -126,6 +153,50 @@ export default function ModelControl() {
     );
   };
 
+  const renderReasoning = (
+    effort: string,
+    extraBody: string,
+    onEffortChange: (v: string) => void,
+    onExtraBodyChange: (v: string) => void,
+  ) => (
+    <>
+      <div style={styles.field}>
+        <label style={styles.label}>Think effort (reasoning_effort)</label>
+        <select
+          style={styles.input}
+          value={effort || 'none'}
+          onChange={e => onEffortChange(e.target.value)}
+        >
+          <option value="none">none — не размышлять</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+        <div style={styles.toggleHint}>
+          OpenRouter: effort уйдёт в extra_body.reasoning.effort. Остальные
+          (OpenAI/LM Studio/Ollama) — в reasoning_effort. Учтите, что
+          reasoning-токены входят в max_tokens.
+        </div>
+      </div>
+      <div style={styles.field}>
+        <label style={styles.label}>Extra Body (JSON, опционально)</label>
+        <textarea
+          style={styles.textarea}
+          value={extraBody}
+          onChange={e => onExtraBodyChange(e.target.value)}
+          placeholder='{"chat_template_kwargs": {"enable_thinking": true}}'
+        />
+        <div style={styles.toggleHint}>
+          Нестандартные поля провайдера (например chat_template_kwargs для
+          llama.cpp). Объединяются с reasoning-настройкой.
+        </div>
+      </div>
+    </>
+  );
+
   return (
     <div style={styles.page}>
       <h1 style={styles.title}>Model Control</h1>
@@ -152,6 +223,12 @@ export default function ModelControl() {
           </div>
         </div>
         {renderToolChoiceToggle(mainForm.tool_choice || 'required', v => setMainForm({...mainForm, tool_choice: v}))}
+        {renderReasoning(
+          mainForm.reasoning_effort || 'none',
+          mainForm.extra_body || '{}',
+          v => setMainForm({...mainForm, reasoning_effort: v}),
+          v => setMainForm({...mainForm, extra_body: v}),
+        )}
         <button style={styles.btn} onClick={saveMain}>Apply Changes</button>
       </div>
 
@@ -176,6 +253,12 @@ export default function ModelControl() {
           </div>
         </div>
         {renderToolChoiceToggle(nightForm.tool_choice || 'required', v => setNightForm({...nightForm, tool_choice: v}))}
+        {renderReasoning(
+          nightForm.reasoning_effort || 'none',
+          nightForm.extra_body || '{}',
+          v => setNightForm({...nightForm, reasoning_effort: v}),
+          v => setNightForm({...nightForm, extra_body: v}),
+        )}
         <button style={styles.btn} onClick={saveNight}>Apply Changes</button>
       </div>
 

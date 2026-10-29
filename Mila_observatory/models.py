@@ -50,6 +50,10 @@ class ModelParams(BaseModel):
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
     tool_choice: Optional[str] = Field(default=None, pattern="^(required|auto|none)$")
+    reasoning_effort: Optional[str] = Field(
+        default=None, pattern="^(none|minimal|low|medium|high|xhigh|max)$"
+    )
+    extra_body: Optional[Dict[str, Any]] = None
 
 
 class ModelResponse(BaseModel):

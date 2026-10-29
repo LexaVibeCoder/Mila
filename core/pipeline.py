@@ -540,6 +540,7 @@ class ThinkPipeline:
                 "kind": "llm",
                 "iteration": iteration,
                 "content": content,
+                "reasoning": response.get("reasoning", ""),
                 "tool_calls": [
                     {"name": tc.function.name, "arguments": tc.function.arguments}
                     for tc in (tool_calls or [])
@@ -737,6 +738,7 @@ class ThinkPipeline:
                     raw_llm_responses.append({
                         "iteration": step.get("iteration"),
                         "thoughts": step.get("content", ""),
+                        "reasoning": step.get("reasoning", ""),
                         "tool_calls": step.get("tool_calls", []),
                         "finish_reason": step.get("finish_reason"),
                     })
@@ -892,6 +894,7 @@ class ThinkPipeline:
                     raw_llm_responses.append({
                         "iteration": step.get("iteration"),
                         "thoughts": step.get("content", ""),
+                        "reasoning": step.get("reasoning", ""),
                         "tool_calls": step.get("tool_calls", []),
                         "finish_reason": step.get("finish_reason"),
                     })

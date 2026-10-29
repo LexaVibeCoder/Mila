@@ -45,6 +45,18 @@ docker compose up -d --build  # поднимет сервисы bot и observato
 
 ### Вариант 2. Локально
 
+Самый простой путь — один установщик. Он идемпотентен: создаёт `.venv` и ставит
+зависимости, создаёт `.env` (и ждёт, пока вы заполните обязательные поля),
+проводит вход в Telegram и спрашивает, скачивать ли reranker. На первом входе
+также можно выбрать, шифровать ли базу TDLib (по умолчанию — шифровать; флаги
+`--encrypt` / `--no-encrypt`). Всё уже готовое пропускает; бота не запускает.
+
+```bash
+./start/install.sh            # Windows: start\install.bat
+```
+
+Ручной вариант тех же шагов:
+
 ```bash
 # 1. Окружение
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -68,7 +80,7 @@ cp .env.example .env          # заполните API_ID/API_HASH, LLM_*, EMBED
 .venv/bin/python -m Mila_observatory.server
 ```
 
-**Windows:** сессия — `start/create_session.bat`, панель с открытием браузера — `Mila_Observatory.bat`.
+**Windows:** установщик — `start\install.bat`, сессия — `start/create_session.bat`, панель с открытием браузера — `Mila_Observatory.bat`.
 
 ---
 

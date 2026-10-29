@@ -28,7 +28,8 @@ def install_reranker():
         snapshot_download(
             repo_id="BAAI/bge-reranker-v2-m3",
             local_dir=str(reranker_path),
-            repo_type="model"
+            repo_type="model",
+            token=False,
         )
         print(f"✓ Reranker installed successfully at {reranker_path}")
         return True

@@ -42,6 +42,7 @@ cd Mila_observatory/frontend && npm run build           # tsc -b + vite build �
 docker compose up -d --build                  # локальная разработка, не прод
 
 # разово
+./start/install.sh                            # полная установка: .venv, deps, .env, сессия (+выбор шифрования), reranker
 ./start/create_session.sh --qr                # TDLib-логин (или python create_session.py)
 python install_reranker.py                    # скачать BGE-reranker в models/
 cd state_agent && python train_state_agent.py # обучение MLP (свой requirements.txt)

@@ -5,9 +5,12 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
 .start-venv/
 start/.venv-session/
 .env
+.env*
+!.env.example
 
 # Databases
 data/

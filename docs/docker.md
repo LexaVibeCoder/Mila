@@ -161,7 +161,10 @@ docker attach mila-bot   # detach: Ctrl-P Ctrl-Q
 ## Запуск без Docker
 
 ```bash
-# 1. TDLib-сессия (один раз)
+# 0. Установка с нуля (идемпотентно: venv, зависимости, .env, сессия, reranker)
+./start/install.sh                          # Windows: start\install.bat
+
+# 1. TDLib-сессия (один раз; install.sh уже делает это)
 .venv/bin/python create_session.py          # или ./start/create_session.sh --qr
 
 # 2. Бот

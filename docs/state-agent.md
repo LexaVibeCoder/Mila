@@ -17,11 +17,9 @@
 state_agent/               # обучение + CLI
 ├── train_state_agent.py   # MLP + обучение
 ├── infer.py               # CLI инференс
-├── dataset.json           # тренировочные сэмплы (локальный, gitignored)
-├── state_agent.pt         # веса {state_dict, mean, std, config} (gitignored)
-├── requirements.txt
-├── Dockerfile
-└── docker-compose.yml     # сервисы train / infer
+├── dataset.json           # тренировочные сэмплы
+├── state_agent.pt         # веса {state_dict, mean, std, config}
+└── requirements.txt
 
 core/needs/
 └── tracker.py             # NeedsTracker + rule-based fallback
@@ -157,8 +155,10 @@ info = tracker.get_model_info()
 }
 ```
 
-`dataset.json` и `state_agent.pt` **не коммитятся** (gitignored): это локальные
-артефакты обучения.
+`dataset.json` и `state_agent.pt` хранятся в репозитории намеренно: модель
+доступна сразу после клонирования, а обучение воспроизводимо. После локального
+переобучения `state_agent.pt` изменится в рабочем дереве — коммить новый стейт
+только вместе с соответствующим изменением кода/данных.
 
 ## API (монтируется на Observatory)
 
@@ -172,15 +172,17 @@ info = tracker.get_model_info()
 
 ## Обучение
 
+Обучение и инференс запускаются только в локальном venv (Docker для
+`state_agent` не используется):
+
 ```bash
 cd state_agent
-pip install -r requirements.txt
-python train_state_agent.py
-# или Docker:
-docker-compose up train
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python train_state_agent.py
 
 # CLI-инференс
-python infer.py --seconds 3600 --hour 14 --fatigue 0.3 \
+.venv/bin/python infer.py --seconds 3600 --hour 14 --fatigue 0.3 \
   --social 0.7 --boredom 0.6 --dialog 1
 ```
 
@@ -195,15 +197,3 @@ python infer.py --seconds 3600 --hour 14 --fatigue 0.3 \
 
 Модель загружается по пути
 `<корень>/state_agent/state_agent.pt` (`MODEL_PATH` в `tracker.py`).
-
-## Docker (отдельный)
-
-```yaml
-services:
-  train:
-    build: .
-    command: python train_state_agent.py
-  infer:
-    build: .
-    entrypoint: python infer.py
-```

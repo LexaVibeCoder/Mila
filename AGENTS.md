@@ -87,7 +87,9 @@ runtime-конфиге. Агенту **нельзя читать `runtime_config
   Смена `TD_DATABASE_ENCRYPTION_KEY` делает сессию нечитаемой.
 - `data/` в остальном читать/писать можно (тесты — только во временных каталогах).
   `models/` читать можно. **Ничего из `data/`, `models/`, `logs/`, `.env`,
-  `runtime_config.json`, `dist/`, `node_modules/`, `state_agent/*.pt` не коммитить.**
+  `runtime_config.json`, `dist/`, `node_modules/` не коммитить.** Исключение —
+  `state_agent/state_agent.pt` и `state_agent/dataset.json`: они намеренно
+  лежат в репозитории, чтобы модель была доступна сразу после клонирования.
 - Не логировать ключи/токены и содержимое `.env`, даже фрагментами.
 
 ## Тесты

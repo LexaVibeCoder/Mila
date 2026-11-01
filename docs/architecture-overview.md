@@ -62,8 +62,8 @@
 | `core/needs/tracker.py` | `NeedsTracker` — трекер потребностей (ML + rule-based), офсеты действий, кэш 2с |
 | `state_agent/train_state_agent.py` | Обучение MLP 6→128→64→4 |
 | `state_agent/infer.py` | CLI-инференс |
-| `state_agent/dataset.json` | Тренировочные сэмплы (локальный файл, gitignored) |
-| `state_agent/state_agent.pt` | Обученные веса `{state_dict, mean, std, config}` (gitignored) |
+| `state_agent/dataset.json` | Тренировочные сэмплы |
+| `state_agent/state_agent.pt` | Обученные веса `{state_dict, mean, std, config}` |
 | `Mila_observatory/api/needs.py` | FastAPI-роутер для веб-панели |
 
 ### 4. Скрипты и запуск (корень)

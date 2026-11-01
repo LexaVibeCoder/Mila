@@ -36,6 +36,7 @@ Mila_observatory/frontend/node_modules/
 Mila_observatory/frontend/dist/
 **/node_modules/
 **/dist/
+*.tsbuildinfo
 
 # One-shot / local artifacts
 state_agent/venv/

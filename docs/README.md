@@ -38,10 +38,19 @@
 
 ```bash
 cp .env.example .env          # заполните API_ID, API_HASH, LLM_*, EMBED_*
-docker compose up -d --build  # поднимет сервисы bot и observatory
+./start/docker.sh             # проверки + запуск/переиспользование контейнеров
 ```
 
-Перед первым запуском нужно один раз авторизоваться в Telegram (см. шаг 3 ниже).
+Скрипт сам проверит TDLib-сессию и reranker, предложит войти в Telegram и
+скачать модель, если их нет. Существующие контейнеры не пересоздаются.
+Вручную:
+
+```bash
+docker compose up -d --build
+./start/docker.sh --login     # или --login --qr
+```
+
+Панель — `http://127.0.0.1:8080` (порт/интерфейс из `.env`).
 
 ### Вариант 2. Локально
 
@@ -110,7 +119,7 @@ Observatory ◄──► runtime_config.json ◄──► бот
 |--------|-------|
 | [Архитектура](architecture-overview.md) | Компоненты, потоки данных, ключевые паттерны |
 | [Конфигурация](config.md) | Два слоя: `.env` (`config.py`) и `runtime_config.json` |
-| [Docker](docker.md) | Compose, healthcheck, volumes, пересборка фронтенда |
+| [Docker](docker.md) | Compose, `start/docker.sh`, healthcheck, volumes, пересборка фронтенда |
 | [Сообщения](messaging.md) | Уведомления, presence, typing, медиа, TDLib-адаптер и auth |
 | [Основной пайплайн](pipeline.md) | `ThinkPipeline`: direct-tools, JSON-ответы, поток событий |
 | [Тулзы](tools.md) | Состав тулзов по состояниям, executor, `peek_recent_chats` |
@@ -154,7 +163,7 @@ docs/                    документация
 # Фронтенд
 cd Mila_observatory/frontend
 npm ci
-npm run dev                                       # Vite на :5173, proxy /api → OBSERVATORY_HOST:OBSERVATORY_PORT
+npm run dev                                       # Vite на :5173, proxy /api → OBSERVATORY_PUBLISH_HOST:OBSERVATORY_PORT (или OBSERVATORY_HOST)
 npm run build                                     # tsc -b + vite build → dist/
 
 # State Agent

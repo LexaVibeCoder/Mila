@@ -95,8 +95,10 @@ class Settings(BaseSettings):
     # which works both inside Docker (when TZ is set) and on the host.
     LOCAL_TIMEZONE: str = ""
 
-    # Observatory web panel. Bind address/port come from .env only
-    # (not from runtime_config.json). Defaults: 127.0.0.1:8080.
+    # Observatory web panel. `OBSERVATORY_HOST` is the bind address used by a
+    # direct (non-Docker) run; docker-compose overrides it with
+    # OBSERVATORY_BIND_HOST (default 0.0.0.0) and publishes the port on
+    # OBSERVATORY_PUBLISH_HOST:OBSERVATORY_PORT (default 127.0.0.1:8080).
     # If OBSERVATORY_PASSWORD is empty, auth is off: keep the panel localhost-only.
     OBSERVATORY_USERNAME: str = "admin"
     OBSERVATORY_PASSWORD: str = ""

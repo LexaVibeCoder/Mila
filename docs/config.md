@@ -91,8 +91,13 @@ runtime_config.json (значение не null)  →  побеждает  →  
 |------|--------------|----------|
 | `OBSERVATORY_USERNAME` | `admin` | Basic Auth |
 | `OBSERVATORY_PASSWORD` | `""` | Пусто = auth выключен |
-| `OBSERVATORY_HOST` | `127.0.0.1` | Адрес прослушивания; читается только из `.env` |
+| `OBSERVATORY_HOST` | `127.0.0.1` | Адрес прослушивания при прямом запуске; читается только из `.env` |
 | `OBSERVATORY_PORT` | `8080` | Порт; читается только из `.env` (не из runtime config) |
+
+В Docker `OBSERVATORY_HOST` перекрывается compose-переменной
+`OBSERVATORY_BIND_HOST` (по умолчанию `0.0.0.0`), а публикация на хосте
+задаётся `OBSERVATORY_PUBLISH_HOST` (по умолчанию `127.0.0.1`). Подробнее —
+[docker.md](docker.md).
 
 ### Сообщения / typing
 
@@ -315,8 +320,12 @@ EMBED_MODEL=nomic-embed-text
 # Observatory (порт/хост — только из .env; по умолчанию 127.0.0.1:8080)
 OBSERVATORY_USERNAME=admin
 OBSERVATORY_PASSWORD=
-# OBSERVATORY_HOST=127.0.0.1
+# Docker:
 # OBSERVATORY_PORT=8080
+# OBSERVATORY_PUBLISH_HOST=127.0.0.1
+# OBSERVATORY_BIND_HOST=0.0.0.0
+# Прямой запуск без Docker:
+# OBSERVATORY_HOST=127.0.0.1
 
 # Presence
 DIALOG_IDLE_TIMEOUT_SECONDS=300
@@ -340,4 +349,4 @@ DIALOG_IDLE_CHECK_INTERVAL_SECONDS=30
 | `core/sleep/manager.py` | `sleep.*` |
 | `core/sleep/processes.py` | `night_llm.*` |
 | `core/presence.py` | только `config.py` (`DIALOG_IDLE_*`) |
-| `Mila_observatory/server.py` | ничего из runtime: хост/порт только из `.env` (`OBSERVATORY_HOST`/`OBSERVATORY_PORT`) |
+| `Mila_observatory/server.py` | ничего из runtime: хост/порт только из `.env` (`OBSERVATORY_HOST`/`OBSERVATORY_PORT`); в Docker `OBSERVATORY_HOST` задаёт compose из `OBSERVATORY_BIND_HOST` |

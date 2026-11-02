@@ -142,7 +142,11 @@ else
 fi
 
 URL="$(panel_url)" || URL=""
-[ -n "$URL" ] || URL="http://127.0.0.1:8080"
+if [ -z "$URL" ]; then
+    echo "ERROR: cannot resolve Observatory URL from .env." >&2
+    echo "       Check OBSERVATORY_HOST/OBSERVATORY_PORT or run start/check_config.py." >&2
+    exit 1
+fi
 
 if ! wait_for_panel "$URL"; then
     if [ -f "$PID_FILE" ] && ! is_running; then

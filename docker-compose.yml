@@ -20,7 +20,9 @@ services:
       - .:/app
       - mila_data:/app/data
       - mila_logs:/app/logs
-      - ./models:/app/models:ro
+      # Read-write so `docker compose run --rm bot python install_reranker.py`
+      # can download the model into the host's ./models directory.
+      - ./models:/app/models
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     command: python main.py
@@ -49,24 +51,29 @@ services:
       - .env
     environment:
       # The container must bind 0.0.0.0: its own 127.0.0.1 is an isolated
-      # loopback, unreachable through a ports mapping. Host exposure is
-      # controlled by the `ports` line below.
-      OBSERVATORY_HOST: 0.0.0.0
-    # Localhost-only by default (OBSERVATORY_HOST defaults to 127.0.0.1).
-    # To expose on LAN, set OBSERVATORY_HOST=0.0.0.0 in .env AND set
-    # OBSERVATORY_PASSWORD (HTTP Basic Auth).
+      # loopback, unreachable through a ports mapping. This is independent
+      # from the host interface used by `ports` below.
+      OBSERVATORY_HOST: ${OBSERVATORY_BIND_HOST:-0.0.0.0}
+    # Host interface and port are taken from .env:
+    #   OBSERVATORY_PUBLISH_HOST=127.0.0.1  (local only, default)
+    #   OBSERVATORY_PUBLISH_HOST=0.0.0.0    (LAN; set OBSERVATORY_PASSWORD)
+    #   OBSERVATORY_PORT=8080               (same inside and outside)
+    # OBSERVATORY_HOST is a backward-compatible fallback for existing .env
+    # files that used it for LAN exposure before the split.
     ports:
-      - "${OBSERVATORY_HOST:-127.0.0.1}:${OBSERVATORY_PORT:-8080}:${OBSERVATORY_PORT:-8080}"
+      - "${OBSERVATORY_PUBLISH_HOST:-${OBSERVATORY_HOST:-127.0.0.1}}:${OBSERVATORY_PORT:-8080}:${OBSERVATORY_PORT:-8080}"
     volumes:
       - .:/app:z
       - mila_data:/app/data
       - mila_logs:/app/logs
-      - ./models:/app/models:ro
+      - ./models:/app/models
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     command: python -m Mila_observatory.server
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:${OBSERVATORY_PORT:-8080}/api/health || exit 1"]
+      # `$$` keeps Compose from interpolating this on the host: the container
+      # shell expands its own OBSERVATORY_PORT (from .env) at runtime.
+      test: ["CMD-SHELL", "curl -f http://localhost:$${OBSERVATORY_PORT:-8080}/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

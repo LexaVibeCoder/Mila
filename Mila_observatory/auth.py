@@ -62,8 +62,9 @@ def resolve_host() -> str:
 
     In Docker the container must bind "0.0.0.0" (its own 127.0.0.1 is an
     isolated loopback, unreachable through a ports mapping). docker-compose
-    therefore sets OBSERVATORY_HOST=0.0.0.0 for the observatory service and
-    restricts the published address via its `ports` line instead.
+    maps OBSERVATORY_BIND_HOST (default 0.0.0.0) to OBSERVATORY_HOST for the
+    observatory service and restricts the published address via its `ports`
+    line instead.
     """
     from config import settings
 

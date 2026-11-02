@@ -39,6 +39,9 @@ cd Mila_observatory/frontend && npm run build           # tsc -b + vite build �
 # проверки
 .venv/bin/python -m pytest                    # unit-тесты, integration исключены
 .venv/bin/python -m compileall -q core Mila_observatory main.py config.py
+./start/docker.sh                             # Docker: проверки + запуск/переиспользование контейнеров
+./start/docker.sh --login --qr                # первый вход в Telegram внутри контейнера
+./start/docker.sh --rebuild                   # пересобрать образ и пересоздать контейнеры
 docker compose up -d --build                  # локальная разработка, не прод
 
 # разово

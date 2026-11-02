@@ -7,9 +7,11 @@ export default defineConfig(({ mode }) => {
   // The dev proxy must target the same host/port the server binds.
   const env = loadEnv(mode, path.resolve(process.cwd(), '..'), '')
   const port = env.OBSERVATORY_PORT || '8080'
-  // A server bound to 0.0.0.0 is reachable on loopback from the dev machine.
-  const bindHost = env.OBSERVATORY_HOST || '127.0.0.1'
-  const host = bindHost === '0.0.0.0' ? '127.0.0.1' : bindHost
+  // In Docker the port is published on OBSERVATORY_PUBLISH_HOST; outside
+  // Docker the server binds OBSERVATORY_HOST. A wildcard bind is reachable
+  // on loopback from the dev machine.
+  const publishHost = env.OBSERVATORY_PUBLISH_HOST || env.OBSERVATORY_HOST || '127.0.0.1'
+  const host = publishHost === '0.0.0.0' || publishHost === '::' ? '127.0.0.1' : publishHost
 
   return {
     plugins: [react()],

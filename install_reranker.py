@@ -9,9 +9,11 @@ from pathlib import Path
 
 def install_reranker():
     """Download BGE-Reranker-v2-m3 from HuggingFace."""
-    reranker_path = Path("models/rerankers/BGE-Reranker-v2-m3")
-    
-    if reranker_path.exists():
+    # Docker/compose passes the same RERANKER_MODEL_PATH that config.py uses.
+    configured = os.environ.get("RERANKER_MODEL_PATH", "").strip()
+    reranker_path = Path(configured or "models/rerankers/BGE-Reranker-v2-m3")
+
+    if reranker_path.is_dir() and any(reranker_path.iterdir()):
         print(f"✓ Reranker already exists at {reranker_path}")
         return True
     

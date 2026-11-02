@@ -17,6 +17,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Unbuffered output makes `docker compose logs` show lines immediately.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 # Install system dependencies for torch, sentence-transformers, faiss
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
@@ -41,8 +45,9 @@ COPY --from=frontend-builder /app/dist Mila_observatory/frontend/dist
 # NOTE: DAILY_REPORTS path contains a space by design (config.py DAILY_REPORTS).
 RUN mkdir -p "data/photos" "data/daily reports" "data/media" "data/tdlib" logs models
 
-# Expose observatory port
-EXPOSE 8080
+# The Observatory port is published by docker-compose from OBSERVATORY_PORT.
+# EXPOSE is intentionally omitted: it is informational only and would
+# hardcode a single port into the image.
 
-# Default command: run both bot and observatory via a supervisor script
+# Default command: run the Telegram bot. Observatory is a separate service.
 CMD ["python", "main.py"]

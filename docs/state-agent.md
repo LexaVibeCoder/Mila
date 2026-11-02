@@ -2,7 +2,7 @@
 
 **Основные файлы:** `core/needs/tracker.py`, `core/proactive.py`,
 `Mila_observatory/api/needs.py`, `state_agent/train_state_agent.py`,
-`state_agent/infer.py`
+`state_agent/test_interactive.py`, `state_agent/infer.py`
 
 Экспериментальный модуль отслеживания «потребностей» Милы на основе PyTorch MLP
 с rule-based fallback. Влияет на поведение через needs-блок в system prompt,
@@ -16,6 +16,9 @@
 ```
 state_agent/               # обучение + CLI
 ├── train_state_agent.py   # MLP + обучение
+├── test_interactive.py    # интерактивный тест: 6 значений → action + вероятности
+├── train_and_test.sh      # обучить (если нужно) + протестировать
+├── train_and_test.bat     # то же для Windows
 ├── infer.py               # CLI инференс
 ├── dataset.json           # тренировочные сэмплы
 ├── state_agent.pt         # веса {state_dict, mean, std, config}
@@ -172,8 +175,7 @@ info = tracker.get_model_info()
 
 ## Обучение
 
-Обучение и инференс запускаются только в локальном venv (Docker для
-`state_agent` не используется):
+### Самостоятельно
 
 ```bash
 cd state_agent
@@ -186,6 +188,29 @@ python -m venv .venv
   --social 0.7 --boredom 0.6 --dialog 1
 ```
 
+### Автоматическое обучение/тестирование
+
+```bash
+./state_agent/train_and_test.sh              # обучение только если state_agent.pt отсутствует
+./state_agent/train_and_test.sh --retrain    # принудительное переобучение
+./state_agent/train_and_test.sh --no-test    # только обучение/проверка, без теста
+
+state_agent\train_and_test.bat               # то же в Windows (те же флаги)
+```
+
+Скрипт использует `state_agent/.venv`: создаёт его при отсутствии (Python 3.11
+или uv) и ставит `state_agent/requirements.txt` только если нужные импорты не
+проходят. Существующий рабочий venv не пересоздаётся. Модель проверяется не
+только на наличие файла, но и на загрузку с текущей архитектурой: если
+`state_agent.pt` отсутствует или повреждён/несовместим, запускается обучение;
+если загружается — обучение пропускается и скрипт сразу предлагает тест
+(`--retrain` — форсировать).
+
+После обучения `test_interactive.py` спрашивает шесть признаков; Enter
+оставляет значение по умолчанию, `q` — выход. После каждого набора выводится
+действие, вероятности всех четырёх классов и время инференса; запрос
+повторяется, пока не введён `q`.
+
 Гиперпараметры (`Config`):
 
 - `epochs=200`, `batch_size=32`, `lr=1e-3`;
@@ -196,4 +221,4 @@ python -m venv .venv
 - в конце — accuracy / classification report / confusion matrix на тесте.
 
 Модель загружается по пути
-`<корень>/state_agent/state_agent.pt` (`MODEL_PATH` в `tracker.py`).
+`Mila/state_agent/state_agent.pt` (`MODEL_PATH` в `tracker.py`).

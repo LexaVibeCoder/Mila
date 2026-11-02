@@ -40,6 +40,9 @@ Mila_observatory/frontend/dist/
 *.tsbuildinfo
 Mila_observatory/frontend/.vite/
 
+# Local notes
+TODO.md
+
 # One-shot / local artifacts
 state_agent/venv/
 state_agent/__pycache__/

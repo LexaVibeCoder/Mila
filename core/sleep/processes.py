@@ -31,6 +31,9 @@ from core.sleep.tools import (
 MAX_GENERATION_ITERATIONS = 3
 MAX_VERIFICATION_RETRIES = 3
 SUMMARIZE_MIN_MESSAGES = 10
+# Summarize quality drops on long inputs (facts get dropped); ~24k chars is
+# roughly the 4-6k-token window recommended by ScaleDown.
+MAX_SUMMARIZER_CHARS = 24000
 
 
 def _get_night_tool_choice() -> str:
@@ -97,12 +100,107 @@ def _create_verifier_llm() -> LLMClient:
     )
 
 
+def _create_summarizer_llm() -> Optional[LLMClient]:
+    """Dedicated text summarizer for sleep dialog compression.
+
+    `scaledown/summarize` (and similar constrained summarizers) reject tool
+    calls, so this client only produces the summary text; the night LLM keeps
+    the approve/reject verification. An empty `summarization.model` disables
+    the path and falls back to the legacy tool-calling worker.
+    """
+    try:
+        from Mila_observatory.runtime import runtime_config
+        model = runtime_config.get("summarization.model")
+        api_base = runtime_config.get("summarization.api_base")
+        max_tokens = runtime_config.get("summarization.max_tokens")
+    except ImportError:
+        model = api_base = max_tokens = None
+
+    if model is None:
+        model = settings.SUMMARIZER_LLM_MODEL
+    model = (model or "").strip()
+    if not model:
+        return None
+
+    api_base = (api_base or settings.SUMMARIZER_LLM_API_BASE or
+                settings.LLM_API_BASE)
+    # scaledown/summarize is served through OpenRouter; on LM Studio/Ollama
+    # the 404 would only add retry latency before the legacy fallback.
+    if model == "scaledown/summarize" and "openrouter.ai" not in api_base.lower():
+        print(f"[Sleep] {model} needs OpenRouter, got {api_base} — using night LLM")
+        return None
+
+    max_tokens = max_tokens or settings.SUMMARIZER_LLM_MAX_TOKENS
+
+    return LLMClient(
+        model=model,
+        api_base=api_base,
+        api_key=settings.LLM_API_KEY,
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+
+
+def _dialog_summary_instructions(text: str) -> str:
+    """Summary instructions in the dialog's own language.
+
+    Summarize follows the language of the instructions, not of the input
+    ("same language as the input" is ignored), so detect the script first.
+    Russian chats dominate Mila, but group chats may be English.
+    """
+    letters = [ch for ch in text if ch.isalpha()]
+    cyrillic = sum(1 for ch in letters if "\u0400" <= ch <= "\u04FF")
+    is_russian = not letters or cyrillic / len(letters) >= 0.2
+
+    if is_russian:
+        return (
+            "Сожми диалог в краткое резюме на русском языке (2–4 предложения). "
+            "Сохрани ключевые темы, решения и договорённости, эмоциональный тон. "
+            "Используй только факты из диалога, без домыслов и вступлений."
+        )
+    return (
+        "Summarize the dialog in English in 2–4 sentences. "
+        "Keep the key topics, decisions and agreements, and the emotional tone. "
+        "Use only facts from the dialog; no speculation or preamble."
+    )
+
+
+def _clean_summary(text: str) -> str:
+    """Trim a summary silently cut by max_tokens.
+
+    Summarize reports finish_reason="stop" even when the output is truncated
+    mid-sentence, so rely on the trailing punctuation instead.
+    """
+    text = (text or "").strip()
+    if not text or text[-1] in ".!?…»\"'":
+        return text
+
+    cut = max(text.rfind(ch) for ch in ".!?…")
+    if cut >= 40:
+        return text[:cut + 1].strip()
+    return text
+
+
+async def _summarize_dialog(llm: LLMClient, messages_text: str) -> str:
+    """Generate one dialog summary; returns "" if the model produced nothing."""
+    response = await llm.generate(
+        messages=[{"role": "user",
+                   "content": messages_text[:MAX_SUMMARIZER_CHARS]}],
+        system_prompt=_dialog_summary_instructions(messages_text),
+        max_tokens=llm.default_max_tokens,
+        temperature=0.0,
+        max_retries=1,
+    )
+    return _clean_summary(response.get("thoughts", ""))
+
+
 class StagingExecutor:
     def __init__(self, session_id: str, process_type: str):
         self.session_id = session_id
         self.process_type = process_type
         self.staged_ids: List[int] = []
         self.skipped = False
+        self.last_dialog_summary: Optional[str] = None
 
     async def execute_tool_call(self, tool_call) -> Dict[str, Any]:
         import json
@@ -252,10 +350,20 @@ class StagingExecutor:
             "content": f"✅ Deactivated memory chunk {chunk_id[:8]}... Reason: {args.get('reason', '')}"
         }
 
+    async def stage_dialog_summary(self, chat_id: str, summary_text: str,
+                                   message_count: int) -> Dict:
+        """Stage a summary produced outside the tool-calling loop."""
+        return await self._stage_dialog_summary({
+            "chat_id": chat_id,
+            "summary_text": summary_text,
+            "message_count": message_count,
+        })
+
     async def _stage_dialog_summary(self, args: Dict) -> Dict:
         chat_id = args["chat_id"]
         summary_text = args["summary_text"]
         message_count = args.get("message_count", 0)
+        self.last_dialog_summary = summary_text
 
         push_summary(chat_id, summary_text)
 
@@ -573,6 +681,7 @@ async def process_dialog_summarization(session_id: str) -> Tuple[bool, str]:
 
     llm = _create_night_llm()
     verifier = _create_verifier_llm()
+    summarizer = _create_summarizer_llm()
 
     results = []
 
@@ -605,7 +714,24 @@ async def process_dialog_summarization(session_id: str) -> Tuple[bool, str]:
 
         executor = StagingExecutor(session_id, "dialog_summarization")
 
-        system_prompt = f"""You are Mila's night reflection system (Process 2: Dialog Summarization).
+        # Preferred path: text-only summarizer (scaledown/summarize). It cannot
+        # call tools, so the summary is staged directly and the night LLM only
+        # verifies it below. Any failure falls back to the legacy tool loop.
+        if summarizer is not None:
+            try:
+                summary_text = await _summarize_dialog(summarizer, messages_text)
+            except Exception as e:
+                print(f"  [Summarizer] Error: {e} — falling back to night LLM")
+                summary_text = ""
+
+            if summary_text:
+                await executor.stage_dialog_summary(chat_id, summary_text, message_count)
+            else:
+                print("  [Summarizer] empty summary — falling back to night LLM")
+
+        generation_success = bool(executor.last_dialog_summary)
+        if not generation_success:
+            system_prompt = f"""You are Mila's night reflection system (Process 2: Dialog Summarization).
 
 Your task is to analyze dialog messages and create a concise summary.
 
@@ -625,37 +751,36 @@ Your task is to analyze dialog messages and create a concise summary.
 5. You MUST call either save_dialog_summary or skip_dialog.
 """
 
-        gen_messages = [{"role": "user", "content": f"Analyze dialog {chat_id[:12]}... and create summary or skip."}]
-        tools = get_dialog_summarization_tools()
+            gen_messages = [{"role": "user", "content": f"Analyze dialog {chat_id[:12]}... and create summary or skip."}]
+            tools = get_dialog_summarization_tools()
 
-        generation_success = False
-        for gen_iter in range(MAX_GENERATION_ITERATIONS):
-            try:
-                response = await llm.generate(
-                    messages=gen_messages,
-                    system_prompt=system_prompt,
-                    tools=tools,
-                    tool_choice=_get_night_tool_choice(),
-                    max_tokens=2048,
-                    temperature=0.3
-                )
-            except Exception as e:
-                print(f"  [Gen] Error: {e}")
-                continue
+            for gen_iter in range(MAX_GENERATION_ITERATIONS):
+                try:
+                    response = await llm.generate(
+                        messages=gen_messages,
+                        system_prompt=system_prompt,
+                        tools=tools,
+                        tool_choice=_get_night_tool_choice(),
+                        max_tokens=2048,
+                        temperature=0.3
+                    )
+                except Exception as e:
+                    print(f"  [Gen] Error: {e}")
+                    continue
 
-            tool_calls = response.get("tool_calls")
-            if not tool_calls:
-                gen_messages.append({
-                    "role": "system",
-                    "content": "ERROR: You must call a tool. Either save_dialog_summary or skip_dialog."
-                })
-                continue
+                tool_calls = response.get("tool_calls")
+                if not tool_calls:
+                    gen_messages.append({
+                        "role": "system",
+                        "content": "ERROR: You must call a tool. Either save_dialog_summary or skip_dialog."
+                    })
+                    continue
 
-            for tc in tool_calls:
-                await executor.execute_tool_call(tc)
+                for tc in tool_calls:
+                    await executor.execute_tool_call(tc)
 
-            generation_success = True
-            break
+                generation_success = True
+                break
 
         if not generation_success:
             results.append({"chat_id": chat_id, "action": "error", "reason": "generation failed"})
@@ -667,6 +792,12 @@ Your task is to analyze dialog messages and create a concise summary.
 
         for verify_iter in range(MAX_VERIFICATION_RETRIES):
             verify_prompt = f"""Verify the dialog summary for chat {chat_id}.
+
+## Summary
+{executor.last_dialog_summary}
+
+## Dialog excerpt
+{messages_text[:4000]}
 
 Check:
 1. Does the summary accurately reflect the conversation?

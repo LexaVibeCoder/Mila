@@ -194,6 +194,15 @@ ThinkPipeline
 контекста: `temperature=0.3`, `max_tokens=300`, промпт «Summarize ... 2-3
 sentences, only facts».
 
+## Ночной суммаризатор
+
+`core/sleep/processes.py::_create_summarizer_llm()` — отдельная текстовая
+модель для сжатия диалогов во сне (`SUMMARIZER_LLM_MODEL`, по умолчанию
+`scaledown/summarize`). Она не умеет tool calls, поэтому возвращает только
+текст резюме, а `night_llm` проверяет его через approve/reject. Язык промпта
+выбирается по языку диалога (кириллица → русский), потому что
+`scaledown/summarize` следует языку инструкции, а не входа.
+
 ## Обработка ошибок
 
 - 3 ретрая с экспоненциальной задержкой и поддержкой `Retry-After`;

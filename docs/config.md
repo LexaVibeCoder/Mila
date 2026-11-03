@@ -43,6 +43,19 @@ runtime_config.json (значение не null)  →  побеждает  →  
 | `MAIN_LLM_MAX_TOKENS` | `2048` |
 | `MAIN_LLM_TEMPERATURE` | `0.7` |
 
+### Суммаризатор сна (сжатие диалогов)
+
+| Поле | По умолчанию |
+|------|--------------|
+| `SUMMARIZER_LLM_MODEL` | `scaledown/summarize`; пусто = legacy night LLM |
+| `SUMMARIZER_LLM_API_BASE` | пусто = `LLM_API_BASE` |
+| `SUMMARIZER_LLM_MAX_TOKENS` | `600` |
+
+Модель текстовая (не умеет tool calls): она пишет само резюме, а ночной LLM
+проверяет его через `approve_changes`/`reject_changes`. Ключ берётся из
+`LLM_API_KEY`. Runtime-переопределения — `summarization.model`,
+`summarization.api_base`, `summarization.max_tokens`.
+
 ### Эмбеддинги
 
 | Поле | По умолчанию |
@@ -143,6 +156,8 @@ OpenRouter с `/v1` не меняется.
 При старте `RuntimeConfig` загружает JSON, затем `_seed_from_settings()` заполняет
 оставшиеся `None` из `.env`. `night_llm.model/api_base` наследуются от
 `llm.*`; `night_llm.temperature/max_tokens` по умолчанию `0.3/4096`.
+`summarization.*` заполняется из `SUMMARIZER_LLM_*`, а `api_base` наследуется
+от `llm.api_base`.
 
 API-ключи в runtime config **не хранятся**: `llm.api_key` и `night_llm.api_key`
 всегда берутся из `.env` (`LLM_API_KEY`, `NIGHT_LLM_API_KEY` с fallback на
@@ -174,6 +189,11 @@ API-ключи в runtime config **не хранятся**: `llm.api_key` и `ni
     "tool_choice": "required",
     "reasoning_effort": "none",
     "extra_body": {}
+  },
+  "summarization": {
+    "model": "scaledown/summarize",
+    "api_base": "https://openrouter.ai/api/v1",
+    "max_tokens": 600
   },
   "tools": {
     "search_memory": true,
@@ -315,6 +335,9 @@ LLM_API_KEY=sk-...
 MAIN_LLM_MODEL=llama3
 # опционально: отдельный ключ для ночного LLM (иначе LLM_API_KEY)
 # NIGHT_LLM_API_KEY=
+# опционально: суммаризатор для сна (по умолчанию scaledown/summarize)
+# SUMMARIZER_LLM_MODEL=scaledown/summarize
+# SUMMARIZER_LLM_MAX_TOKENS=600
 
 EMBED_API_BASE=http://127.0.0.1:11434
 EMBED_API_KEY=

@@ -155,6 +155,7 @@ docs/                    документация
 ```bash
 # Тесты и проверка синтаксиса
 .venv/bin/python -m pytest                        # unit-тесты (integration исключены)
+.venv/bin/python -m pytest -m integration         # реальные LLM-тесты (ключ из .env)
 .venv/bin/python -m compileall -q core Mila_observatory main.py config.py
 
 # Observatory отдельно

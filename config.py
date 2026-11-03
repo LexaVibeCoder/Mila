@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     MAIN_LLM_MAX_TOKENS: int = 2048
     MAIN_LLM_TEMPERATURE: float = 0.7
 
+    # Dedicated summarizer for sleep dialog compression (process 2).
+    # scaledown/summarize is a text-only model (no tool calls): it produces
+    # the summary, while the night LLM still verifies it. Empty model falls
+    # back to the legacy tool-calling night worker.
+    SUMMARIZER_LLM_MODEL: str = "scaledown/summarize"
+    SUMMARIZER_LLM_API_BASE: str = ""  # empty = LLM_API_BASE
+    SUMMARIZER_LLM_MAX_TOKENS: int = 600
+
     # Embeddings
     EMBED_API_BASE: str
     EMBED_API_KEY: str

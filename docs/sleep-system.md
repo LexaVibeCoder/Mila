@@ -67,7 +67,16 @@ user_fact_extraction / verification / committing / completed / idle`.
 - Берёт чаты с сообщениями после прошлого сна (`completed_at`).
 - Пропускает чат, если сообщений меньше `SUMMARIZE_MIN_MESSAGES = 10` или
   контекст пуст.
-- Тулзы: `save_dialog_summary`, `skip_dialog`.
+- Основной путь — отдельный текстовый суммаризатор
+  (`SUMMARIZER_LLM_MODEL`, по умолчанию `scaledown/summarize`): модель не
+  умеет tool calls, поэтому пишет резюме напрямую, а `save_dialog_summary`
+  ставится в staging без тул-цикла. Промпт выбирается по языку диалога
+  (кириллица → русский, иначе английский), потому что `scaledown/summarize`
+  следует языку инструкции, а не текста. Вход обрезается до
+  `MAX_SUMMARIZER_CHARS = 24000` символов.
+- Если суммаризатор вернул пустой текст или упал (нет ключа/модели) —
+  fallback на прежний путь с ночным LLM и тулзами `save_dialog_summary`,
+  `skip_dialog`.
 - `save_dialog_summary`:
   - `push_summary(chat_id, summary)`;
   - `pop_oldest_messages_by_tokens(chat_id, 50000)`;
@@ -76,7 +85,8 @@ user_fact_extraction / verification / committing / completed / idle`.
     фото/аудио не подтягивались в будущие ходы;
   - пишет `sleep_dialog_summary_log`;
   - ставит staging-операцию для `context_buffer.chat_*`.
-- Верификация: approve/reject; при rejection результат помечается rejected.
+- Верификация: ночной LLM получает текст резюме и выдержку диалога;
+  approve/reject; при rejection результат помечается rejected.
 
 ### 3. Извлечение фактов (`process_user_fact_extraction`)
 

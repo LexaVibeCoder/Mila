@@ -96,6 +96,14 @@ class RuntimeConfig:
                 "reasoning_effort": "none",
                 "extra_body": {},
             },
+            # Dedicated summarizer for sleep dialog compression.
+            # Unlike night_llm it must not receive tools: scaledown/summarize
+            # rejects tool messages (400). Empty model = legacy night LLM path.
+            "summarization": {
+                "model": None,
+                "api_base": None,
+                "max_tokens": None,
+            },
             # Tools (enabled/disabled)
             # silence is legacy (empty content = silence now), kept for compat.
             "tools": {
@@ -309,6 +317,8 @@ class RuntimeConfig:
             "pipeline.decay_lambda": "DECAY_LAMBDA",
             "pipeline.forget_threshold": "FORGET_THRESHOLD",
             "pipeline.similarity_threshold": "SIMILARITY_THRESHOLD_IMAGE",
+            "summarization.model": "SUMMARIZER_LLM_MODEL",
+            "summarization.max_tokens": "SUMMARIZER_LLM_MAX_TOKENS",
         }
 
         changed = False
@@ -335,6 +345,14 @@ class RuntimeConfig:
         if self._deep_get(self._config, "night_llm.max_tokens") is None:
             RuntimeConfig._deep_set(self._config, "night_llm.max_tokens", 4096)
             changed = True
+
+        # Summarizer falls back to the main API base unless overridden.
+        if self._deep_get(self._config, "summarization.api_base") is None:
+            value = (getattr(settings, "SUMMARIZER_LLM_API_BASE", "") or
+                     getattr(settings, "LLM_API_BASE", None))
+            if value:
+                RuntimeConfig._deep_set(self._config, "summarization.api_base", value)
+                changed = True
 
         if changed:
             self._save()

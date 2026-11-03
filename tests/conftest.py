@@ -1,13 +1,21 @@
 """Hermetic test bootstrap.
 
-Everything here runs BEFORE any project module is imported, so `config.py`
-never sees the developer's real `.env` or the process environment. Tests must
-work on a clean checkout: no secrets, no network, no real `data/`.
+Everything here runs BEFORE any project module is imported, so unit tests never
+see the developer's real `.env` or process environment. Tests must work on a
+clean checkout: no secrets, no network, no real `data/`.
+
+Integration tests are the exception: when they are explicitly selected
+(`pytest -m integration`), the LLM_* variables are left alone so `config.py`
+can load the real `.env` (`LLM_API_KEY`). Everything else (DB/FAISS/runtime
+paths) still points at the temp directory.
 """
 
 import os
+import sys
 import tempfile
 from pathlib import Path
+
+from dotenv import find_dotenv
 
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="mila-tests-"))
 
@@ -38,8 +46,49 @@ _DUMMY_ENV = {
     # Never read/write the developer's real runtime_config.json.
     "MILA_RUNTIME_CONFIG_PATH": str(_TMP_ROOT / "runtime_config.json"),
 }
-# Force overrides: a real exported variable must not leak into tests.
-os.environ.update(_DUMMY_ENV)
+
+# Real LLM settings are allowed only when integration tests are selected.
+_LLM_KEYS = ("LLM_API_BASE", "LLM_API_KEY", "MAIN_LLM_MODEL")
+
+
+def _integration_requested() -> bool:
+    """Detect `-m integration` in argv / PYTEST_ADDOPTS.
+
+    conftest runs before pytest parses options, so read the raw arguments.
+    `not integration` (the default addopts in pytest.ini) keeps tests hermetic.
+    """
+    if os.getenv("MILA_TEST_INTEGRATION") == "1":
+        return True
+
+    argv = list(sys.argv[1:])
+    extra = os.getenv("PYTEST_ADDOPTS", "")
+    if extra:
+        argv += extra.split()
+
+    for index, arg in enumerate(argv):
+        expr = None
+        if arg == "-m" and index + 1 < len(argv):
+            expr = argv[index + 1]
+        elif arg.startswith("-m") and len(arg) > 2:
+            expr = arg[2:]
+        if expr and "integration" in expr and "not integration" not in expr:
+            return True
+    return False
+
+
+_INTEGRATION = _integration_requested()
+_ENV = dict(_DUMMY_ENV)
+if _INTEGRATION:
+    # Keep the stubs on a clean checkout (no .env, no exported LLM vars) so
+    # collection still succeeds and the integration tests skip themselves.
+    # `find_dotenv(usecwd=True)` matches config.py's `load_dotenv()` search.
+    has_real_config = bool(find_dotenv(usecwd=True)) or any(
+        os.getenv(key) for key in _LLM_KEYS
+    )
+    if has_real_config:
+        for key in _LLM_KEYS:
+            _ENV.pop(key, None)
+os.environ.update(_ENV)
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001

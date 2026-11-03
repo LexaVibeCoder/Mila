@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from Mila_observatory.auth import is_auth_enabled, require_auth, resolve_host
 from Mila_observatory.runtime import RUNTIME_CONFIG_PATH
 from config import settings
+from core.db import init_db
 from Mila_observatory.api.dashboard import router as dashboard_router
 from Mila_observatory.api.model import router as model_router
 from Mila_observatory.api.memory import router as memory_router
@@ -45,6 +46,12 @@ async def lifespan(app: FastAPI):
     print(f"  Config: {RUNTIME_CONFIG_PATH}")
     print(f"  Listen: {resolve_host()}:{settings.OBSERVATORY_PORT} (from .env)")
     print(f"{'='*60}\n")
+    # The panel can start before the bot on a fresh install; make sure the
+    # shared schema (and the faiss_id indexes/migrations) exists.
+    try:
+        init_db()
+    except Exception as e:
+        print(f"[Observatory] DB init failed: {e}")
     yield
     print("\nObservatory server shutting down.")
 

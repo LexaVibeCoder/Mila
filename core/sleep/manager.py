@@ -187,6 +187,7 @@ async def rollback_all(session_id: str = None):
 
     from core.db import get_conn
     conn = get_conn()
+    rolled_back_faiss_ids: list[int] = []
     try:
         for op in reversed(staged):
             try:
@@ -211,6 +212,12 @@ async def rollback_all(session_id: str = None):
 
                 elif target_table == "memories":
                     if op_type == "insert":
+                        row = conn.execute(
+                            "SELECT faiss_id FROM memories WHERE mem_id=?",
+                            (target_id,)
+                        ).fetchone()
+                        if row and row["faiss_id"] is not None:
+                            rolled_back_faiss_ids.append(int(row["faiss_id"]))
                         conn.execute(
                             "DELETE FROM memories WHERE mem_id=?",
                             (target_id,)
@@ -222,6 +229,15 @@ async def rollback_all(session_id: str = None):
         conn.commit()
     finally:
         conn.close()
+
+    # Rows staged during sleep were indexed immediately; rollback must drop
+    # their vectors too, otherwise ntotal drifts from SQLite.
+    if rolled_back_faiss_ids:
+        try:
+            from core.memory.indexer import get_indexer
+            get_indexer().vector.remove_ids(rolled_back_faiss_ids)
+        except Exception as e:
+            print(f"[Rollback] FAISS cleanup failed: {e}")
 
     clear_staged_operations(session_id)
     # Always back up before clearing — a crash must not silently drop the diary.

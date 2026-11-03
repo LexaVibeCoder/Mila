@@ -7,7 +7,7 @@ from core.context.buffer import (
     get_total_entries, get_total_message_tokens
 )
 from core.llm.embeddings import EmbeddingClient
-from core.memory.vector import VectorMemory
+from core.memory.indexer import get_indexer
 from core.pipeline import ThinkPipeline
 from core.llm.client import LLMClient
 from core.sleep.manager import (
@@ -35,7 +35,8 @@ class MilaUserbot:
             user_bot=True,
         )
         self.emb = EmbeddingClient()
-        self.text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
+        self.indexer = get_indexer(embedder=self.emb)
+        self.text_memory = self.indexer.vector
         self.pipeline = None
         self.me = None
         # Cheap summarizer for daytime context compression
@@ -45,6 +46,7 @@ class MilaUserbot:
         self._ready = asyncio.Event()
         self._periodic_save_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._memory_maintenance_task: asyncio.Task | None = None
 
         register_auth_handlers(self.app, phone_hint=settings.PHONE_NUMBER or "")
 
@@ -131,6 +133,9 @@ class MilaUserbot:
 
         self._periodic_save_task = asyncio.create_task(self.periodic_save())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        # Startup repair + retry queue for failed embeddings (M1/M2).
+        self._memory_maintenance_task = asyncio.create_task(
+            self._memory_maintenance_loop())
 
         # Start auto-sleep scheduler
         start_auto_sleep_scheduler()
@@ -170,6 +175,33 @@ class MilaUserbot:
                     self.text_memory.save()
                 except Exception as e:
                     print(f"[Periodic Save Error] {e}")
+        except asyncio.CancelledError:
+            pass
+
+    async def _memory_maintenance_loop(self):
+        """Rebuild a missing index once, then retry rows with NULL faiss_id.
+
+        Observability for the whole subsystem is exposed by
+        GET /api/memory/health in the Observatory.
+        """
+        try:
+            try:
+                health = await self.indexer.ensure_index_ready()
+                print(f"[Memory] index ready: memories={health['memories']['ntotal']}/"
+                      f"{health['memories']['db_total']}, "
+                      f"chunks={health['chunks']['ntotal']}/{health['chunks']['db_total']}")
+            except Exception as e:
+                print(f"[Memory] startup index check failed: {e}")
+
+            interval = max(30, int(getattr(settings, "MEMORY_REINDEX_INTERVAL_SEC", 120)))
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    # Refresh vectors written by the Observatory, repair an
+                    # index that disappeared/corrupted, then drain the queue.
+                    await self.indexer.ensure_index_ready()
+                except Exception as e:
+                    print(f"[Memory] periodic reindex failed: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -318,7 +350,8 @@ class MilaUserbot:
         await self.messages.handle(client, message)
 
     async def stop(self):
-        for attr in ("_periodic_save_task", "_heartbeat_task"):
+        for attr in ("_periodic_save_task", "_heartbeat_task",
+                     "_memory_maintenance_task"):
             task = getattr(self, attr, None)
             if task is not None:
                 task.cancel()

@@ -1,5 +1,5 @@
 """
-Memory API — CRUD for memories, search, FAISS rebuild.
+Memory API — CRUD for memories, search, FAISS rebuild/health.
 """
 
 import sys
@@ -15,12 +15,31 @@ from Mila_observatory.models import (
 from Mila_observatory.api.dashboard import add_event
 from core.db import (
     get_conn as get_mila_conn,
-    search_memories_by_ids as db_search_memories_by_ids,
-    add_memory as db_add_memory,
+    get_memory as db_get_memory,
+    update_memory_faiss_id,
 )
-from core.llm.embeddings import EmbeddingClient
+from core.memory.indexer import get_indexer
 
 router = APIRouter(tags=["memory"])
+
+
+def _to_item(d: dict) -> MemoryItem:
+    faiss_id = d.get("faiss_id")
+    return MemoryItem(
+        mem_id=d.get("mem_id", ""),
+        user_id=str(d.get("user_id", "")),
+        content=d.get("content", "") or "",
+        type=d.get("type", "fact"),
+        tag=d.get("tag"),
+        importance=d.get("importance", 0.5),
+        confidence=d.get("confidence", 0.5),
+        source_chat_id=d.get("source_chat_id"),
+        source_message_id=d.get("source_message_id"),
+        created_at=d.get("time") or d.get("created_at"),
+        last_accessed_at=d.get("last_accessed_at"),
+        faiss_id=faiss_id,
+        indexed=faiss_id is not None,
+    )
 
 
 @router.get("/api/memory", response_model=MemoryListResponse)
@@ -34,7 +53,6 @@ async def list_memories(
     conn = get_mila_conn()
     cur = conn.cursor()
 
-    # Build query
     conditions = []
     params = []
 
@@ -47,11 +65,9 @@ async def list_memories(
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    # Get total count
     cur.execute(f"SELECT COUNT(*) as cnt FROM memories {where}", params)
     total = cur.fetchone()["cnt"]
 
-    # Get paginated results
     offset = (page - 1) * limit
     cur.execute(
         f"SELECT * FROM memories {where} ORDER BY time DESC LIMIT ? OFFSET ?",
@@ -60,62 +76,42 @@ async def list_memories(
     rows = cur.fetchall()
     conn.close()
 
-    items = []
-    for r in rows:
-        d = dict(r)
-        items.append(MemoryItem(
-            mem_id=d.get("mem_id", ""),
-            user_id=d.get("user_id", ""),
-            content=d.get("content", ""),
-            type=d.get("type", "fact"),
-            tag=d.get("tag"),
-            importance=d.get("importance", 0.5),
-            confidence=d.get("confidence", 0.5),
-            source_chat_id=d.get("source_chat_id"),
-            source_message_id=d.get("source_message_id"),
-            created_at=d.get("time") or d.get("created_at"),
-            last_accessed_at=d.get("last_accessed_at"),
-        ))
+    return MemoryListResponse(
+        items=[_to_item(dict(r)) for r in rows],
+        total=total, page=page, limit=limit,
+    )
 
-    return MemoryListResponse(items=items, total=total, page=page, limit=limit)
+
+@router.get("/api/memory/health")
+async def memory_index_health():
+    """Index/SQLite consistency check (M2).
+
+    ``consistent`` is true when FAISS ntotal == indexable DB rows == rows
+    with a non-NULL faiss_id.
+    """
+    return {"success": True, **get_indexer().health()}
 
 
 @router.get("/api/memory/{mem_id}", response_model=MemoryItem)
 async def get_memory(mem_id: str):
     """Get a single memory by ID."""
-    conn = get_mila_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM memories WHERE mem_id = ?", (mem_id,))
-    row = cur.fetchone()
-    conn.close()
-
-    if not row:
+    d = db_get_memory(mem_id)
+    if not d:
         raise HTTPException(status_code=404, detail="Memory not found")
-
-    d = dict(row)
-    return MemoryItem(
-        mem_id=d.get("mem_id", ""),
-        user_id=d.get("user_id", ""),
-        content=d.get("content", ""),
-        type=d.get("type", "fact"),
-        tag=d.get("tag"),
-        importance=d.get("importance", 0.5),
-        confidence=d.get("confidence", 0.5),
-        source_chat_id=d.get("source_chat_id"),
-        source_message_id=d.get("source_message_id"),
-        created_at=d.get("time") or d.get("created_at"),
-        last_accessed_at=d.get("last_accessed_at"),
-    )
+    return _to_item(d)
 
 
 @router.put("/api/memory/{mem_id}", response_model=MemoryItem)
 async def update_memory(mem_id: str, req: MemoryUpdateRequest):
-    """Update a memory."""
+    """Update a memory; content changes are re-embedded and re-indexed."""
+    old = db_get_memory(mem_id)
+    if not old:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
     update_dict = req.model_dump(exclude_none=True)
     if not update_dict:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Build SET clause
     set_parts = []
     params = []
     for key, value in update_dict.items():
@@ -134,27 +130,50 @@ async def update_memory(mem_id: str, req: MemoryUpdateRequest):
     if not set_parts:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    params.append(mem_id)
+    content_changed = (
+        "content" in update_dict
+        and (update_dict.get("content") or "") != (old.get("content") or "")
+    )
 
+    params.append(mem_id)
     conn = get_mila_conn()
-    cur = conn.cursor()
-    cur.execute(f"UPDATE memories SET {', '.join(set_parts)} WHERE mem_id = ?", params)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(f"UPDATE memories SET {', '.join(set_parts)} WHERE mem_id = ?", params)
+        conn.commit()
+    finally:
+        conn.close()
+
+    if content_changed:
+        indexer = get_indexer()
+        # Drop the stale vector first; NULL means "please reindex" if the
+        # embedding backend is down right now.
+        await indexer.remove_memory(mem_id, old.get("faiss_id"))
+        update_memory_faiss_id(mem_id, None)
+        indexed = await indexer.index_memory(mem_id, force=True)
+        if not indexed:
+            print(f"[Memory API] memory {mem_id[:8]}... updated but not indexed — queued")
 
     add_event("memory_update", f"Memory {mem_id[:8]}... updated")
-
     return await get_memory(mem_id)
 
 
 @router.delete("/api/memory/{mem_id}")
 async def delete_memory(mem_id: str):
-    """Delete a memory."""
+    """Delete a memory and its FAISS vector."""
+    old = db_get_memory(mem_id)
+    if not old:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
     conn = get_mila_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM memories WHERE mem_id = ?", (mem_id,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM memories WHERE mem_id = ?", (mem_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Stale vectors are harmless (search drops unknown ids) but would make
+    # index.ntotal drift from SQLite forever; remove now (M5).
+    await get_indexer().remove_memory(mem_id, old.get("faiss_id"))
 
     add_event("memory_delete", f"Memory {mem_id[:8]}... deleted")
     return {"success": True, "message": "Memory deleted"}
@@ -162,9 +181,13 @@ async def delete_memory(mem_id: str):
 
 @router.post("/api/memory", response_model=MemoryItem)
 async def create_memory(req: MemoryCreateRequest):
-    """Create a new memory with embedding."""
-    # Create in SQLite
-    mem_id = db_add_memory(
+    """Create a memory through the shared indexer (insert + embed + FAISS).
+
+    If embeddings are unavailable the row is still created with
+    ``indexed=false`` and retried by the bot's maintenance loop (M7).
+    """
+    indexer = get_indexer()
+    mem_id, indexed = await indexer.add_memory(
         user_id=req.user_id,
         content=req.content,
         importance=req.importance,
@@ -172,105 +195,27 @@ async def create_memory(req: MemoryCreateRequest):
         source_chat_id=req.source_chat_id,
     )
 
-    # Create embedding and add to FAISS
-    try:
-        emb = EmbeddingClient()
-        vec = await emb.embed([req.content])
-        vec = vec[0]
+    if req.type and req.type != "fact":
+        conn = get_mila_conn()
+        try:
+            conn.execute("UPDATE memories SET type = ? WHERE mem_id = ?", (req.type, mem_id))
+            conn.commit()
+        finally:
+            conn.close()
 
-        # Import here to avoid circular imports
-        from core.memory.vector import VectorMemory
-        from config import settings
-
-        text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
-        # We need to get a unique FAISS ID
-        from core.db import get_conn as get_mila_conn2
-        conn2 = get_mila_conn2()
-        cur2 = conn2.cursor()
-        cur2.execute("SELECT COALESCE(MAX(faiss_id), 0) + 1 as next_id FROM memories")
-        next_faiss_id = cur2.fetchone()["next_id"]
-        conn2.close()
-
-        import numpy as np
-        text_memory.add(np.array([vec]), [next_faiss_id])
-
-        # Update the memory record with faiss_id
-        conn3 = get_mila_conn()
-        conn3.execute("UPDATE memories SET faiss_id = ? WHERE mem_id = ?", (next_faiss_id, mem_id))
-        conn3.commit()
-        conn3.close()
-
-        text_memory.save()
-    except Exception as e:
-        print(f"[Memory API] Warning: embedding failed: {e}")
-
-    add_event("memory_create", f"Memory created: {req.content[:50]}...")
-
+    add_event("memory_create",
+              f"Memory created: {req.content[:50]}... (indexed={indexed})")
     return await get_memory(mem_id)
 
 
 @router.post("/api/memory/rebuild-faiss")
 async def rebuild_faiss():
-    """Rebuild FAISS index from all memories in SQLite."""
+    """Rebuild the memory FAISS index from all memories in SQLite."""
     try:
-        from core.memory.vector import VectorMemory
-        from core.llm.embeddings import EmbeddingClient
-        from config import settings
-        import numpy as np
-
-        conn = get_mila_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT mem_id, content, faiss_id FROM memories WHERE content IS NOT NULL AND content != ''")
-        rows = cur.fetchall()
-        conn.close()
-
-        if not rows:
-            return {"success": True, "message": "No memories to index", "count": 0}
-
-        emb = EmbeddingClient()
-        texts = [r["content"] for r in rows]
-        existing_ids = [r["faiss_id"] for r in rows]
-
-        print(f"[Memory API] Rebuilding FAISS: {len(texts)} memories...")
-
-        # Generate embeddings in batches
-        vectors = await emb.embed(texts)
-        vectors = np.array(vectors)
-
-        # Create new index
-        text_memory = VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)
-        from core.memory.vector import VectorMemory as VM
-        import faiss
-        new_index = faiss.IndexIDMap(faiss.IndexFlatL2(settings.EMBED_DIM))
-
-        valid_ids = []
-        valid_vectors = []
-        for i, (vid, vec) in enumerate(zip(existing_ids, vectors)):
-            if vid is not None:
-                valid_ids.append(int(vid))
-                valid_vectors.append(vec)
-            else:
-                # Assign new FAISS ID
-                new_id = max([x for x in existing_ids if x is not None] or [0]) + i + 1
-                valid_ids.append(new_id)
-                # Update the memory record
-                conn2 = get_mila_conn()
-                conn2.execute("UPDATE memories SET faiss_id = ? WHERE mem_id = ?", (new_id, rows[i]["mem_id"]))
-                conn2.commit()
-                conn2.close()
-                valid_vectors.append(vec)
-
-        if valid_ids:
-            new_index.add_with_ids(
-                np.array(valid_vectors).astype(np.float32),
-                np.array(valid_ids, dtype=np.int64)
-            )
-            text_memory.index = new_index
-            text_memory.save()
-
-        add_event("faiss_rebuild", f"FAISS index rebuilt: {len(valid_ids)} vectors")
-        return {"success": True, "message": "FAISS index rebuilt", "count": len(valid_ids)}
-
+        result = await get_indexer().rebuild()
+        add_event("faiss_rebuild",
+                  f"FAISS index rebuilt: {result.get('count', 0)} vectors")
+        return result
     except Exception as e:
         import traceback
         traceback.print_exc()

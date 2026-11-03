@@ -293,17 +293,21 @@ class ThinkPipeline:
                 print(f"[Pipeline] tool_call convert error: {e}")
         return actions
 
-    async def _execute_single_action(self, action: Dict, user_id: str | None = None, chat_id: str | None = None) -> Dict:
+    async def _execute_single_action(self, action: Dict, user_id: str | None = None, chat_id: str | None = None,
+                                     seen_memories: set[str] | None = None) -> Dict:
         """Execute a single direct-tool action with an explicit request context.
 
         user_id/chat_id are snapshotted per-turn by the caller so two parallel
         chats can't overwrite each other's Tools via self.user_id mutation.
+        seen_memories is shared by all searches within the turn to keep
+        duplicate facts out of the context.
         """
         executor = ToolExecutor(
             text_memory=self.text_memory,
             embedding_client=self.emb_client,
             current_user_id=user_id or self.user_id,
             chat_id=chat_id or self.chat_id,
+            seen_memories=seen_memories,
         )
         return await executor.execute_action(action)
 
@@ -508,6 +512,9 @@ class ThinkPipeline:
         # Snapshot once per turn: a mid-turn Observatory change applies next turn.
         format_mode = _response_format_mode()
         use_response_format = format_mode != "prompt"
+        # Facts already injected by search_memory during this turn. Shared by
+        # every search so overlapping queries can't duplicate the same fact.
+        seen_memories: set[str] = set()
 
         while iteration < max_iterations:
             iteration += 1
@@ -632,7 +639,8 @@ class ThinkPipeline:
             sleep_started = False
 
             for action in actions:
-                executed = await self._execute_single_action(action, user_id=req_user, chat_id=req_chat)
+                executed = await self._execute_single_action(action, user_id=req_user, chat_id=req_chat,
+                                                            seen_memories=seen_memories)
                 get_needs_tracker().apply_action_effect(action.get("action_type"))
                 yield {"kind": "action", "action": executed}
 
@@ -663,8 +671,8 @@ class ThinkPipeline:
                     has_search = True
                     if status == "searched":
                         context_addon = executed.get("context_addon", "[No results found]")
-                        messages.append({"role": "system",
-                                         "content": f"Search results in memory:\n{context_addon}"})
+                        # The addon already carries its own header.
+                        messages.append({"role": "system", "content": context_addon})
                         print("  [Search results → re-calling]")
                     else:
                         messages.append({"role": "system", "content": (

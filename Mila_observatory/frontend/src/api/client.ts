@@ -104,6 +104,8 @@ export interface MemoryItem {
   source_message_id: string | null;
   created_at: string | null;
   last_accessed_at: string | null;
+  faiss_id?: number | null;
+  indexed?: boolean;
 }
 
 export interface MemoryList {

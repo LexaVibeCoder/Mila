@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import List, Dict, Any, Optional
 
@@ -287,11 +288,16 @@ class ToolExecutor:
         embedding_client,
         current_user_id: str,
         chat_id: str,
+        seen_memories: set[str] | None = None,
     ):
         self.text_memory = text_memory
         self.emb_client = embedding_client
         self.current_user_id = current_user_id
         self.chat_id = chat_id
+        # Shared across every search_memory call in one turn: the model often
+        # issues several overlapping queries, and the same fact must not be
+        # injected into the context once per query.
+        self.seen_memories = seen_memories if seen_memories is not None else set()
 
     async def execute_action(self, action: Dict) -> Dict:
         action_type = action.get("action_type", "")
@@ -334,68 +340,194 @@ class ToolExecutor:
             "status": "ready"
         }
 
-    async def _handle_search_memory(self, params: Dict) -> Dict:
-        query = params.get("query", "")
+    @staticmethod
+    def _format_memory_context(results: list[dict]) -> str:
+        lines = ["[Search results in memory:]"]
+        for r in results[:5]:
+            preview = (r.get("content") or "")[:200]
+            score = r.get("score")
+            if isinstance(score, (int, float)):
+                lines.append(f"- {preview} (relevance: {score:.2f})")
+            else:
+                lines.append(f"- {preview}")
+        return "\n".join(lines)
 
-        from core.llm.reranker import RerankerClient
+    @staticmethod
+    def _memory_keys(mem: dict) -> list[str]:
+        """Identity keys for a memory row: id and normalized content.
+
+        Both are needed: the same row can come back from several queries, and
+        the extractor sometimes stores the same fact under different ids.
+        """
+        keys: list[str] = []
+        mem_id = str(mem.get("mem_id") or "").strip()
+        if mem_id:
+            keys.append(f"id:{mem_id}")
+        content = " ".join(str(mem.get("content") or "").split()).casefold()
+        if content:
+            keys.append(f"text:{content}")
+        return keys
+
+    def _only_new(self, results: list[dict], limit: int = 5) -> list[dict]:
+        """Drop facts already surfaced earlier in this turn.
+
+        The model may call search_memory several times with overlapping
+        queries; without this filter every call re-injects the same facts
+        into the context and bloats the prompt.
+
+        Only the first ``limit`` fresh rows are actually injected by
+        ``_format_memory_context``, so only those are marked as seen —
+        otherwise a sixth hit would be suppressed despite never being shown.
+        """
+        fresh: list[dict] = []
+        for mem in results:
+            keys = self._memory_keys(mem)
+            if keys and any(k in self.seen_memories for k in keys):
+                continue
+            if len(fresh) < limit:
+                self.seen_memories.update(keys)
+            fresh.append(mem)
+        return fresh
+
+    @staticmethod
+    def _duplicate_context() -> str:
+        return "[No new facts: everything found is already shown above]"
+
+    def _sqlite_fallback(self, query: str, reason: str = "") -> Dict:
+        """Keyword search in SQLite when embeddings/FAISS are unavailable (M9).
+
+        Better to remember a fact approximately than to report "nothing
+        found" just because the embedding backend is down.
+        """
+        from core.db import search_memories_like
+
+        memories = search_memories_like(self.current_user_id, query, limit=5)
+        if not memories:
+            # Legacy rows with NULL user_id (same rule as the FAISS path).
+            memories = search_memories_like(None, query, limit=5)
+        raw_results = [{**m, "score": None} for m in memories]
+        results = self._only_new(raw_results)
+        if results:
+            context = self._format_memory_context(results)
+        elif raw_results:
+            context = self._duplicate_context()
+        else:
+            context = "[Nothing found in memory]"
+        print(f"[ToolExecutor] Search fallback=true, source=sqlite: '{query}' "
+              f"→ {len(results)} new, {len(raw_results) - len(results)} skipped ({reason})")
+        return {
+            "type": "search_memory",
+            "query": query,
+            "results": results,
+            "context_addon": context,
+            "status": "searched",
+            "source": "sqlite_fallback",
+            "fallback": True,
+            "error": reason or None,
+        }
+
+    async def _handle_search_memory(self, params: Dict) -> Dict:
+        query = (params.get("query") or "").strip()
+        if not query:
+            return {
+                "type": "search_memory",
+                "query": query,
+                "results": None,
+                "context_addon": "[Empty memory search query]",
+                "status": "error",
+                "error": "empty query",
+            }
+
         from core.db import search_memories_by_faiss_ids
 
         try:
-            vec = await self.emb_client.embed([query])
-            vec = vec[0]
+            # Bound the wait: a dead embedding backend must not stall the turn
+            # for minutes before the SQLite fallback kicks in.
+            vec = (await asyncio.wait_for(
+                self.emb_client.embed([query]), timeout=15.0))[0]
 
+            # search() reloads the index if the Observatory wrote it (M3).
             distances, indices = self.text_memory.search(vec, k=10)
             valid_indices = [int(idx) for idx in indices if idx != -1]
+            dist_by_index = {int(idx): float(d)
+                             for idx, d in zip(indices, distances) if idx != -1}
 
-            results = None
-            context_addon = "[Nothing found in memory]"
-
+            results: list[dict] = []
             if valid_indices:
                 # Per-user isolation: never surface another user's facts.
                 # Legacy rows with NULL user_id are visible to everyone only
                 # when no per-user rows matched (backward compat).
                 memories = search_memories_by_faiss_ids(valid_indices, user_id=self.current_user_id)
                 if not memories:
-                    memories = [m for m in search_memories_by_faiss_ids(valid_indices) if not m.get("user_id")]
-                if memories:
-                    reranker = RerankerClient()
-                    documents = [m.get("content", "") for m in memories]
-                    reranked = await reranker.rerank(query, documents)
+                    memories = [m for m in search_memories_by_faiss_ids(valid_indices)
+                                if not m.get("user_id")]
 
-                    seen = set()
-                    results = []
-                    for doc, score in reranked:
-                        for mem in memories:
-                            if mem.get("content") == doc and mem.get("mem_id") not in seen:
-                                results.append({"content": doc, "score": score, **mem})
-                                seen.add(mem.get("mem_id"))
-                                break
+                # Preserve FAISS distance order; the DB result set is unordered.
+                by_faiss = {int(m["faiss_id"]): m for m in memories
+                            if m.get("faiss_id") is not None}
+                ordered = [by_faiss[i] for i in valid_indices if i in by_faiss]
 
-                    context_lines = ["[Search results in memory:]"]
-                    for r in results[:5]:
-                        preview = r.get("content", "")[:200]
-                        context_lines.append(f"- {preview} (relevance: {r.get('score', 0):.2f})")
-                    context_addon = "\n".join(context_lines)
+                if ordered:
+                    try:
+                        from core.llm.reranker import RerankerClient
+                        reranker = RerankerClient()
+                        documents = [m.get("content", "") for m in ordered]
+                        reranked = await reranker.rerank(query, documents)
+                        seen = set()
+                        for doc, score in reranked:
+                            for mem in ordered:
+                                if mem.get("content") == doc and mem.get("mem_id") not in seen:
+                                    results.append({"content": doc, "score": score, **mem})
+                                    seen.add(mem.get("mem_id"))
+                                    break
+                    except Exception as e:
+                        # Reranker is optional (model may not be installed);
+                        # FAISS order is still a valid answer.
+                        print(f"[ToolExecutor] Reranker unavailable ({e}); using FAISS order")
+                        results = [
+                            {
+                                "content": m.get("content", ""),
+                                "score": float(1.0 / (1.0 + max(0.0, float(d)))),
+                                **m,
+                            }
+                            for m in ordered
+                            for d in (dist_by_index.get(int(m["faiss_id"]), 0.0),)
+                        ]
 
-            print(f"[ToolExecutor] Search: '{query}' → {len(results or [])} results")
-            return {
-                "type": "search_memory",
-                "query": query,
-                "results": results,
-                "context_addon": context_addon,
-                "status": "searched"
-            }
+            if results:
+                raw_count = len(results)
+                results = self._only_new(results)
+                if results:
+                    print(f"[ToolExecutor] Search: '{query}' → "
+                          f"{len(results)} new, {raw_count - len(results)} skipped")
+                    return {
+                        "type": "search_memory",
+                        "query": query,
+                        "results": results,
+                        "context_addon": self._format_memory_context(results),
+                        "status": "searched",
+                        "source": "faiss",
+                        "fallback": False,
+                    }
+                print(f"[ToolExecutor] Search: '{query}' → "
+                      f"all {raw_count} results already in context")
+                return {
+                    "type": "search_memory",
+                    "query": query,
+                    "results": [],
+                    "context_addon": self._duplicate_context(),
+                    "status": "searched",
+                    "source": "faiss",
+                    "fallback": False,
+                }
+
+            # No vector hit (empty index, wrong user, or embeddings down) —
+            # SQLite keyword search keeps facts reachable.
+            return self._sqlite_fallback(query, "no FAISS results")
 
         except Exception as e:
             print(f"[ToolExecutor] Search error: {e}")
-            return {
-                "type": "search_memory",
-                "query": query,
-                "results": None,
-                "context_addon": "[Error searching memory]",
-                "status": "error",
-                "error": str(e)
-            }
+            return self._sqlite_fallback(query, str(e))
 
     async def _handle_silence(self, params: Dict) -> Dict:
         reason = params.get("reason", "")

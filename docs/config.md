@@ -56,9 +56,12 @@ runtime_config.json (значение не null)  →  побеждает  →  
 
 | Поле | По умолчанию |
 |------|--------------|
-| `FAISS_TEXT_PATH` | `data/faiss_text.index` |
+| `FAISS_TEXT_PATH` | `data/faiss_text.index` (memories) |
+| `FAISS_CHUNK_PATH` | `data/faiss_chunks.index` (chunks) |
 | `FAISS_IMAGE_PATH` | `data/faiss_image.index` (резерв, не используется) |
 | `FAISS_SAVE_INTERVAL_MIN` | `10` |
+| `MEMORY_REINDEX_INTERVAL_SEC` | `120` (очередь `faiss_id IS NULL`) |
+| `MEMORY_REINDEX_BATCH` | `200` |
 | `RERANKER_MODEL_PATH` | `models/rerankers/BGE-Reranker-v2-m3` |
 | `RERANKER_THRESHOLD` | `0.6` |
 | `DECAY_LAMBDA` | `0.01` (сидирует runtime) |

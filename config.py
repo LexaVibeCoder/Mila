@@ -60,8 +60,15 @@ class Settings(BaseSettings):
 
     # FAISS & Reranker
     FAISS_TEXT_PATH: str = "data/faiss_text.index"
+    # Conversation chunks live in a separate index so their integer ids do
+    # not collide with memories.faiss_id and search_memory stays user-fact only.
+    FAISS_CHUNK_PATH: str = "data/faiss_chunks.index"
     FAISS_IMAGE_PATH: str = "data/faiss_image.index"
     FAISS_SAVE_INTERVAL_MIN: int = 10
+    # Background reindex of rows whose faiss_id is NULL (embedding failure,
+    # crash between insert and index, or rows written by an older version).
+    MEMORY_REINDEX_INTERVAL_SEC: int = 120
+    MEMORY_REINDEX_BATCH: int = 200
     RERANKER_MODEL_PATH: str = "models/rerankers/BGE-Reranker-v2-m3"
     RERANKER_THRESHOLD: float = 0.6
 

@@ -16,9 +16,10 @@ from pytdbot import types
 
 from config import settings
 from core.db import (
-    ensure_user_exists, ensure_chat_exists, add_chunk, get_user_info,
+    ensure_user_exists, ensure_chat_exists, get_user_info,
     get_user_display_name, log_media,
 )
+from core.memory.indexer import get_indexer
 from core.context.buffer import push_message
 from core.needs.tracker import get_tracker as get_needs_tracker
 from core.tg_adapter import (
@@ -56,6 +57,11 @@ class MessageCoordinate:
         # Peer typing state: chat_id -> monotonic timestamp of last
         # non-cancel updateChatAction. Expires via TYPING_FRESHNESS_SECONDS.
         self._typing_last: dict[str, float] = {}
+
+    def _add_chunk(self, *args, **kwargs) -> str:
+        """Insert + schedule FAISS indexing through the bot's shared indexer."""
+        indexer = getattr(self.bot, "indexer", None) or get_indexer()
+        return indexer.add_chunk(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # Peer typing tracking (called from bot's updateChatAction handler)
@@ -153,8 +159,8 @@ class MessageCoordinate:
         # _current_session_id was None after restart.
         from core.sleep.manager import is_sleeping, queue_incoming_message
         if is_sleeping():
-            chunk_id = add_chunk(chat_id, user_id, placeholder, token_count=0,
-                                 type='raw', kind=notif.kind, media_path=local_path)
+            chunk_id = self._add_chunk(chat_id, user_id, placeholder, token_count=0,
+                                       type='raw', kind=notif.kind, media_path=local_path)
             try:
                 push_message(chat_id, placeholder, source_chunk_id=chunk_id,
                              kind=notif.kind)
@@ -164,8 +170,8 @@ class MessageCoordinate:
             print(f"[Sleep] Message saved+queued from {user_id[:8]}... in {chat_id[:8]}...")
             return
 
-        chunk_id = add_chunk(chat_id, user_id, placeholder, token_count=0,
-                             type='raw', kind=notif.kind, media_path=local_path)
+        chunk_id = self._add_chunk(chat_id, user_id, placeholder, token_count=0,
+                                   type='raw', kind=notif.kind, media_path=local_path)
 
         # Push to working memory now so it appears in the pending batch.
         push_message(chat_id, placeholder, source_chunk_id=chunk_id,
@@ -418,7 +424,7 @@ class MessageCoordinate:
         is_night = hour >= 22 or hour <= 7
         if needs["fatigue"] > 0.85 and is_night:
             print(f"[Needs] Fatigue {needs['fatigue']:.2f} at night — auto silence")
-            add_chunk(
+            self._add_chunk(
                 chat_id, str(bot.me.id),
                 content="",
                 llm_full_response="[auto-silence: высокая усталость]",
@@ -490,7 +496,7 @@ class MessageCoordinate:
                         await asyncio.sleep(random.uniform(0.3, 1.0))
                     try:
                         await send_text(client, int(target_chat_id), clean)
-                        add_chunk(
+                        self._add_chunk(
                             target_chat_id, str(bot.me.id),
                             content=clean,
                             llm_full_response=full_response or clean,
@@ -591,8 +597,8 @@ class MessageCoordinate:
                     print("[Skip] No answer this turn")
                 else:
                     print("[Skip] No reply — no answer")
-                add_chunk(chat_id, str(bot.me.id), content="",
-                          llm_full_response=full_response, token_count=0, type='raw')
+                self._add_chunk(chat_id, str(bot.me.id), content="",
+                                llm_full_response=full_response, token_count=0, type='raw')
 
             return False
         except asyncio.CancelledError:

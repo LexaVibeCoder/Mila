@@ -309,19 +309,23 @@ class StagingExecutor:
         }
 
     async def _stage_user_fact(self, args: Dict) -> Dict:
-        from core.db import add_memory
+        from core.memory.indexer import get_indexer
 
         user_id = args["user_id"]
         content = args["content"]
         importance = args.get("importance", 0.5)
         source_chat_id = args.get("source_chat_id", "")
 
-        mem_id = add_memory(
+        # Insert + embed + FAISS in one step; if the embedding backend is
+        # down the row stays with faiss_id=NULL and is retried later.
+        mem_id, indexed = await get_indexer().add_memory(
             user_id=user_id,
             content=content,
             importance=importance,
             source_chat_id=source_chat_id
         )
+        if not indexed:
+            print(f"  [Sleep] memory {mem_id[:8]}... queued for reindex")
 
         sid = stage_operation(
             session_id=self.session_id,

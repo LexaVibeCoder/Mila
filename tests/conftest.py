@@ -27,6 +27,7 @@ _DUMMY_ENV = {
     "SQLITE_PATH": str(_TMP_ROOT / "mila.db"),
     "CONTEXT_DB_PATH": str(_TMP_ROOT / "context_buffer.db"),
     "FAISS_TEXT_PATH": str(_TMP_ROOT / "faiss_text.index"),
+    "FAISS_CHUNK_PATH": str(_TMP_ROOT / "faiss_chunks.index"),
     "FAISS_IMAGE_PATH": str(_TMP_ROOT / "faiss_image.index"),
     "PHOTOS_DIR": str(_TMP_ROOT / "photos"),
     "MEDIA_DIR": str(_TMP_ROOT / "media"),

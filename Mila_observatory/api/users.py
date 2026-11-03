@@ -27,7 +27,8 @@ from Mila_observatory.models import (
     UserUpdateRequest,
 )
 from Mila_observatory.api.dashboard import add_event
-from core.db import get_conn as get_mila_conn, add_memory as db_add_memory, ensure_user_exists
+from core.db import get_conn as get_mila_conn, ensure_user_exists
+from core.memory.indexer import get_indexer
 
 router = APIRouter(tags=["users"])
 
@@ -444,6 +445,8 @@ async def list_user_memories(
                 source_message_id=d.get("source_message_id"),
                 created_at=d.get("time"),
                 last_accessed_at=d.get("last_accessed_at"),
+                faiss_id=d.get("faiss_id"),
+                indexed=d.get("faiss_id") is not None,
             ))
     finally:
         conn.close()
@@ -455,13 +458,15 @@ async def create_user_memory(user_id: str, req: UserMemoryCreateRequest):
     """Manually add a memory about a user (goes through the same pipeline as auto-extracted ones)."""
     # memories.user_id is a FK to users — make sure the row exists first.
     ensure_user_exists(user_id)
-    mem_id = db_add_memory(
+    mem_id, indexed = await get_indexer().add_memory(
         user_id=user_id,
         content=req.content,
         importance=req.importance,
         tags=[req.tag] if req.tag else None,
     )
-    # Best-effort: set type (db_add_memory defaults to 'fact')
+    if not indexed:
+        print(f"[Users API] memory {mem_id[:8]}... created but queued for reindex")
+    # Best-effort: set type (add_memory defaults to 'fact')
     if req.type and req.type != "fact":
         conn = get_mila_conn()
         try:
@@ -488,6 +493,8 @@ async def create_user_memory(user_id: str, req: UserMemoryCreateRequest):
         source_message_id=d.get("source_message_id"),
         created_at=d.get("time"),
         last_accessed_at=d.get("last_accessed_at"),
+        faiss_id=d.get("faiss_id"),
+        indexed=d.get("faiss_id") is not None,
     )
 
 

@@ -257,7 +257,7 @@ async def run_proactive_turn(bot) -> dict:
     print(f"[Proactive] SENDING via {reply_via} {len(cleans)} bubble(s) → {reply_chat_id}")
     try:
         from core.tg_adapter import send_text, send_typing
-        from core.db import add_chunk
+        from core.memory.indexer import get_indexer
         from core.context.buffer import push_message
         try:
             await send_typing(bot.app, int(reply_chat_id))
@@ -273,8 +273,10 @@ async def run_proactive_turn(bot) -> dict:
                 await asyncio.sleep(random.uniform(0.3, 1.0))
             await send_text(bot.app, int(reply_chat_id), clean)
             try:
-                chunk_id = add_chunk(reply_chat_id, str(bot.me.id), content=clean,
-                                     token_count=0, type="raw")
+                indexer = getattr(bot, "indexer", None) or get_indexer()
+                chunk_id = indexer.add_chunk(
+                    reply_chat_id, str(bot.me.id), content=clean,
+                    token_count=0, type="raw")
             except Exception:
                 chunk_id = None
             try:

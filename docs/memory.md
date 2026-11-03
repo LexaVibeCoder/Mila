@@ -17,27 +17,63 @@ VectorMemory(index_path: str, dim: int)
 
 - FAISS `IndexFlatL2` + `IndexIDMap`;
 - размерность `EMBED_DIM` (по умолчанию **384**);
-- в боте: `VectorMemory(settings.FAISS_TEXT_PATH, dim=settings.EMBED_DIM)` —
-  `data/faiss_text.index`;
+- **два индекса** с независимыми пространствами id:
+  - `FAISS_TEXT_PATH` (`data/faiss_text.index`) — `memories`, его ищет модель;
+  - `FAISS_CHUNK_PATH` (`data/faiss_chunks.index`) — `chunks` (текст диалогов);
 - `data/faiss_image.index` зарезервирован, не используется.
+- Раздельные файлы нужны, чтобы `chunks.faiss_id` не мог совпасть с
+  `memories.faiss_id` и выдать чужой факт в `search_memory`.
 
 ### Операции
 
 | Метод | Описание |
 |-------|----------|
 | `load_or_create()` | Загружает индекс или создаёт новый |
-| `add(vectors, ids)` | `add_with_ids`, float32/int64 |
-| `search(query_vector, k=5)` | `(distances[0], indices[0])` |
-| `save()` | Атомарная запись через `.tmp` + `os.replace`, только при `ntotal > 0` |
+| `refresh_if_changed()` | Перечитывает файл, если его изменил другой процесс (по mtime/size) |
+| `add(vectors, ids)` | `add_with_ids`; при `persist=True` перечитывает файл под `flock` и сразу пишет |
+| `add_new(vectors, min_id=0)` | Выдаёт уникальные id под межпроцессным lock и возвращает их |
+| `remove_ids(ids)` | Удаляет векторы и сохраняет индекс |
+| `search(query_vector, k=5)` | `refresh_if_changed()` + `(distances[0], indices[0])` |
+| `save()` | Атомарная запись через `.tmp` + `os.replace` (в т.ч. пустого индекса) |
+| `replace_index(index)` | Полная замена (rebuild) |
 | `rebuild_from_active(active_ids, all_vectors)` | Перестроение индекса |
 
-### Отказоустойчивость
+### MemoryIndexer — единый путь записи
+
+**Файл:** `core/memory/indexer.py`
+
+Все создания памяти и чанков идут через `MemoryIndexer`:
+
+```
+SQLite INSERT → embedding → VectorMemory.add_new() → UPDATE faiss_id
+```
+
+- `await indexer.add_memory(...)` → `(mem_id, indexed)`; при ошибке эмбеддинга
+  строка всё равно создаётся с `faiss_id=NULL` (`indexed=False`);
+- `indexer.add_chunk(...)` (sync) вставляет чанк и ставит индексацию в
+  фоновую задачу; пустые/`kind='silence'` чанки не индексируются;
+- `faiss_id IS NULL` — это **очередь переиндексации**; её разбирает
+  `reindex_pending()`;
+- `ensure_index_ready()` при старте пересобирает отсутствующий/пустой индекс из
+  SQLite, дочищает осиротевшие векторы и индексирует очередь;
+- `health()` сравнивает `index.ntotal`, число индексируемых строк и строк с
+  `faiss_id` (см. `GET /api/memory/health`).
+
+Бот запускает `_memory_maintenance_loop()`: один раз `ensure_index_ready()`,
+затем каждые `MEMORY_REINDEX_INTERVAL_SEC` секунд — `reindex_pending()`.
+
+### Отказоустойчивость и два писателя
 
 - повреждённый индекс при загрузке **не роняет процесс**: файл
   переименовывается в `*.corrupt-<timestamp>`, создаётся новый;
-- сохранение защищено межпроцессным `flock` (`*.lock`) — bot и Observatory не
-  перетирают файл;
-- запись атомарная: падение посреди `save()` оставляет старый индекс целым.
+- любое изменение (`add`, `add_new`, `remove_ids`, `save`) идёт под
+  межпроцессным `flock` (`*.lock`) и перечитывает актуальный файл — bot и
+  Observatory не теряют записи друг друга;
+- запись атомарная: падение посреди записи оставляет старый индекс целым;
+- `search()` сам вызывает `refresh_if_changed()`, поэтому память, созданная в
+  Observatory, находится ботом без перезапуска;
+- `UNIQUE INDEX` на `memories.faiss_id`/`chunks.faiss_id` — страховка от
+  коллизий id (M6).
 
 ### Периодическое сохранение
 
@@ -70,7 +106,7 @@ CREATE TABLE memories (
 
 | Функция | Описание |
 |---------|----------|
-| `add_memory(...)` | Создание записи, возвращает `mem_id`; эмбеддинг/FAISS делает вызывающий |
+| `add_memory(...)` | Низкоуровневая вставка строки, возвращает `mem_id`; для поиска используй `MemoryIndexer.add_memory()` |
 | `search_memories_by_ids(mem_ids)` | Загрузка по `mem_id` |
 | `search_memories_by_faiss_ids(faiss_ids, user_id=None)` | Загрузка по FAISS ID; `user_id` обязателен для изоляции |
 | `update_memory_access(mem_ids)` | Обновление `last_accessed_at` |
@@ -80,6 +116,26 @@ CREATE TABLE memories (
 `ToolExecutor._handle_search_memory()` передаёт `user_id` в
 `search_memories_by_faiss_ids()`. Legacy-строки с `NULL user_id` видны только
 если per-user совпадений нет — это осознанный backward-compat, а не общий доступ.
+
+### SQLite fallback
+
+Если embeddings/FAISS недоступны или не дали ни одного кандидата, поиск
+переходит на `search_memories_like(user_id, query)`: `content LIKE` по словам
+запроса, сортировка по `importance DESC, time DESC`, лимит 5. Ответ помечается
+`source="sqlite_fallback"`, `fallback=true`; в лог пишется
+`[ToolExecutor] Search fallback=true`. Это не заменяет семантический поиск, но
+не даёт Миле «забыть» факт из-за лежащего embedding-сервера. Reranker тоже
+опционален: если модель не установлена, результаты остаются в порядке FAISS.
+
+### Дедупликация в рамках хода
+
+Модель нередко вызывает `search_memory` несколько раз за одну итерацию с
+пересекающимися запросами. `_run_stream()` создаёт один набор `seen_memories`
+на ход и передаёт его в каждый `ToolExecutor`; факт считается повтором при
+совпадении `mem_id` или нормализованного `content`. Повторные строки не
+попадают ни в `results`, ни в `context_addon`; если новых фактов нет,
+инжектится `[No new facts: everything found is already shown above]`. На
+следующем ходу набор пустой, поэтому факт можно найти заново.
 
 ### Интеграция с FAISS
 
@@ -183,9 +239,12 @@ CREATE TABLE mila_memory_chunks (
 | `EMBED_API_KEY` | обязателен | |
 | `EMBED_MODEL` | обязателен | |
 | `EMBED_DIM` | `384` | Должна совпадать с моделью |
-| `FAISS_TEXT_PATH` | `data/faiss_text.index` | Рабочий индекс |
+| `FAISS_TEXT_PATH` | `data/faiss_text.index` | Индекс `memories` (поиск) |
+| `FAISS_CHUNK_PATH` | `data/faiss_chunks.index` | Индекс `chunks` |
 | `FAISS_IMAGE_PATH` | `data/faiss_image.index` | Резерв |
 | `FAISS_SAVE_INTERVAL_MIN` | `10` | Автосохранение |
+| `MEMORY_REINDEX_INTERVAL_SEC` | `120` | Период доразбора очереди `faiss_id IS NULL` |
+| `MEMORY_REINDEX_BATCH` | `200` | Лимит строк за один проход reindex |
 | `RERANKER_MODEL_PATH` | `models/rerankers/BGE-Reranker-v2-m3` | |
 | `RERANKER_THRESHOLD` | `0.6` | Порог |
 | `MEDIA_DIR` | `data/media` | Файлы для истории |

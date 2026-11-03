@@ -117,10 +117,11 @@ main-пайплайна. Ночные процессы читают `night_llm.t
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/api/memory` | Список/поиск (`query`, `category`, пагинация) |
-| POST | `/api/memory` | Создание + эмбеддинг + FAISS |
-| GET | `/api/memory/{mem_id}` | Детали |
-| PUT | `/api/memory/{mem_id}` | Обновление |
-| DELETE | `/api/memory/{mem_id}` | Удаление строки (hard delete) |
+| GET | `/api/memory/health` | `ntotal`/`db_total`/`db_indexed`/`pending` по обоим индексам |
+| POST | `/api/memory` | Создание + эмбеддинг + FAISS (`indexed=true/false`) |
+| GET | `/api/memory/{mem_id}` | Детали (`faiss_id`, `indexed`) |
+| PUT | `/api/memory/{mem_id}` | Обновление; смена `content` переэмбеддится |
+| DELETE | `/api/memory/{mem_id}` | Hard delete строки + удаление вектора |
 | POST | `/api/memory/rebuild-faiss` | Перестроение индекса с переэмбеддингом |
 
 ### Пользователи

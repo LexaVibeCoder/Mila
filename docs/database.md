@@ -73,11 +73,11 @@ CREATE TABLE chunks (
     content TEXT,                   -- "" у молчаливых ответов; плейсхолдер у медиа
     llm_full_response TEXT,         -- полный thoughts/ответ LLM
     type TEXT DEFAULT 'raw',        -- всегда 'raw'
-    faiss_id INTEGER,               -- обычно NULL
+    faiss_id INTEGER,               -- id в faiss_chunks.index (NULL = очередь)
     token_count INTEGER,            -- обычно 0
     time_start TEXT,                -- UTC isoformat
     time_end TEXT,                  -- не заполняется
-    kind TEXT DEFAULT 'text',       -- text | photo | voice | ... (миграция)
+    kind TEXT DEFAULT 'text',       -- text | photo | voice | silence | ...
     media_path TEXT                 -- путь к файлу в data/media
 );
 ```
@@ -90,7 +90,7 @@ CREATE TABLE chunks (
 CREATE TABLE memories (
     mem_id TEXT PRIMARY KEY,        -- uuid4
     user_id TEXT NOT NULL,
-    faiss_id INTEGER,
+    faiss_id INTEGER,               -- id в faiss_text.index (NULL = очередь)
     type TEXT DEFAULT 'fact',
     tag TEXT,                       -- JSON (поле tag, не tags)
     content TEXT,
@@ -115,15 +115,19 @@ CREATE TABLE media_logs (
     chat_id TEXT,
     user_id TEXT,
     timestamp TEXT DEFAULT (datetime('now')),
-    file_path TEXT,
+    file_path TEXT,                 -- NULL после detach/удаления файла
     vlm_description TEXT,
+    detached_at TEXT,               -- миграция: когда путь был очищен
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id),
     FOREIGN KEY(user_id) REFERENCES users(user_id)
 );
 ```
 
 Заполняется при скачивании фото/войса; `vlm_description` — плейсхолдер текста
-(отдельного captioner-а нет, описание даёт main LLM нативно).
+(отдельного captioner-а нет, описание даёт main LLM нативно). При ночной
+суммаризации `detach_media_by_chunk_ids()` очищает `chunks.media_path` и
+`media_logs.file_path`, выставляет `detached_at`, чтобы не оставалось путей к
+удалённым файлам.
 
 ### presence_state
 
@@ -262,25 +266,42 @@ CREATE TABLE diary_entries (
 );
 ```
 
-## 3. FAISS индекс
+## 3. FAISS индексы
 
-**Файл:** `data/faiss_text.index` (`FAISS_TEXT_PATH`; `faiss_image.index`
-зарезервирован, не используется).
+**Файлы:**
 
-- бинарный `IndexIDMap(IndexFlatL2)`;
-- размерность `EMBED_DIM` (по умолчанию **384**, не 768);
-- `id` FAISS = `memories.faiss_id`;
-- `save()` пишет только при `ntotal > 0`, атомарно (`.tmp` + `os.replace`) под
-  межпроцессным `flock`;
+- `data/faiss_text.index` (`FAISS_TEXT_PATH`) — `memories`, id = `memories.faiss_id`;
+- `data/faiss_chunks.index` (`FAISS_CHUNK_PATH`) — `chunks`, id = `chunks.faiss_id`;
+- `faiss_image.index` зарезервирован, не используется.
+
+Раздельные файлы не дают id из `chunks` совпасть с id `memories` (иначе
+`search_memory` мог бы вернуть чужой чанк вместо факта).
+
+- бинарный `IndexIDMap(IndexFlatL2)`, размерность `EMBED_DIM` (по умолчанию
+  **384**, не 768);
+- запись идёт через `core/memory/indexer.py` (`MemoryIndexer`): INSERT →
+  embedding → `add_new()` → `UPDATE faiss_id`;
+- `faiss_id IS NULL` = очередь переиндексации; её разбирает бот
+  (`MEMORY_REINDEX_INTERVAL_SEC`) и `POST /api/memory/rebuild-faiss`;
+- `save()` атомарен (`.tmp` + `os.replace`) и выполняется под межпроцессным
+  `flock`; пишется и пустой индекс (удаление последней памяти);
 - повреждённый индекс при старте переименовывается в `.corrupt-<ts>`;
+- `search()` перечитывает файл при изменении mtime/size — бот видит память,
+  созданную в Observatory, без перезапуска;
 - автосейв каждые `FAISS_SAVE_INTERVAL_MIN` минут и при `bot.stop()`;
-- перестроение — `POST /api/memory/rebuild-faiss` (переэмбеддинг всех
-  `memories.content`).
+- `GET /api/memory/health` сверяет `index.ntotal` с числом индексируемых строк.
+
+### Индексы SQLite
+
+`init_db()` создаёт `idx_memories_faiss` и `idx_chunks_faiss`. Сначала
+пробуется `UNIQUE` (защита от коллизий `faiss_id`); если в старой БД уже есть
+дубли, создаётся обычный индекс, а следующий rebuild чинит id.
 
 ## Связи
 
 ```
-memories.faiss_id              ──→ FAISS index id
+memories.faiss_id              ──→ faiss_text.index id
+chunks.faiss_id                ──→ faiss_chunks.index id
 chunks.chunk_id (TEXT UUID)     ──→ context_buffer.chat_*.source_chunk_id
 chunks.media_path               ──→ файл в data/media
 memories.user_id                ──→ users.user_id
@@ -291,8 +312,8 @@ sleep_message_queue.session_id  ──→ sleep_state.session_id
 sleep_transaction_staging.session_id ──→ sleep_state.session_id
 ```
 
-У чанков ключ `chunk_id` (TEXT); `chunks.faiss_id` обычно NULL — эмбеддинги
-строятся только для `memories`.
+У чанков ключ `chunk_id` (TEXT); `chunks.faiss_id` ведёт в отдельный
+`faiss_chunks.index`, а `memories.faiss_id` — в `faiss_text.index`.
 
 ## Инициализация
 

@@ -94,6 +94,9 @@ class MemoryItem(BaseModel):
     source_message_id: Optional[str] = None
     created_at: Optional[str] = None
     last_accessed_at: Optional[str] = None
+    # Whether the row has a vector in FAISS and is therefore searchable.
+    faiss_id: Optional[int] = None
+    indexed: bool = False
 
 
 class MemoryListResponse(BaseModel):

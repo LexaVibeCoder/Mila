@@ -7,10 +7,14 @@ Compose; отдельная установка Python/Node на хосте не 
 ## Быстрый старт
 
 ```bash
-cp .env.example .env
-# заполните API_ID, API_HASH, LLM_*, EMBED_*
+./start/docker.sh   # первый запуск создаст .env, сгенерирует TDLib-ключ и выйдет
+# заполните API_ID, API_HASH, LLM_*, EMBED_* (и EMBED_DIM, если нужна не 384)
 ./start/docker.sh
 ```
+
+Если `.env` уже существует, убедитесь, что в нём задан уникальный
+`TD_DATABASE_ENCRYPTION_KEY` (без него используется известный дефолтный ключ;
+менять ключ у уже созданной сессии нельзя).
 
 `start/docker.sh` проверит `.env`, наличие образа, TDLib-сессию и reranker.
 Если контейнеры уже запущены, скрипт их не трогает; если остановлены —
@@ -30,7 +34,7 @@ docker compose up -d --build
 ```text
 ./start/docker.sh
   ├─ docker + compose доступны?
-  ├─ .env есть? ──нет──> создать из .env.example и выйти
+  ├─ .env есть? ──нет──> создать из .env.example, сгенерировать TDLib-ключ и выйти
   ├─ обязательные значения .env? ──нет──> показать ключи и выйти
   ├─ образ есть? ──нет──> docker compose build
   ├─ TDLib-сессия есть? ──нет──> предложить войти (--login)
@@ -239,7 +243,8 @@ docker compose run --rm bot python install_reranker.py
 Скачивает `BAAI/bge-reranker-v2-m3` в путь из `RERANKER_MODEL_PATH` (по
 умолчанию `models/rerankers/BGE-Reranker-v2-m3/`) на хосте; каталог `./models`
 смонтирован read-write. Пропускает, если каталог уже существует и не пуст.
-Без reranker-а `search_memory` возвращает ошибку.
+Reranker опционален: без него `search_memory` работает по порядку FAISS, но
+качество выдачи ниже (executor ловит отсутствие модели и делает fallback).
 
 ## Пересборка фронтенда
 

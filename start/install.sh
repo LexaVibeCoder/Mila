@@ -18,6 +18,8 @@
 #      immediately, so it effectively verifies and skips). On the first login
 #      it asks whether to encrypt the database.
 #   4. BGE reranker (asks Y/n; default yes, skipped when the model is present).
+#   5. Observatory frontend (npm ci + npm run build; skipped when dist exists
+#      or npm is unavailable).
 #
 # It never starts the bot. Run it afterwards with: .venv/bin/python main.py
 set -u -o pipefail
@@ -64,7 +66,7 @@ ask_yes_no() {
 }
 
 usage() {
-    sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 for arg in "$@"; do
@@ -116,7 +118,7 @@ ensure_uv() {
 # 1. Virtual environment + dependencies
 # ---------------------------------------------------------------------------
 echo
-info "Step 1/4: Python environment"
+info "Step 1/5: Python environment"
 
 if [ -e "$VENV_DIR" ] && [ ! -x "$VENV_PY" ]; then
     die "$VENV_DIR exists but $VENV_PY is missing or not executable.
@@ -190,7 +192,7 @@ fi
 # 2. .env
 # ---------------------------------------------------------------------------
 echo
-info "Step 2/4: Configuration (.env)"
+info "Step 2/5: Configuration (.env)"
 
 CONFIG_CHECK=("$VENV_PY" "$PROJECT_ROOT/start/check_config.py")
 config_ok() { "${CONFIG_CHECK[@]}" >/dev/null 2>&1; }
@@ -224,7 +226,7 @@ info ".env is ready"
 # 3. TDLib session
 # ---------------------------------------------------------------------------
 echo
-info "Step 3/4: Telegram session"
+info "Step 3/5: Telegram session"
 
 if [ "$RUN_SESSION" -eq 0 ]; then
     info "--skip-session given, skipping"
@@ -269,7 +271,7 @@ fi
 # 4. Reranker
 # ---------------------------------------------------------------------------
 echo
-info "Step 4/4: Reranker model"
+info "Step 4/5: Reranker model"
 
 if [ -d "$RERANKER_DIR" ]; then
     info "Reranker already present at $RERANKER_DIR, skipping"
@@ -280,11 +282,34 @@ elif [ "$RERANKER_MODE" = "yes" ] || ask_yes_no "Download BGE-Reranker-v2-m3 (~2
     if "$VENV_PY" install_reranker.py; then
         info "Reranker installed"
     else
-        warn "reranker download failed; search_memory will not work."
+        warn "reranker download failed; search_memory will use FAISS order (lower quality)."
         warn "Retry later with: $VENV_PY install_reranker.py"
     fi
 else
     info "Skipping reranker"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Observatory frontend
+# ---------------------------------------------------------------------------
+echo
+info "Step 5/5: Observatory frontend"
+
+FRONTEND_DIR="$PROJECT_ROOT/Mila_observatory/frontend"
+if [ -f "$FRONTEND_DIR/dist/index.html" ]; then
+    info "Frontend already built at $FRONTEND_DIR/dist, skipping"
+elif command -v npm >/dev/null 2>&1; then
+    info "Building Observatory frontend (npm ci && npm run build)..."
+    if (cd "$FRONTEND_DIR" && npm ci && npm run build); then
+        info "Frontend built"
+    else
+        warn "frontend build failed; the panel will start without UI."
+        warn "Retry: cd '$FRONTEND_DIR' && npm ci && npm run build"
+    fi
+else
+    warn "npm not found; the panel will start without UI."
+    warn "Install Node.js 20+ and run: cd '$FRONTEND_DIR' && npm ci && npm run build"
+    warn "Or use Docker: ./start/docker.sh"
 fi
 
 # ---------------------------------------------------------------------------
@@ -294,4 +319,5 @@ echo
 echo "=== Installation complete ==="
 echo "Bot:      cd '$PROJECT_ROOT' && .venv/bin/python main.py"
 echo "Panel:    cd '$PROJECT_ROOT' && .venv/bin/python -m Mila_observatory.server"
-echo "Frontend: cd '$PROJECT_ROOT/Mila_observatory/frontend' && npm ci && npm run dev"
+echo "Frontend: cd '$PROJECT_ROOT/Mila_observatory/frontend' && npm ci && npm run build"
+echo "          (для разработки: npm run dev, Vite на :5173)"

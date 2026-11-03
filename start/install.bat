@@ -18,6 +18,8 @@ REM   3. TDLib session (create_session.py; an already authorized session exits
 REM      immediately, so it effectively verifies and skips). On the first login
 REM      it asks whether to encrypt the database.
 REM   4. BGE reranker (asks Y/n; default yes, skipped when the model is present).
+REM   5. Observatory frontend (npm ci + npm run build; skipped when dist exists
+REM      or npm is unavailable).
 REM
 REM It never starts the bot. Run it afterwards with: .venv\Scripts\python.exe main.py
 setlocal EnableDelayedExpansion
@@ -103,7 +105,7 @@ if errorlevel 1 (
 
 REM ------------------------------------------------- 1. venv + dependencies
 echo.
-echo --^> Step 1/4: Python environment
+echo --^> Step 1/5: Python environment
 if exist "%VENV_DIR%\" if not exist "%VENV_PY%" (
     echo ERROR: %VENV_DIR% exists but %VENV_PY% is missing. 1>&2
     echo        Remove the broken venv and re-run. 1>&2
@@ -206,7 +208,7 @@ echo --^> Dependencies installed
 REM ------------------------------------------------------------------- 2. .env
 :env_step
 echo.
-echo --^> Step 2/4: Configuration ^(.env^)
+echo --^> Step 2/5: Configuration ^(.env^)
 if exist "%ENV_FILE%" (
     echo --^> .env already exists, skipping creation
     goto :env_check
@@ -249,7 +251,7 @@ echo --^> .env is ready
 
 REM --------------------------------------------------------- 3. Telegram session
 echo.
-echo --^> Step 3/4: Telegram session
+echo --^> Step 3/5: Telegram session
 if "%RUN_SESSION%"=="0" (
     echo --^> --skip-session given, skipping
     goto :reranker_step
@@ -318,14 +320,14 @@ echo --^> Telegram session is ready
 REM ---------------------------------------------------------------- 4. reranker
 :reranker_step
 echo.
-echo --^> Step 4/4: Reranker model
+echo --^> Step 4/5: Reranker model
 if exist "%RERANKER_DIR%\" (
     echo --^> Reranker already present at %RERANKER_DIR%, skipping
-    goto :done
+    goto :frontend_step
 )
 if /i "%RERANKER_MODE%"=="no" (
     echo --^> --no-reranker given, skipping
-    goto :done
+    goto :frontend_step
 )
 if /i "%RERANKER_MODE%"=="yes" goto :reranker_install
 if "%ASSUME_YES%"=="1" goto :reranker_install
@@ -337,25 +339,33 @@ goto :reranker_install
 
 :reranker_skip
 echo --^> Skipping reranker
-goto :done
+goto :frontend_step
 
 :reranker_install
 echo --^> Downloading reranker ^(this can take a while^)...
 cd /d "%PROJECT_ROOT%"
 "%VENV_PY%" install_reranker.py
 if errorlevel 1 (
-    echo WARNING: reranker download failed; search_memory will not work. 1>&2
+    echo WARNING: reranker download failed; search_memory will use FAISS order ^(lower quality^). 1>&2
     echo          Retry later with: "%VENV_PY%" install_reranker.py 1>&2
 ) else (
     echo --^> Reranker installed
 )
+
+REM ---------------------------------------------------------------- 5. frontend
+:frontend_step
+echo.
+echo --^> Step 5/5: Observatory frontend
+call :build_frontend
+goto :done
 
 :done
 echo.
 echo === Installation complete ===
 echo Bot:      cd /d "%PROJECT_ROOT%" ^&^& .venv\Scripts\python.exe main.py
 echo Panel:    cd /d "%PROJECT_ROOT%" ^&^& .venv\Scripts\python.exe -m Mila_observatory.server
-echo Frontend: cd /d "%PROJECT_ROOT%\Mila_observatory\frontend" ^&^& npm ci ^&^& npm run dev
+echo Frontend: cd /d "%PROJECT_ROOT%\Mila_observatory\frontend" ^&^& npm ci ^&^& npm run build
+echo           ^(для разработки: npm run dev, Vite на :5173^)
 exit /b 0
 
 REM ---------------------------------------------------------------------------
@@ -377,4 +387,35 @@ if errorlevel 1 (
     exit /b 1
 )
 for /f "delims=" %%V in ('uv --version') do echo --^> uv installed: %%V
+exit /b 0
+
+REM ---------------------------------------------------------------------------
+REM Build the Observatory frontend when Node.js is available.
+REM ---------------------------------------------------------------------------
+:build_frontend
+if exist "%PROJECT_ROOT%\Mila_observatory\frontend\dist\index.html" (
+    echo --^> Frontend already built, skipping
+    exit /b 0
+)
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo WARNING: npm not found; the panel will start without UI. 1>&2
+    echo          Install Node.js 20+ and run: cd /d "%PROJECT_ROOT%\Mila_observatory\frontend" ^&^& npm ci ^&^& npm run build 1>&2
+    echo          Or use Docker: docker compose up -d --build 1>&2
+    exit /b 0
+)
+echo --^> Building Observatory frontend ^(npm ci ^&^& npm run build^)...
+pushd "%PROJECT_ROOT%\Mila_observatory\frontend"
+call npm ci
+if errorlevel 1 goto :frontend_build_failed
+call npm run build
+if errorlevel 1 goto :frontend_build_failed
+popd
+echo --^> Frontend built
+exit /b 0
+
+:frontend_build_failed
+popd
+echo WARNING: frontend build failed; the panel will start without UI. 1>&2
+echo          Retry: cd /d "%PROJECT_ROOT%\Mila_observatory\frontend" ^&^& npm ci ^&^& npm run build 1>&2
 exit /b 0

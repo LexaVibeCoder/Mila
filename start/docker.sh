@@ -20,9 +20,10 @@
 # `docker compose start`; only missing ones are created with
 # `docker compose up -d --no-recreate`.
 #
-# .env is created from .env.example on the first run; fill in the required
-# values and re-run. The TDLib session lives in the mila_data volume, so the
-# login must be done inside the container (`--login`), never on the host.
+# .env is created from .env.example on the first run, with a generated
+# TD_DATABASE_ENCRYPTION_KEY; fill in the required values and re-run. The TDLib
+# session lives in the mila_data volume, so the login must be done inside the
+# container (`--login`), never on the host.
 set -u -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,7 +43,7 @@ die() {
 }
 
 usage() {
-    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 for arg in "$@"; do
@@ -75,17 +76,52 @@ fi
 
 dc() { "${DC[@]}" "$@"; }
 
+generate_tdlib_key() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import secrets; print(secrets.token_hex(32))'
+    elif command -v python >/dev/null 2>&1; then
+        python -c 'import secrets; print(secrets.token_hex(32))'
+    else
+        return 1
+    fi
+}
+
+set_env_value() {
+    local key="$1" value="$2" file="$PROJECT_ROOT/.env" tmp
+    # Keep the temporary file next to .env so mv is atomic and preserves the
+    # directory's permissions/SELinux context (important for Docker env_file).
+    tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+    grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" > "$tmp" 2>/dev/null || true
+    # Ensure the appended line starts on a new line even if the source file
+    # has no trailing newline (e.g. a hand-edited .env).
+    printf '\n%s=%s\n' "$key" "$value" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
 ensure_env() {
     if [ ! -f "$PROJECT_ROOT/.env" ]; then
         cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env" \
             || die "cannot create .env from .env.example"
+
+        local tdlib_key
+        if tdlib_key="$(generate_tdlib_key)" && [ -n "$tdlib_key" ]; then
+            set_env_value TD_DATABASE_ENCRYPTION_KEY "$tdlib_key" \
+                || warn "could not write TD_DATABASE_ENCRYPTION_KEY to .env; set it manually."
+        else
+            warn "could not generate TD_DATABASE_ENCRYPTION_KEY (openssl/python not found); set it manually."
+        fi
+
         cat <<'EOF'
-Created .env from .env.example.
+Created .env from .env.example (TD_DATABASE_ENCRYPTION_KEY is generated when
+openssl/python is available).
 
 Fill in at least:
   API_ID, API_HASH
   LLM_API_BASE, LLM_API_KEY, MAIN_LLM_MODEL
   EMBED_API_BASE, EMBED_MODEL
+  EMBED_DIM (384 by default; must match EMBED_MODEL)
 
 Then re-run: ./start/docker.sh
 EOF
@@ -135,6 +171,10 @@ check_required_env() {
     fi
     if [ "${#missing[@]}" -gt 0 ]; then
         die ".env is missing required values: ${missing[*]}. See .env.example."
+    fi
+
+    if [ "$ACTION" != "reranker" ] && [ -z "$(env_get TD_DATABASE_ENCRYPTION_KEY)" ]; then
+        warn "TD_DATABASE_ENCRYPTION_KEY is empty: TDLib will use the built-in default key. Set a unique value before the first login."
     fi
 
     local publish_host password
@@ -209,7 +249,7 @@ check_reranker() {
         read -r -p "Download it now? [Y/n] " answer || answer=""
         case "$answer" in
             [nN]*)
-                warn "Skipping reranker; search_memory will fail until it is installed."
+                warn "Skipping reranker; search_memory will use FAISS order (lower quality)."
                 ;;
             *)
                 install_reranker

@@ -46,6 +46,12 @@ esac
 [ -x "$VENV_PY" ] || die "venv not found at $VENV_PY
        Run ./start/install.sh first."
 
+if [ ! -f "$PROJECT_ROOT/Mila_observatory/frontend/dist/index.html" ]; then
+    info "Frontend is not built; the panel will start without UI."
+    info "Build it: cd '$PROJECT_ROOT/Mila_observatory/frontend' && npm ci && npm run build"
+    info "Or use Docker: ./start/docker.sh"
+fi
+
 # Ports/address come from .env; never hardcoded here.
 panel_url() {
     "$VENV_PY" - <<'PY' 2>/dev/null

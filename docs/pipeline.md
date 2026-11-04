@@ -4,8 +4,8 @@
 
 `ThinkPipeline` — ядро рассуждения Милы. Это **direct-tools** цикл: LLM получает
 реальные функции (`enter_dialog`, `send_message`, `search_memory`, ...), а не
-обёртку `think()`. В диалоге ответ приходит обычным JSON-контентом
-`{"messages": [...]}`, пустой массив означает молчание.
+обёртку `think()`. В диалоге ответ приходит обычным текстом: пузыри разделяются
+пустой строкой, пустой ответ означает молчание.
 
 Название `ThinkPipeline` сохранено для совместимости; алиас — `MilaPipeline`.
 
@@ -24,15 +24,12 @@ process_message_stream() / process_message()
     │   ├── presence = get_presence()               (может меняться внутри цикла)
     │   ├── system_prompt = build_main_llm_system_prompt(...)  (заново каждый раз)
     │   ├── tools = get_tool_definitions(presence_state, include_proactive=...)
-    │   ├── если state == "dialog": response_format по `llm.response_format`
-    │   │   (json_schema/json_object/prompt; пустой ответ → ретрай prompt-only)
     │   ├── LLM.generate(messages, system_prompt, tools, tool_choice="auto")
     │   │
     │   ├── нет tool_calls:
-    │   │   ├── dialog → parse_chat_messages(content)
-    │   │   │   ├── невалидный JSON → system-reminder + ретрай
-    │   │   │   ├── [] → silence
-    │   │   │   └── 1–3 пузыря → reply
+    │   │   ├── dialog → split_reply_bubbles(content)
+    │   │   │   ├── пусто → silence
+    │   │   │   └── абзацы через пустую строку → reply
     │   │   └── rest/working:
     │   │       ├── пусто → silence
     │   │       └── текст → нарушение протокола → reminder + ретрай
@@ -57,9 +54,9 @@ process_message_stream() / process_message()
 
 | Состояние | Ответ | Инструменты |
 |-----------|-------|-------------|
-| `rest` | JSON-ответ невозможен; текст без тула игнорируется | `enter_dialog`, `send_message` (одна отмашка), `enter_working`, `start_sleep` |
+| `rest` | текстовый ответ здесь игнорируется | `enter_dialog`, `send_message` (одна отмашка), `enter_working`, `start_sleep` |
 | `working` | то же | `enter_dialog`, `send_message`, `enter_rest`, `start_sleep` |
-| `dialog` | JSON `{"messages": [{"content": ...}]}` (1–3) или `{"messages": []}` | `search_memory`, `write_diary`, `update_diary`, presence-тулы, `start_sleep` |
+| `dialog` | обычный текст; пузыри через пустую строку; пустой ответ = молчание | `search_memory`, `write_diary`, `update_diary`, presence-тулы, `start_sleep` |
 | `sleep` | пайплайн обычно не работает | `enter_dialog`, `start_sleep` |
 | proactive | `rest/working` + `peek_recent_chats` | те же + peek |
 
@@ -68,21 +65,23 @@ LLM снова — уже по правилам диалога. После `ente
 
 ## Формат ответа в диалоге
 
-```json
-{"messages": [{"content": "первый пузырь"}, {"content": "второй пузырь"}]}
+Ответ — обычный текст. Пузыри разделяются пустой строкой (`\n\n`, пробелы
+между переводами строк допускаются):
+
+```
+первый пузырь
+
+второй пузырь
 ```
 
-- максимум `MAX_BUBBLES = 3`; лишние отбрасываются;
-- пустой массив — валидное молчание;
-- код-фенсы и текст вокруг JSON вырезаются парсером;
-- ведущий `[YYYY-MM-DD HH:MM:SS]`, скопированный из истории, удаляется;
-- при поддержке провайдера запрашивается `response_format` по настройке
-  `llm.response_format`: `json_schema` (по умолчанию), `json_object` или
-  `prompt` (без нативного формата);
-- если провайдер отверг `response_format`, один раз повторяется prompt-only;
-- если под нативным форматом пришёл пустой `content` без tool_calls (так ведёт
-  себя, например, `xiaomi/mimo` на длинном промпте), итерация один раз
-  повторяется prompt-only, и до конца хода формат больше не запрашивается.
+- `split_reply_bubbles()` режет ответ по пустым строкам, лимита на число
+  пузырей нет;
+- одиночный `\n` внутри абзаца сохраняется как есть;
+- пустой или whitespace-only ответ — валидное молчание, ретрая нет;
+- ведущий `[YYYY-MM-DD HH:MM:SS]`, скопированный из истории, удаляется из
+  каждого пузыря;
+- `response_format` больше не запрашивается: провайдер получает обычный
+  текстовый ответ.
 
 ## Стриминговые события
 
@@ -179,7 +178,6 @@ base64 в ответ API не попадает.
 | Константа | Значение | Где | Описание |
 |-----------|----------|-----|----------|
 | `MAX_THINK_ITERATIONS` | 7 | `core/pipeline.py` | Fallback-лимит, runtime может переопределить |
-| `MAX_BUBBLES` | 3 | `core/pipeline.py` | Максимум пузырей в диалоге |
 | `MAX_HISTORY_IMAGES` | 3 | `core/media.py` | Фото, остающиеся нативными в истории |
 | `MAX_HISTORY_AUDIOS` | 2 | `core/media.py` | Аудио, остающиеся нативными в истории |
 | `CONTEXT_MAX_TOKENS` | 30000 | `config.py` | Лимит токенов сообщений в буфере |

@@ -3,13 +3,12 @@ Direct-tool reasoning pipeline.
 
 Scheme:
   rest/working --notification(last + 5-10 prev)--> enter_dialog -->
-  dialog --[search_memory/diary directly]--> JSON {"messages": [...]}.
+  dialog --[search_memory/diary directly]--> plain text reply.
 
 - tool_choice is always "auto": the model herself decides when a tool
   is needed.
-- dialog replies are strict JSON with 0-3 message bubbles; empty array
-  means no answer. response_format json_schema is requested when the
-  provider supports it, otherwise prompt + parser + retry enforce it.
+- dialog replies are plain text; bubbles are separated by blank lines.
+  An empty reply means no answer.
 - rest/working replies only via enter_dialog (full) or send_message
   (one short note); empty reply with no tools means no answer.
 
@@ -81,32 +80,6 @@ def _tool_choice() -> str:
     return "auto"
 
 
-def _response_format_mode() -> str:
-    """Observatory knob `llm.response_format`: json_schema | json_object | prompt.
-
-    `prompt` disables the native response_format entirely (prompt + parser
-    only) — the escape hatch for providers that return empty content under
-    structured output.
-    """
-    if HAS_OBSERVATORY:
-        try:
-            value = runtime_config.get("llm.response_format", "json_schema")
-            if value in ("json_schema", "json_object", "prompt"):
-                return value
-        except Exception:
-            pass
-    return "json_schema"
-
-
-def _dialog_response_format(mode: str) -> Optional[Dict[str, Any]]:
-    """Native response_format dict for a dialog turn (None = prompt-only)."""
-    if mode == "prompt":
-        return None
-    if mode == "json_object":
-        return {"type": "json_object"}
-    return {"type": "json_schema", "json_schema": CHAT_MESSAGES_SCHEMA}
-
-
 def _get_presence_state() -> dict:
     try:
         from core.presence import get_presence
@@ -125,35 +98,11 @@ REST_CONTENT_REMINDER = (
     "To skip, return an empty reply with no tool calls."
 )
 
-# Strict reply shape in dialog (also requested via API response_format).
-CHAT_MESSAGES_SCHEMA: Dict[str, Any] = {
-    "name": "chat_messages",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "messages": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {"content": {"type": "string"}},
-                    "required": ["content"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["messages"],
-        "additionalProperties": False,
-    },
-}
-
-DIALOG_JSON_REMINDER = (
-    "PROTOCOL: in dialog return ONLY one JSON object, no text around it: "
-    '{"messages": [{"content": "..."}]} (1-3 short bubbles) '
-    'or {"messages": []} to skip. No code fences.'
+DIALOG_REPLY_REMINDER = (
+    "PROTOCOL: in dialog reply with plain text only. "
+    "Separate message bubbles with a blank line. "
+    "An empty reply means no answer."
 )
-
-MAX_BUBBLES = 3
 
 
 def _strip_leading_timestamp(text: str) -> str:
@@ -161,45 +110,25 @@ def _strip_leading_timestamp(text: str) -> str:
     return re.sub(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*", "", text or "", count=1)
 
 
-def parse_chat_messages(raw: str) -> tuple[list[str] | None, str]:
-    """Parse dialog JSON into bubble texts.
+def split_reply_bubbles(raw: str) -> list[str]:
+    """Split a plain-text dialog reply into bubbles on blank lines.
 
-    Returns (bubbles, error). bubbles=None means parse/validation failed
-    (caller retries). Empty list is valid and means no answer.
+    A blank line (two or more newlines, whitespace allowed between them)
+    starts a new bubble. Single newlines stay inside one bubble. An empty
+    list means no answer.
     """
-    import re as _re
-    if raw is None:
-        return None, "empty reply"
-    text = raw.strip()
+    import re
+    if not raw:
+        return []
+    text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
-        return None, "empty reply"
-    # Tolerate code fences and surrounding text: extract first {...} block.
-    fence = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-    elif not text.startswith("{"):
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start:end + 1]
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, ValueError) as e:
-        return None, f"invalid JSON ({e})"
-    if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
-        return None, 'expected {"messages": [...]}'
+        return []
     bubbles: list[str] = []
-    for item in data["messages"][:MAX_BUBBLES]:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content", "")
-        if not isinstance(content, str):
-            continue
-        cleaned = _strip_leading_timestamp(content.strip())
+    for part in re.split(r"\n\s*\n+", text):
+        cleaned = _strip_leading_timestamp(part.strip())
         if cleaned:
             bubbles.append(cleaned)
-    # More than MAX_BUBBLES requested: extra ones are dropped (logged by caller).
-    return bubbles, ""
+    return bubbles
 
 
 class ThinkPipeline:
@@ -509,9 +438,6 @@ class ThinkPipeline:
         max_iterations = _max_iterations()
         choice = _tool_choice()
         iteration = 0
-        # Snapshot once per turn: a mid-turn Observatory change applies next turn.
-        format_mode = _response_format_mode()
-        use_response_format = format_mode != "prompt"
         # Facts already injected by search_memory during this turn. Shared by
         # every search so overlapping queries can't duplicate the same fact.
         seen_memories: set[str] = set()
@@ -531,47 +457,18 @@ class ThinkPipeline:
             # After enter_dialog the turn becomes dialog and peek drops out.
             tool_definitions = self._current_tool_defs(
                 include_proactive=bool(enable_peek and proactive_block))
-            want_json = state == "dialog"
-            fmt = _dialog_response_format(format_mode) if (want_json and use_response_format) else None
 
-            async def _call(fmt_override=fmt):
-                return await self.main_llm.generate(
-                    messages=messages,
-                    system_prompt=main_system_prompt,
-                    tools=tool_definitions if tool_definitions else None,
-                    tool_choice=choice if tool_definitions else "none",
-                    max_tokens=2048,
-                    temperature=self.main_llm.default_temperature,
-                    response_format=fmt_override,
-                )
-
-            try:
-                response = await _call()
-            except Exception as e:
-                # Provider without json_schema support: retry prompt-only once.
-                if want_json and fmt is not None and "response_format" in str(e).lower():
-                    print(f"  [Pipeline] response_format rejected ({e}), retrying prompt-only")
-                    use_response_format = False
-                    fmt = None
-                    response = await _call(None)
-                else:
-                    raise
+            response = await self.main_llm.generate(
+                messages=messages,
+                system_prompt=main_system_prompt,
+                tools=tool_definitions if tool_definitions else None,
+                tool_choice=choice if tool_definitions else "none",
+                max_tokens=2048,
+                temperature=self.main_llm.default_temperature,
+            )
 
             content = (response.get("thoughts", "") or "")
             tool_calls = response.get("tool_calls", None)
-
-            # Some providers silently return empty content when a structured
-            # response_format is combined with a long prompt (observed with
-            # xiaomi/mimo on OpenRouter: finish_reason=stop, content=null).
-            # Retry the same iteration prompt-only instead of burning all
-            # iterations on empties, and stay prompt-only for the rest of the turn.
-            if want_json and fmt is not None and not content.strip() and not tool_calls:
-                print("  [Pipeline] empty reply with response_format → retrying prompt-only")
-                use_response_format = False
-                fmt = None
-                response = await _call(None)
-                content = (response.get("thoughts", "") or "")
-                tool_calls = response.get("tool_calls", None)
 
             preview = content[:120].replace("\n", " ")
             print(f"  Content: {preview}..." if preview else "  Content: <empty>")
@@ -597,18 +494,9 @@ class ThinkPipeline:
             # ---- No tools: verdict depends on state ----
             if not actions:
                 if state == "dialog":
-                    bubbles, err = parse_chat_messages(content)
-                    if bubbles is None:
-                        print(f"  [Dialog JSON invalid → retry: {err}]")
-                        messages.append({"role": "system", "content": DIALOG_JSON_REMINDER})
-                        if content.strip():
-                            messages.append({"role": "assistant", "content": content})
-                        if iteration >= max_iterations:
-                            yield {"kind": "silence", "reason": f"bad dialog JSON: {err}"}
-                            return
-                        continue
+                    bubbles = split_reply_bubbles(content)
                     if not bubbles:
-                        yield {"kind": "silence", "reason": "empty messages array"}
+                        yield {"kind": "silence", "reason": "empty reply"}
                         return
                     target = str(presence.get("focus_chat_id") or req_chat)
                     yield {"kind": "reply_bubbles", "texts": bubbles,
@@ -736,7 +624,7 @@ class ThinkPipeline:
                 return
             messages.append({"role": "system", "content": (
                 "No answer yet. "
-                + (DIALOG_JSON_REMINDER if _get_presence_state().get("state") == "dialog"
+                + (DIALOG_REPLY_REMINDER if _get_presence_state().get("state") == "dialog"
                    else "Answer via tools or skip with an empty reply.")
             )})
 

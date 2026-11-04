@@ -77,11 +77,6 @@ class RuntimeConfig:
                 # "none" disables reasoning; providers accept none/low/medium/high
                 # (OpenRouter also minimal/xhigh/max). Sent on every request.
                 "reasoning_effort": "none",
-                # Dialog reply format: json_schema (native schema, default) |
-                # json_object (native JSON mode) | prompt (no response_format,
-                # prompt instructions only — for providers that return empty
-                # content under structured output).
-                "response_format": "json_schema",
                 # Raw extra_body for provider-specific knobs (e.g. llama.cpp
                 # chat_template_kwargs), merged with the reasoning field.
                 "extra_body": {},

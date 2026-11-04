@@ -163,7 +163,6 @@ API-ключи в runtime config **не хранятся**: `llm.api_key` и `ni
     "presence_penalty": null,
     "tool_choice": "auto",
     "reasoning_effort": "none",
-    "response_format": "json_schema",
     "extra_body": {}
   },
   "night_llm": {
@@ -247,12 +246,6 @@ API-ключи в runtime config **не хранятся**: `llm.api_key` и `ni
   плоский `reasoning_effort`. `extra_body` (JSON-объект) добавляет
   провайдерские поля (например `chat_template_kwargs` для llama.cpp) и
   объединяется с reasoning-настройкой. UI — `/model`.
-- **`llm.response_format`** — формат ответа в диалоге: `json_schema`
-  (нативная схема, по умолчанию), `json_object` (нативный JSON mode) или
-  `prompt` (без `response_format`, только инструкции в промпте). Читается
-  пайплайном в начале каждого хода. Если провайдер вернул пустой `content`
-  под нативным форматом, пайплайн один раз повторяет итерацию prompt-only и
-  дальше в этом ходу `response_format` не использует. UI — `/model`.
 - **`pipeline.max_think_iterations`** читается на каждом запуске (по умолчанию 7);
   константа `MAX_THINK_ITERATIONS = 7` — fallback.
 - **`persona.parameters.*`** хранятся и редактируются, но в system prompt
@@ -345,7 +338,7 @@ DIALOG_IDLE_CHECK_INTERVAL_SECONDS=30
 | Модуль | Что читает |
 |--------|------------|
 | `Mila_observatory/llm_manager.py` | `llm.*`, `night_llm.*` |
-| `core/pipeline.py` | `llm.tool_choice` (переопределяет в auto), `llm.response_format`, `pipeline.max_think_iterations` |
+| `core/pipeline.py` | `llm.tool_choice` (переопределяет в auto), `pipeline.max_think_iterations` |
 | `core/tools/executor.py` | `tools.*`, `proactive.default_peek_limit/max_chats`, `presence_state` |
 | `core/llm/persona.py` | `persona.custom_text` (полностью заменяет статику) |
 | `core/proactive.py` | `proactive.*` |

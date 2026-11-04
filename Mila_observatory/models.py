@@ -53,9 +53,6 @@ class ModelParams(BaseModel):
     reasoning_effort: Optional[str] = Field(
         default=None, pattern="^(none|minimal|low|medium|high|xhigh|max)$"
     )
-    response_format: Optional[str] = Field(
-        default=None, pattern="^(json_schema|json_object|prompt)$"
-    )
     extra_body: Optional[Dict[str, Any]] = None
 
 

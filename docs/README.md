@@ -12,7 +12,7 @@
 
 | Что умеет | Как это работает |
 |-----------|------------------|
-| Диалог с LLM | Пайплайн рассуждения, тулзы, JSON-ответы, имитация typing и presence |
+| Диалог с LLM | Пайплайн рассуждения, тулзы, текстовые пузыри, имитация typing и presence |
 | Долгая память | FAISS + SQLite, изоляция по пользователям, поиск с reranker |
 | Дневник | Записи по категориям, подмешиваются в промпт |
 | Ночная рефлексия | Транзакционный цикл с откатом и восстановлением после сбоев |
@@ -164,9 +164,9 @@ Observatory ◄──► runtime_config.json ◄──► бот
 | [Конфигурация](config.md) | Два слоя: `.env` (`config.py`) и `runtime_config.json` |
 | [Docker](docker.md) | Compose, `start/docker.sh`, healthcheck, volumes, пересборка фронтенда |
 | [Сообщения](messaging.md) | Уведомления, presence, typing, медиа, TDLib-адаптер и auth |
-| [Основной пайплайн](pipeline.md) | `ThinkPipeline`: direct-tools, JSON-ответы, поток событий |
+| [Основной пайплайн](pipeline.md) | `ThinkPipeline`: direct-tools, текстовые пузыри, поток событий |
 | [Тулзы](tools.md) | Состав тулзов по состояниям, executor, `peek_recent_chats` |
-| [LLM-клиент](llm-client.md) | OpenAI-совместимая обёртка, ретраи, `response_format`, маскировка ключей |
+| [LLM-клиент](llm-client.md) | OpenAI-совместимая обёртка, ретраи, маскировка ключей |
 | [Персона](persona.md) | System prompt из `core/llm/prompts/*/*.md`, состояние presence |
 | [Память](memory.md) | FAISS + SQLite `memories`, автобиографическая память, изоляция по пользователю |
 | [Контекстный буфер](context-buffer.md) | Per-chat SQLite-буфер, аварийное сжатие по токенам, повторное подключение медиа |

@@ -24,13 +24,7 @@ def test_observatory_port_is_an_int_setting():
     assert 0 < settings.OBSERVATORY_PORT < 65536
 
 
-def test_model_params_accepts_only_known_response_formats():
-    import pytest
-    from pydantic import ValidationError
-
+def test_model_params_has_no_response_format_knob():
     from Mila_observatory.models import ModelParams
 
-    for value in ("json_schema", "json_object", "prompt"):
-        assert ModelParams(response_format=value).response_format == value
-    with pytest.raises(ValidationError):
-        ModelParams(response_format="xml")
+    assert "response_format" not in ModelParams.model_fields

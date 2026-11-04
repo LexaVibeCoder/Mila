@@ -3,8 +3,8 @@
 **Файл:** `core/llm/client.py`
 
 OpenAI-совместимая обёртка: горячая реконфигурация, ретраи с backoff,
-`response_format`, fallback при отказе от нативного аудио. Базовый URL
-нормализуется `normalize_api_base()` (достройка `/v1`).
+fallback при отказе от нативного аудио. Базовый URL нормализуется
+`normalize_api_base()` (достройка `/v1`).
 
 ## Класс LLMClient
 
@@ -43,14 +43,11 @@ result = await client.generate(
     temperature=None,
     max_retries=3,
     retry_delay=2.0,
-    response_format=None,            # optional dict
 )
 ```
 
 - `system_prompt` препендится как `{"role": "system", ...}`;
 - `tools`/`tool_choice` отправляются только если передан `tools`;
-- `response_format` передаётся провайдеру как есть (пайплайн использует
-  настройку `llm.response_format`, по умолчанию `json_schema`);
 - `reasoning_effort`/`extra_body` добавляются, если заданы (см. ниже);
 - возвращает:
 
@@ -181,9 +178,9 @@ frequency_penalty/presence_penalty/tool_choice/reasoning_effort/extra_body`.
 ThinkPipeline
     ├── system_prompt собирается заново каждую итерацию
     ├── tool_choice = "auto" (runtime "required" переопределяется)
-    ├── LLMClient.generate(..., response_format=json_schema в dialog)
+    ├── LLMClient.generate(...) без response_format
     ├── tool_calls → direct actions
-    ├── ответ без tools в dialog → JSON {"messages": [...]}
+    ├── ответ без tools в dialog → текст, пузыри через пустую строку
     └── действия → NeedsTracker.apply_action_effect()
 ```
 

@@ -139,7 +139,6 @@ class LLMClient:
         system_prompt: Optional[str] = None,
         max_retries: int = 3,
         retry_delay: float = 2.0,
-        response_format: Optional[Dict[str, Any]] = None,
     ) -> dict:
         import time
         import asyncio
@@ -173,9 +172,6 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
-
-        if response_format is not None:
-            kwargs["response_format"] = response_format
 
         last_error = None
         audio_stripped = False
@@ -219,8 +215,8 @@ class LLMClient:
 
             has_tool_calls = hasattr(message, 'tool_calls') and message.tool_calls
             # Empty content with no tools is valid: rest/working silence,
-            # or a tool-only turn. Only missing choices are retried above.
-            # (Dialog JSON replies are non-empty; {"messages": []} stays silent.)
+            # a dialog "no answer", or a tool-only turn. Only missing
+            # choices are retried above.
 
             tool_calls = None
             if has_tool_calls:

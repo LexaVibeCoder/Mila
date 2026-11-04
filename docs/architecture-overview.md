@@ -13,9 +13,9 @@
 | `presence.py` | `PresenceManager` — состояния `rest/dialog/working/sleep`, авто-выход из диалога в rest |
 | `media.py` | Нативный vision/audio вход: ресайз фото → `image_url`, ogg/opus → wav → `input_audio`, персистентное хранение |
 | `tg_auth.py` | Интерактивный auth TDLib (телефон/код/2FA/email/QR, предупреждения для Docker без TTY) |
-| `pipeline.py` | `ThinkPipeline` — direct-tools цикл: LLM → tool calls или JSON-ответ, до 7 итераций |
+| `pipeline.py` | `ThinkPipeline` — direct-tools цикл: LLM → tool calls или текстовый ответ, до 7 итераций |
 | `proactive.py` | Проактивный планировщик: State Agent после глобальной тишины, ручной trigger, `peek_recent_chats` |
-| `llm/client.py` | `LLMClient` — OpenAI-совместимая обёртка, ретраи, `response_format`, fallback без аудио |
+| `llm/client.py` | `LLMClient` — OpenAI-совместимая обёртка, ретраи, fallback без аудио |
 | `llm/persona.py` | Сборка system prompt из `llm/prompts/*/*.md` + presence/needs/дневник |
 | `llm/prompts/` | 26 `.md`-фрагментов: persona, relationship, context, diary, states |
 | `llm/embeddings.py` | Эмбеддинг-клиент (Ollama native / OpenAI-compatible, взаимный fallback) |
@@ -96,7 +96,7 @@
    ├── system prompt собирается заново на каждой итерации под текущий presence;
    ├── набор тулзов зависит от состояния (rest/dialog/working/proactive);
    ├── LLM.generate(...) с tool_choice="auto";
-   ├── dialog: модель возвращает JSON {"messages": [...]} (1–3 пузыря) или [];
+   ├── dialog: модель возвращает обычный текст, пузыри через пустую строку;
    ├── rest/working: только enter_dialog / send_message / смена состояния;
    ├── search_memory / peek_recent_chats / diary → инъекция результата → повтор;
    ├── enter_* → prompt пересобирается, LLM вызывается в новом состоянии;
@@ -117,11 +117,11 @@
 
 ## Ключевые паттерны
 
-- **Direct tools вместо `think()`-обёртки**: LLM вызывает настоящие функции (`enter_dialog`, `send_message`, `search_memory`, ...). В диалоге ответ — обычный JSON-контент, а не tool call.
+- **Direct tools вместо `think()`-обёртки**: LLM вызывает настоящие функции (`enter_dialog`, `send_message`, `search_memory`, ...). В диалоге ответ — обычный текст, а не tool call.
 - **`tool_choice` всегда `auto`**: runtime-значение `required` принудительно переопределяется в пайплайне; иначе модель не смогла бы просто ответить или промолчать.
 - **Состояние определяет инструменты**: `get_tool_definitions(presence_state=...)` отдаёт только релевантный набор; после `enter_*` prompt и tools пересобираются.
-- **JSON-ответы в диалоге**: `response_format` по настройке `llm.response_format` (`json_schema`/`json_object`/`prompt`); при отказе провайдера или пустом ответе — prompt + парсер + ретрай. Пустой массив = молчание.
-- **Пузыри**: ответ в диалоге — 0–3 коротких сообщения; отправка последовательная, с typing и паузами.
+- **Текстовые ответы в диалоге**: модель пишет обычный текст, пузыри разделяются пустой строкой; пустой ответ = молчание. `response_format` не используется.
+- **Пузыри**: число абзацев не ограничено, персона просит 1–3 коротких сообщения; отправка последовательная, с typing и паузами.
 - **Прерывание**: новое сообщение или печать собеседника отменяют генерацию/отправку; недоставленный батч возвращается в очередь.
 - **Проактивность через JSON-мост**: Observatory пишет команду в `runtime_config`, bot-процесс подхватывает её в течение ~10с и пишет `last_run`.
 - **Транзакционный сон**: изменения стейджатся в `sleep_transaction_staging` → атомарный commit или rollback; состояние переживает рестарт через wall-clock deadline в БД.

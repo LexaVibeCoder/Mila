@@ -120,7 +120,6 @@ async def test_pipeline_shares_seen_set_between_searches(monkeypatch):
     monkeypatch.setattr(pipeline_module, "build_main_llm_system_prompt",
                         lambda *a, **k: "system prompt")
     monkeypatch.setattr(pipeline_module, "_max_iterations", lambda: 3)
-    monkeypatch.setattr(pipeline_module, "_response_format_mode", lambda: "prompt")
 
     responses = [
         {
@@ -133,7 +132,7 @@ async def test_pipeline_shares_seen_set_between_searches(monkeypatch):
             "reasoning": "",
         },
         {
-            "thoughts": '{"messages": [{"content": "ok"}]}',
+            "thoughts": "ok",
             "tool_calls": None,
             "finish_reason": "stop",
             "reasoning": "",

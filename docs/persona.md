@@ -108,7 +108,7 @@ build_main_llm_system_prompt(user_id, chat_id, my_user_id)
 Модель видит **только один** файл состояния:
 
 - `rest.md` — три варианта: `enter_dialog`, разовый `send_message`, промолчать;
-- `dialog.md` — формат JSON `{"messages": [...]}`, 1–3 пузыря, `[]` = молчание;
+- `dialog.md` — обычный текст, пузыри через пустую строку, пустой ответ = молчание;
 - `working.md` — как rest, но с «занята».
 
 Неизвестное состояние падает в `rest`. Блок `format_state_block()` только

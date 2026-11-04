@@ -10,7 +10,7 @@ get_tool_definitions(presence_state="rest", include_proactive=False) -> list[dic
 ```
 
 `silence` остался в runtime-конфиге для совместимости, но **не входит** в
-definitions: молчание = пустой ответ / `{"messages": []}`.
+definitions: молчание = пустой ответ.
 
 ## Доступные действия
 
@@ -26,7 +26,7 @@ definitions: молчание = пустой ответ / `{"messages": []}`.
 | `update_diary` | dialog | `entry!`, `entry_id!`, `category?` | Обновление записи |
 | `peek_recent_chats` | proactive (rest/working) | `limit_per_chat?`, `chat_ids?` | Последние сообщения по всем чатам |
 
-> В диалоге ответ — JSON-контент, а не tool call. `send_message` в диалоге
+> В диалоге ответ — обычный текст, а не tool call. `send_message` в диалоге
 > отсутствует. В состоянии `sleep` доступны `enter_dialog` и `start_sleep`
 > (пайплайн там почти не работает).
 
@@ -175,5 +175,5 @@ LLM → tool_calls
         ├── search_memory / peek_recent_chats → контекст → перевызов LLM
         ├── write/update_diary → подтверждение → перевызов LLM
         ├── start_sleep → ночной цикл → завершение как silence
-        └── нет тулзов в dialog → JSON {"messages": [...]} → reply
+        └── нет тулзов в dialog → текст, пузыри через пустую строку → reply
 ```

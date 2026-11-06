@@ -95,13 +95,21 @@ executor разрешает алиас в ID до изменения presence и
 thought       → {"type": "thought", "thoughts": "..."}
 action        → {"type": "action", "action": {...}}
 search_result → {"type": "search_result", "content": "..."}   (memory или peek)
-reply         → {"type": "reply", "texts": [...], "text": "...", "chat_id": "...", "via": "bubbles"|"send_message_brush_off"}
+reply         → {"type": "reply", "texts": [...], "text": "...", "via": "bubbles"|"send_message_brush_off"}
 silence       → {"type": "silence", "reason": "..."}
 done          → {"type": "done", "result": {...}}
 error         → {"type": "error", "error": "..."}
 ```
 
+Событие `reply` **не содержит получателя**: маршрут определяется `TurnContext`
+(владелец хода или явно разрешённая цель), а не глобальным `presence`.
+`_run_stream`/`process_message_stream` принимают `turn=TurnContext(...)`;
+внутри `presence` снимается один раз на старте хода и перечитывается только
+после собственного `enter_dialog/enter_rest/enter_working` этого же хода.
+
 `process_message()` выполняет тот же цикл и возвращает `result` целиком.
+`result["reply_chat_id"]` остаётся для логов/Observatory и вычисляется из
+`turn.resolve_target()`, а не из события.
 
 ## Результат
 

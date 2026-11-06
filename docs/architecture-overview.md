@@ -93,16 +93,18 @@
    сначала суммаризируются, затем удаляются (постфактум, без потери при сбое).
 6. _build_histories(): summary + новейшие сообщения в лимите; префиксы времени.
 7. ThinkPipeline.process_message_stream():
-   ├── system prompt собирается заново на каждой итерации под текущий presence;
+   ├── system prompt и тулзы — из снимка presence на старте хода (TurnContext);
    ├── набор тулзов зависит от состояния (rest/dialog/working/proactive);
    ├── LLM.generate(...) с tool_choice="auto";
    ├── dialog: модель возвращает обычный текст, пузыри через пустую строку;
    ├── rest/working: только enter_dialog / send_message / смена состояния;
    ├── search_memory / peek_recent_chats / diary → инъекция результата → повтор;
-   ├── enter_* → prompt пересобирается, LLM вызывается в новом состоянии;
+   ├── enter_* → снимок обновляется ТОЛЬКО этим ходом, LLM вызывается заново;
    └── start_sleep / пустой ответ → завершение без отправки.
-8. queue.py: reply-событие → проверки прерывания и сна → send_typing →
-   пауза 0.3–1.0с → send_text для каждого пузыря → chunks + context_buffer.
+8. queue.py: reply-событие (без chat_id) → проверки прерывания и сна →
+   получатель из TurnContext (владелец хода / явный grant) →
+   core.delivery.deliver_messages: send_typing → пауза 0.3–1.0с → send_text
+   для каждого пузыря → chunks + context_buffer в тот же чат.
    Текст в rest без enter_dialog игнорируется; fallback-отправки больше нет.
 9. Фоновые циклы:
    ├── auto-rest: dialog без активности 5 мин → rest;

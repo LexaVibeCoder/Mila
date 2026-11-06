@@ -43,7 +43,7 @@ def make_pipeline(monkeypatch):
         monkeypatch.setattr(pipeline, "_attach_media",
                             lambda messages, media, default_chat_id=None: messages)
         monkeypatch.setattr(pipeline, "_current_tool_defs",
-                            lambda include_proactive=False: [])
+                            lambda include_proactive=False, state=None: [])
         return pipeline, fake
 
     return build
@@ -89,8 +89,7 @@ async def test_plain_text_reply_is_split_and_sent_as_bubbles(make_pipeline):
                                                  request_chat_id="chat-1"))
 
     assert events[-1] == {"kind": "reply_bubbles",
-                          "texts": ["первое", "второе"],
-                          "target_chat_id": "chat-1"}
+                          "texts": ["первое", "второе"]}
     assert "response_format" not in fake.calls[0]
 
 

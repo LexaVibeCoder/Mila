@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 
 from config import settings
+from core.delivery import TurnContext
 from core.llm.client import LLMClient
 from core.tools.executor import ToolExecutor, get_tool_definitions
 from core.llm.persona import build_main_llm_system_prompt
@@ -164,8 +165,12 @@ class ThinkPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _current_tool_defs(self, include_proactive: bool = False) -> List[Dict]:
-        state = _get_presence_state().get("state", "rest")
+    def _current_tool_defs(self, include_proactive: bool = False,
+                           state: str | None = None) -> List[Dict]:
+        # `state` comes from the turn snapshot. Re-reading global presence here
+        # would let a parallel chat's enter_dialog change this turn's tools.
+        if state is None:
+            state = _get_presence_state().get("state", "rest")
         try:
             return get_tool_definitions(presence_state=state,
                                         include_proactive=include_proactive)
@@ -173,15 +178,19 @@ class ThinkPipeline:
             # Old signature fallback (should not happen after migration).
             return get_tool_definitions()
 
-    def _build_notification_block(self, batch_text: str, chat_id: str | None = None) -> Optional[str]:
+    def _build_notification_block(self, batch_text: str, chat_id: str | None = None,
+                                  presence: dict | None = None) -> Optional[str]:
         """Explicit notification wrapper for rest/working.
 
         History (agent_internal_history) already carries 5-10+ previous
         messages within the token limit; this block marks which part is the
         NEW notification vs context so the model in rest can decide whether
         enter_dialog is worth it.
+
+        `presence` is the turn snapshot; without it the current global state
+        is read (legacy callers/tests).
         """
-        presence = _get_presence_state()
+        presence = presence if presence is not None else _get_presence_state()
         state = presence.get("state", "rest")
         if state not in ("rest", "working"):
             return None
@@ -407,6 +416,7 @@ class ThinkPipeline:
         media: Optional[Dict[str, Any]],
         request_user_id: str | None = None,
         request_chat_id: str | None = None,
+        turn: TurnContext | None = None,
         enable_peek: bool = False,
         proactive_block: str | None = None,
     ):
@@ -416,21 +426,38 @@ class ThinkPipeline:
         mutate self.user_id/self.chat_id (queue pinning), so the loop must
         never read self.* mid-flight — only these locals.
 
+        `turn` owns delivery: the reply steps deliberately carry no chat id,
+        so the caller (queue/proactive) can only send to the turn owner or an
+        explicitly granted target. Presence is snapshotted once here; a
+        parallel turn switching focus cannot change this turn's mode, prompt
+        or tools mid-flight. Only a switch performed by THIS turn refreshes it.
+
         Yields internal dicts:
           {"kind": "llm", "content": str, "tool_calls": [...], "finish_reason": str}
           {"kind": "action", "action": executed_dict}
-          {"kind": "reply_bubbles", "texts": [...], "target_chat_id": str}
+          {"kind": "reply_bubbles", "texts": [...]}
           {"kind": "reply_tool", "action": executed send_message dict}
           {"kind": "silence", "reason": str}
         """
         req_user = request_user_id or self.user_id
         req_chat = request_chat_id or self.chat_id
+        # Snapshot presence once for the whole turn (see docstring).
+        presence = (
+            dict(turn.presence) if turn is not None
+            else _get_presence_state()
+        )
+        state = presence.get("state", "rest")
+        # A proactive turn has no owner chat yet: its target is the dialog it
+        # opens, or the dialog that is already open at turn start.
+        if turn is not None and turn.proactive and state == "dialog":
+            turn.allow(presence.get("focus_chat_id"))
         messages = list(agent_internal_history)
         if proactive_block:
             # Proactive turn: instructions + chat list on top, no fake notification.
             messages.append({"role": "system", "content": proactive_block})
         else:
-            notif_block = self._build_notification_block(user_message or "", chat_id=req_chat)
+            notif_block = self._build_notification_block(user_message or "", chat_id=req_chat,
+                                                         presence=presence)
             if notif_block:
                 messages.append({"role": "system", "content": notif_block})
         # Always attach: history media (last 3 photos + 2 audios) must load
@@ -446,19 +473,20 @@ class ThinkPipeline:
 
         while iteration < max_iterations:
             iteration += 1
-            presence = _get_presence_state()
-            state = presence.get("state", "rest")
+            # `presence`/`state` are the turn snapshot, refreshed below only
+            # when THIS turn switches state itself. Parallel turns must not
+            # bleed their focus into this prompt/tools.
             print(f"\n── Iteration {iteration}/{max_iterations} [{state}] ──")
 
-            # Presence may have changed mid-loop (enter_dialog etc.) —
-            # rebuild prompt + tools every iteration so rules match state.
             main_system_prompt = build_main_llm_system_prompt(
-                req_user, chat_id=req_chat, my_user_id=self.my_user_id
+                req_user, chat_id=req_chat, my_user_id=self.my_user_id,
+                presence=presence,
             )
             # Peek is proactive-only: keep reactive turns clean.
             # After enter_dialog the turn becomes dialog and peek drops out.
             tool_definitions = self._current_tool_defs(
-                include_proactive=bool(enable_peek and proactive_block))
+                include_proactive=bool(enable_peek and proactive_block),
+                state=state)
 
             response = await self.main_llm.generate(
                 messages=messages,
@@ -500,9 +528,9 @@ class ThinkPipeline:
                     if not bubbles:
                         yield {"kind": "silence", "reason": "empty reply"}
                         return
-                    target = str(presence.get("focus_chat_id") or req_chat)
-                    yield {"kind": "reply_bubbles", "texts": bubbles,
-                           "target_chat_id": target}
+                    # No target here: the recipient is the turn owner (or an
+                    # explicit grant), decided by the turn context in routing.
+                    yield {"kind": "reply_bubbles", "texts": bubbles}
                     return
                 text = content.strip()
                 if not text:
@@ -552,6 +580,23 @@ class ThinkPipeline:
                 if atype in ("enter_dialog", "enter_rest", "enter_working") \
                         and status == "switched":
                     presence_switched = True
+                    if turn is not None and atype == "enter_dialog":
+                        # A proactive turn has no chat of its own: the chat it
+                        # just entered is the explicit destination for the
+                        # reply that follows in this same turn.
+                        if turn.proactive:
+                            turn.allow(executed.get("chat_id"))
+                    # Update the local snapshot from OUR action only — never
+                    # re-read global presence (another turn may be switching).
+                    if atype == "enter_dialog":
+                        presence = {**presence, "state": "dialog",
+                                    "focus_chat_id": executed.get("chat_id"),
+                                    "focus_user_name": executed.get("user_name")}
+                    else:
+                        presence = {**presence, "state": executed.get("state", atype),
+                                    "focus_chat_id": None,
+                                    "focus_user_name": None}
+                    state = presence.get("state", state)
                     from core.db import get_chat_alias
                     target = (get_chat_alias(executed["chat_id"])
                               if executed.get("chat_id") else atype)
@@ -565,6 +610,10 @@ class ThinkPipeline:
 
                 if atype == "send_message" and status == "ready":
                     if (executed.get("text") or "").strip():
+                        # The model picked the destination explicitly (alias
+                        # was resolved by the executor) — allow that target.
+                        if turn is not None:
+                            turn.allow(executed.get("chat_id"))
                         send_tool_reply = executed
                     continue
 
@@ -637,7 +686,7 @@ class ThinkPipeline:
                 return
             messages.append({"role": "system", "content": (
                 "No answer yet. "
-                + (DIALOG_REPLY_REMINDER if _get_presence_state().get("state") == "dialog"
+                + (DIALOG_REPLY_REMINDER if state == "dialog"
                    else "Answer via tools or skip with an empty reply.")
             )})
 
@@ -658,6 +707,7 @@ class ThinkPipeline:
         request_chat_id: str | None = None,
         enable_peek: bool = False,
         proactive_block: str | None = None,
+        turn: TurnContext | None = None,
     ) -> Dict[str, Any]:
         total_start = time.time()
         req_user = request_user_id or self.user_id
@@ -675,6 +725,7 @@ class ThinkPipeline:
             async for step in self._run_stream(
                 user_message, agent_internal_history, media,
                 request_user_id=req_user, request_chat_id=req_chat,
+                turn=turn,
                 enable_peek=enable_peek, proactive_block=proactive_block,
             ):
                 kind = step.get("kind")
@@ -692,14 +743,18 @@ class ThinkPipeline:
                 elif kind == "reply_bubbles":
                     reply_texts = list(step["texts"])
                     reply_text = "\n".join(reply_texts)
-                    reply_chat_id = step["target_chat_id"]
+                    reply_chat_id = (turn.resolve_target() if turn is not None
+                                     else req_chat) or ""
                     reply_via = "bubbles"
                     get_needs_tracker().apply_action_effect("send_message")
                     break
                 elif kind == "reply_tool":
                     a = step["action"]
                     reply_text = (a.get("text") or "").strip()
-                    reply_chat_id = str(a.get("chat_id", req_chat))
+                    reply_chat_id = (
+                        turn.resolve_target(a.get("chat_id")) if turn is not None
+                        else str(a.get("chat_id", req_chat))
+                    ) or ""
                     reply_via = "send_message_brush_off"
                     all_actions.append(a) if a not in all_actions else None
                     break
@@ -803,17 +858,21 @@ class ThinkPipeline:
         request_chat_id: str | None = None,
         enable_peek: bool = False,
         proactive_block: str | None = None,
+        turn: TurnContext | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Streaming version consumed by core/queue.py.
+        """Streaming version consumed by core/queue.py and core/proactive.py.
 
         Yields:
           {"type": "thought", "thoughts": str}
           {"type": "action", "action": Dict}
           {"type": "search_result", "content": str}
-          {"type": "reply", "texts": [...], "chat_id": str, "via": str}
+          {"type": "reply", "texts": [...], "via": str}   # no chat id!
           {"type": "silence", "reason": str}
           {"type": "done", "result": Dict}
           {"type": "error", "error": str}
+
+        The reply event intentionally has no destination: the consumer sends
+        via the turn context (owner chat or explicit grant).
         """
         total_start = time.time()
         req_user = request_user_id or self.user_id
@@ -831,6 +890,7 @@ class ThinkPipeline:
             async for step in self._run_stream(
                 user_message, agent_internal_history, media,
                 request_user_id=req_user, request_chat_id=req_chat,
+                turn=turn,
                 enable_peek=enable_peek, proactive_block=proactive_block,
             ):
                 kind = step.get("kind")
@@ -858,11 +918,12 @@ class ThinkPipeline:
                 elif kind == "reply_bubbles":
                     reply_texts = list(step["texts"])
                     reply_text = "\n".join(reply_texts)
-                    reply_chat_id = step["target_chat_id"]
+                    reply_chat_id = (turn.resolve_target() if turn is not None
+                                     else req_chat) or ""
                     reply_via = "bubbles"
                     get_needs_tracker().apply_action_effect("send_message")
                     yield {"type": "reply", "texts": reply_texts, "text": reply_text,
-                           "chat_id": reply_chat_id, "via": "bubbles"}
+                           "via": "bubbles"}
                     break
                 elif kind == "reply_tool":
                     a = step["action"]
@@ -870,10 +931,13 @@ class ThinkPipeline:
                     # for the action itself (applied inside _run_stream), so just yield.
                     reply_text = (a.get("text") or "").strip()
                     reply_texts = [reply_text] if reply_text else []
-                    reply_chat_id = str(a.get("chat_id", req_chat))
+                    reply_chat_id = (
+                        turn.resolve_target(a.get("chat_id")) if turn is not None
+                        else str(a.get("chat_id", req_chat))
+                    ) or ""
                     reply_via = "send_message_brush_off"
                     yield {"type": "reply", "texts": reply_texts, "text": reply_text,
-                           "chat_id": reply_chat_id, "via": "send_message_brush_off"}
+                           "via": "send_message_brush_off"}
                     break
                 elif kind == "silence":
                     silence_reason = step.get("reason", "")

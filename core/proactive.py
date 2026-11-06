@@ -15,11 +15,13 @@ Chat ordering: oldest activity first, freshest last (bottom of context).
 from __future__ import annotations
 
 import asyncio
-import random
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
+
+from core.delivery import TurnContext, deliver_messages
 
 _LEADING_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*")
 
@@ -135,6 +137,21 @@ async def run_proactive_turn(bot) -> dict:
     block = build_proactive_block(chats)
     print(f"[Proactive] write_to_user: {len(chats)} чатов, запуск хода")
 
+    # A proactive turn starts without an owner chat. Its delivery target is
+    # granted by enter_dialog (or by the already-open dialog in the snapshot).
+    try:
+        from core.presence import get_presence
+        presence_snapshot = get_presence()
+    except Exception:
+        presence_snapshot = {"state": "rest", "focus_chat_id": None}
+    turn = TurnContext(
+        turn_id=uuid.uuid4().hex,
+        chat_id="proactive",
+        user_id="proactive",
+        presence=presence_snapshot,
+        proactive=True,
+    )
+
     reply_texts: list[str] = []
     reply_chat_id = ""
     reply_via = ""
@@ -151,6 +168,7 @@ async def run_proactive_turn(bot) -> dict:
             media={"chat_id": "proactive"},
             request_user_id="proactive",
             request_chat_id="proactive",
+            turn=turn,
             enable_peek=True,
             proactive_block=block,
         ):
@@ -175,7 +193,7 @@ async def run_proactive_turn(bot) -> dict:
                     print(f"  [Proactive] send_message ready: {(a.get('text') or '')[:80]}")
             elif etype == "reply":
                 reply_texts = list(ev.get("texts") or [])
-                reply_chat_id = str(ev.get("chat_id", "") or "")
+                reply_chat_id = turn.resolve_target() or ""
                 reply_via = ev.get("via", "")
                 break
             elif etype == "silence":
@@ -189,7 +207,7 @@ async def run_proactive_turn(bot) -> dict:
                 res = ev.get("result", {})
                 if not reply_texts and res.get("reply_texts"):
                     reply_texts = list(res.get("reply_texts") or [])
-                    reply_chat_id = str(res.get("reply_chat_id", "") or "")
+                    reply_chat_id = turn.resolve_target() or ""
                     reply_via = res.get("reply_via", "")
                 if not silence_reason:
                     silence_reason = res.get("silence_reason", "")
@@ -259,48 +277,26 @@ async def run_proactive_turn(bot) -> dict:
     if not cleans:
         return {"success": True, "reply_texts": [], "silence_reason": "empty reply"}
 
-    print(f"[Proactive] SENDING via {reply_via} {len(cleans)} bubble(s) → {reply_chat_id}")
+    delivery = await deliver_messages(
+        client=bot.app,
+        target=reply_chat_id,
+        bubbles=cleans,
+        my_user_id=str(bot.me.id),
+        indexer=getattr(bot, "indexer", None),
+        via=reply_via,
+    )
+    if not delivery.ok or not delivery.sent:
+        print(f"[Proactive] send failed: {delivery.error or 'no bubbles sent'}")
+        return {"success": False, "error": delivery.error or "delivery failed"}
     try:
-        from core.tg_adapter import send_text, send_typing
-        from core.memory.indexer import get_indexer
-        from core.context.buffer import push_message
-        try:
-            await send_typing(bot.app, int(reply_chat_id))
-        except Exception:
-            pass
-        await asyncio.sleep(random.uniform(0.3, 1.0))
-        for i, clean in enumerate(cleans):
-            if i > 0:
-                try:
-                    await send_typing(bot.app, int(reply_chat_id))
-                except Exception:
-                    pass
-                await asyncio.sleep(random.uniform(0.3, 1.0))
-            await send_text(bot.app, int(reply_chat_id), clean)
-            try:
-                indexer = getattr(bot, "indexer", None) or get_indexer()
-                chunk_id = indexer.add_chunk(
-                    reply_chat_id, str(bot.me.id), content=clean,
-                    token_count=0, type="raw")
-            except Exception:
-                chunk_id = None
-            try:
-                push_message(reply_chat_id, clean, source_chunk_id=chunk_id,
-                             role="assistant")
-            except Exception:
-                pass
-            print(f"[Proactive] ✓ bubble {i + 1}/{len(cleans)} sent")
-        try:
-            from Mila_observatory.api.dashboard import add_event
-            add_event("proactive", f"Написала первой в чат {reply_chat_id} ({len(cleans)} сообщ.)")
-        except Exception:
-            pass
-        return {"success": True, "reply_texts": cleans,
-                "reply_chat_id": reply_chat_id, "via": reply_via,
-                "actions": all_actions}
-    except Exception as e:
-        print(f"[Proactive] send failed: {e}")
-        return {"success": False, "error": str(e)}
+        from Mila_observatory.api.dashboard import add_event
+        add_event("proactive",
+                  f"Написала первой в чат {reply_chat_id} ({delivery.sent} сообщ.)")
+    except Exception:
+        pass
+    return {"success": True, "reply_texts": cleans,
+            "reply_chat_id": reply_chat_id, "via": reply_via,
+            "actions": all_actions}
 
 
 def _apply_needs_override(needs: dict, override: dict | None) -> dict:

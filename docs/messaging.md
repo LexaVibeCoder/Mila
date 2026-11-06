@@ -110,17 +110,24 @@ loop:
 6. **Needs pre-filter**: `fatigue > 0.85` и ночь (22–7ч) → auto-silence без LLM
    (`add_chunk(content="")` + `apply_action_effect("silence")`).
 7. Без typing-индикатора во время решения — осознанно: уведомление не приказ.
-8. `_build_histories` → снимок `request_user_id/request_chat_id` →
-   `process_message_stream(...)`:
+8. `_build_histories` → снимок `TurnContext(turn_id, chat_id, user_id,
+   presence)` → `process_message_stream(..., turn=ctx)`:
    - `thought` — обновляет `full_response`;
    - `action` — лог действия (отправка не здесь);
-   - `reply` — `_send_bubbles(texts, target, via)`:
-     pre-send interruption-check → проверка сна → `send_typing` → пауза
-     0.3–1.0с → последовательный `send_text`; после каждого пузыря `add_chunk`
-     + `push_message(role="assistant")`;
+   - `reply` — `_send_bubbles(texts, ctx, via)`:
+     pre-send interruption-check → проверка сна → **единый шлюз**
+     `core.delivery.deliver_messages` (`send_typing` → пауза 0.3–1.0с →
+     `send_text`; после каждого пузыря `add_chunk` + `push_message(
+     role="assistant")` в тот же чат);
    - `silence` — флаг, отправки нет;
    - `search_result` — лог;
    - `error` — лог.
+
+   Получатель берётся из `ctx.resolve_target()`: владелец хода, а при
+   `send_message` с алиасом / `enter_dialog` в proactive-ходе — явно
+   разрешённая цель. Событие `reply` не несёт `chat_id`; прежняя формула
+   `presence.focus_chat_id or req_chat` удалена. Если валидной цели нет —
+   доставка блокируется (fail closed).
 9. Post: interruption → restore + restart. Если ничего не отправлено —
    сохраняется только `chunks` с пустым `content` (в контекстный буфер пустой
    ответ не попадает). **Fallback-отправки `thoughts` больше нет.**
@@ -132,6 +139,10 @@ loop:
 - `send_message` в rest/working — одна короткая отписка, не диалог.
 - В `dialog` ответ — обычный текст, пузыри разделяются пустой строкой;
   пауза и typing между пузырями.
+- **Получатель определяется владельцем хода** (`TurnContext.chat_id`), а не
+  `presence.focus_chat_id`. `presence` задаёт только режим/промпт/тулы.
+  Единственные исключения — явный `send_message` с алиасом и `enter_dialog`
+  в proactive-ходе (они добавляют цель в `allowed`).
 - Новое сообщение или печать собеседника во время генерации/отправки отменяют
   ход; батч возвращается в очередь.
 

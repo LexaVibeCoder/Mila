@@ -159,12 +159,13 @@ def _get_session_time_info(chat_id: str, my_user_id: str) -> str:
     return ""
 
 
-def _get_presence_state_name() -> str:
+def _get_presence_state() -> dict:
     try:
         from core.presence import get_presence
-        return get_presence().get("state", "rest")
+        return get_presence()
     except Exception:
-        return "rest"
+        return {"state": "rest", "focus_chat_id": None,
+                "focus_user_name": None, "note": "", "updated_at": None}
 
 
 @lru_cache(maxsize=1)
@@ -179,7 +180,13 @@ def _load_state_block(state: str, chat_id: str | None = None) -> str:
     return text.replace("{chat_id}", str(chat_id or ""))
 
 
-def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: str = None) -> str:
+def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: str = None,
+                                 presence: dict | None = None) -> str:
+    """Assemble the system prompt for one turn.
+
+    ``presence`` is the turn snapshot (see core.delivery.TurnContext). When
+    omitted, the current global presence is read (legacy callers/tests).
+    """
     user_name, relationship, now = _get_profile_context(user_id)
     static_prefix = _get_static_prompt_prefix()
 
@@ -199,9 +206,8 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
 
     effective_chat_id = chat_id if chat_id not in ("proactive", "system") else None
     header_name = user_name
+    presence = presence if presence is not None else _get_presence_state()
     if chat_id == "proactive":
-        from core.presence import get_presence
-        presence = get_presence()
         if presence.get("state") == "dialog":
             effective_chat_id = presence.get("focus_chat_id")
             header_name = presence.get("focus_user_name") or user_name
@@ -234,12 +240,14 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
         parts.append(format_state_block(
             current_chat_id=str(chat_id) if chat_id else None,
             current_user_name=user_name,
+            presence=presence,
         ))
     except Exception:
         pass
 
     # State behavior — exactly one file, only what is needed now.
-    state = _get_presence_state_name()
+    # The turn snapshot wins over global presence.
+    state = presence.get("state") or "rest"
     parts.append(_load_state_block(state, chat_alias))
 
     diary_context = get_today_diary_context()

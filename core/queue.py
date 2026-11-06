@@ -8,9 +8,9 @@ interrupt a human mid-typing.
 """
 
 import asyncio
-import random
 import re
 import time
+import uuid
 
 from pytdbot import types
 
@@ -19,12 +19,13 @@ from core.db import (
     ensure_user_exists, ensure_chat_exists, get_user_info,
     get_user_display_name, log_media,
 )
+from core.delivery import TurnContext, deliver_messages
 from core.memory.indexer import get_indexer
 from core.context.buffer import push_message
 from core.needs.tracker import get_tracker as get_needs_tracker
+from core.presence import get_presence
 from core.tg_adapter import (
     normalize_event, download_notification_media,
-    send_text, send_typing,
     parse_chat_action_update, is_typing_like_action, is_cancel_action,
 )
 
@@ -452,12 +453,30 @@ class MessageCoordinate:
             request_user_id = user_id
             request_chat_id = chat_id
 
+            # Snapshot presence once per turn. The pipeline never re-reads the
+            # global state mid-flight, so a parallel chat switching focus can't
+            # change this turn's mode, prompt, tools or recipient.
+            try:
+                presence_snapshot = get_presence()
+            except Exception:
+                presence_snapshot = {"state": "rest"}
+            turn = TurnContext(
+                turn_id=uuid.uuid4().hex,
+                chat_id=chat_id,
+                user_id=user_id,
+                presence=presence_snapshot,
+            )
+
             full_response = ""
             has_silence_action = False
             sent_any = False
 
-            async def _send_bubbles(texts: list, target_chat_id: str, via: str) -> bool:
-                """Pre-send checks + typing + sequential send + storage."""
+            async def _send_bubbles(texts: list, turn: TurnContext, via: str) -> bool:
+                """Pre-send checks + the shared delivery gateway.
+
+                The destination comes from `turn` (owner chat or an explicit
+                grant), never from the pipeline event or global presence.
+                """
                 nonlocal sent_any
                 cleans = [strip_leading_timestamp((t or "").strip())
                           for t in (texts or [])]
@@ -478,39 +497,30 @@ class MessageCoordinate:
                         self._restore_pending(chat_id, batch_text)
                     print(f"[Batch] Interrupted before send ({pre_send}) — batch restored")
                     return False
-                print(f"\n[SENDING via {via}] {len(cleans)} bubble(s)... → chat {target_chat_id}")
-                try:
-                    await send_typing(client, int(target_chat_id))
-                except Exception:
-                    pass
-                await asyncio.sleep(random.uniform(0.3, 1.0))
-                all_ok = True
-                for i, clean in enumerate(cleans):
-                    if i > 0:
-                        if self._interrupted(chat_id, event) is not None:
-                            break
-                        try:
-                            await send_typing(client, int(target_chat_id))
-                        except Exception:
-                            pass
-                        await asyncio.sleep(random.uniform(0.3, 1.0))
-                    try:
-                        await send_text(client, int(target_chat_id), clean)
-                        self._add_chunk(
-                            target_chat_id, str(bot.me.id),
-                            content=clean,
-                            llm_full_response=full_response or clean,
-                            token_count=0,
-                            type='raw'
-                        )
-                        push_message(target_chat_id, clean, source_chunk_id=None, role="assistant")
-                        sent_any = True
-                        print(f"[✓] Bubble {i + 1}/{len(cleans)} sent")
-                    except Exception as e:
-                        print(f"[❌ ERROR] Failed to send: {e}")
-                        all_ok = False
-                        break
-                return all_ok
+
+                target = turn.resolve_target()
+                if target is None:
+                    # Fail closed: no valid owner/granted target for this turn.
+                    print(f"[❌ Delivery] turn {turn.turn_id} has no valid target "
+                          f"(owner={turn.chat_id}) — reply blocked")
+                    return False
+
+                async def _bubble_guard(_index: int) -> bool:
+                    return self._interrupted(chat_id, event) is None
+
+                result = await deliver_messages(
+                    client=client,
+                    target=target,
+                    bubbles=cleans,
+                    my_user_id=str(bot.me.id),
+                    indexer=getattr(bot, "indexer", None),
+                    via=via,
+                    full_response=full_response,
+                    before_bubble=_bubble_guard,
+                )
+                if result.sent:
+                    sent_any = True
+                return result.ok and result.sent > 0
 
             async for gen_event in bot.pipeline.process_message_stream(
                 user_message=batch_text,
@@ -520,6 +530,7 @@ class MessageCoordinate:
                 media=media,
                 request_user_id=request_user_id,
                 request_chat_id=request_chat_id,
+                turn=turn,
             ):
                 # If a new message arrived or the peer started typing
                 # mid-generation → stop and wait for their message.
@@ -557,11 +568,11 @@ class MessageCoordinate:
                         print("\n[Diary] Entry updated")
                 elif etype == "reply":
                     texts = gen_event.get("texts") or ([gen_event.get("text")] if gen_event.get("text") else [])
-                    target = str(gen_event.get("chat_id", chat_id) or chat_id)
                     via = gen_event.get("via", "bubbles")
                     joined = "\n".join(t for t in texts if t)
                     full_response = joined or full_response
-                    ok = await _send_bubbles(texts, target, via)
+                    # Recipient comes from the turn owner/grant, not the event.
+                    ok = await _send_bubbles(texts, turn, via)
                     if not ok:
                         # Interrupted before send → restart batch.
                         post_check = self._interrupted(chat_id, event)

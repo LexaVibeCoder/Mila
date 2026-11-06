@@ -10,6 +10,7 @@ import pytest
 import core.db as db
 import core.pipeline as pipeline_module
 import core.llm.persona as persona
+from core.delivery import TurnContext
 from core.events import Notification
 from core.pipeline import ThinkPipeline
 from core.presence import enter_dialog, enter_rest, get_presence, format_state_block
@@ -238,10 +239,14 @@ async def test_proactive_peek_then_enter_dialog_routes_real_chat(database, monke
     pipeline = ThinkPipeline(None, None, "proactive", "proactive")
     monkeypatch.setattr(pipeline, "_attach_media", lambda messages, *a, **k: messages)
     block = build_proactive_block(db.get_chats_by_last_activity())
+    turn = TurnContext(turn_id="turn-1", chat_id="proactive", user_id="proactive",
+                       presence=get_presence(), proactive=True)
     events = [event async for event in pipeline._run_stream(
         "", [], None, request_user_id="proactive", request_chat_id="proactive",
-        enable_peek=True, proactive_block=block)]
-    assert events[-1] == {"kind": "reply_bubbles", "texts": ["hello"], "target_chat_id": "10001"}
+        turn=turn, enable_peek=True, proactive_block=block)]
+    # The reply event carries no recipient; the turn owns routing.
+    assert events[-1] == {"kind": "reply_bubbles", "texts": ["hello"]}
+    assert turn.resolve_target() == "10001"
     assert get_presence()["focus_chat_id"] == "10001"
     assert "Диалог: чат алекс с Алекс." in calls[-1]["system_prompt"]
     assert "10001" not in json.dumps(calls, ensure_ascii=False)

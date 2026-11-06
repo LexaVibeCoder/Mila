@@ -146,7 +146,7 @@ async def test_pipeline_shares_seen_set_between_searches(monkeypatch):
                         lambda messages, media, default_chat_id=None: messages)
     monkeypatch.setattr(pipeline, "_build_notification_block", lambda *a, **k: "")
     monkeypatch.setattr(pipeline, "_current_tool_defs",
-                        lambda include_proactive=False: [{"type": "function"}])
+                        lambda include_proactive=False, state=None: [{"type": "function"}])
 
     seen_sets = []
 

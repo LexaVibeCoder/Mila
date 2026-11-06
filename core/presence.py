@@ -224,7 +224,8 @@ def stop_auto_rest_scheduler() -> None:
 
 
 def format_state_block(current_chat_id: str | None = None,
-                       current_user_name: str | None = None) -> str:
+                       current_user_name: str | None = None,
+                       presence: dict | None = None) -> str:
     """Location block for the system prompt (no behavior rules here).
 
     Behavior lives in prompts/states/{rest,dialog,working}.md — the model
@@ -233,8 +234,8 @@ def format_state_block(current_chat_id: str | None = None,
     """
     from core.db import get_chat_alias
 
-    p = get_presence()
-    state = p["state"]
+    p = presence if presence is not None else get_presence()
+    state = p.get("state", "rest")
     lines = ["## Где ты"]
     if state == "rest":
         lines.append("Ты отдыхаешь (rest).")

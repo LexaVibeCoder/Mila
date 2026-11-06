@@ -1,0 +1,170 @@
+"""Turn ownership and the single outbound delivery gateway.
+
+The recipient of a reply is decided by the chat that OWNS the turn, never by
+the global presence focus. ``presence`` decides HOW Mila behaves (state,
+prompt, tools); it must not decide WHERE the message goes.
+
+A turn may explicitly allow another destination:
+
+- ``send_message`` with a resolved alias (the model picked a chat), and
+- a proactive turn that entered a dialog (it had no chat to begin with).
+
+Everything else is rejected before anything is sent (fail closed), so a stale
+or foreign chat id can never silently redirect a reply.
+
+Keeping the chunk/context writes here means every sent bubble is recorded in
+exactly the chat it was delivered to, and only after a successful send.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import random
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable, Optional
+
+from core.context.buffer import push_message
+from core.memory.indexer import get_indexer
+from core.tg_adapter import send_text, send_typing
+
+# Identifiers that are not Telegram chats (pipeline/queue pseudo-chats).
+PSEUDO_CHATS = frozenset({"", "proactive", "system"})
+
+
+def is_chat_target(value: str | None) -> bool:
+    """True when value can be passed to TDLib as a chat id."""
+    raw = str(value or "").strip()
+    return bool(raw) and raw not in PSEUDO_CHATS and raw.lstrip("-").isdigit()
+
+
+@dataclass
+class TurnContext:
+    """Immutable identity of a turn + explicit delivery grants.
+
+    ``chat_id``/``user_id``/``presence`` are snapshotted once when the turn
+    starts. ``presence`` is a dict from ``core.presence.get_presence()`` so the
+    pipeline never has to re-read global state mid-flight (a parallel turn
+    switching focus must not change this turn's mode, prompt or recipient).
+    """
+
+    turn_id: str
+    chat_id: str
+    user_id: str
+    presence: dict = field(default_factory=dict)
+    proactive: bool = False
+    _granted: list[str] = field(default_factory=list, repr=False)
+
+    @property
+    def mode(self) -> str:
+        return str(self.presence.get("state") or "rest")
+
+    @property
+    def presence_epoch(self) -> Optional[str]:
+        return self.presence.get("updated_at")
+
+    def allow(self, chat_id: str | None) -> None:
+        """Explicitly allow one more delivery target for this turn."""
+        cid = str(chat_id or "").strip()
+        if is_chat_target(cid) and cid not in self._granted:
+            self._granted.append(cid)
+
+    def resolve_target(self, requested: str | None = None) -> Optional[str]:
+        """Return a valid target, or None when the request is not allowed.
+
+        With no ``requested`` value: the last explicit grant wins (proactive
+        ``enter_dialog`` / ``send_message``), otherwise the turn owner.
+        With a ``requested`` value: it must be the owner or an explicit grant.
+        """
+        if requested is not None:
+            raw = str(requested).strip()
+            if raw == str(self.chat_id) or raw in self._granted:
+                return raw if is_chat_target(raw) else None
+            return None
+        if self._granted:
+            return self._granted[-1]
+        return str(self.chat_id) if is_chat_target(self.chat_id) else None
+
+
+@dataclass
+class DeliveryResult:
+    ok: bool
+    target: Optional[str]
+    sent: int = 0
+    error: Optional[str] = None
+
+
+async def deliver_messages(
+    *,
+    client,
+    target: str,
+    bubbles: list[str],
+    my_user_id: str,
+    indexer=None,
+    via: str = "bubbles",
+    full_response: str = "",
+    before_bubble: Callable[[int], Awaitable[bool]] | None = None,
+) -> DeliveryResult:
+    """Send text bubbles to ``target`` and record each one after the send.
+
+    ``before_bubble(i)`` is an optional async guard called before bubbles
+    after the first one (used by the reactive worker for interruption checks);
+    returning False aborts the rest of the batch without failing it.
+    """
+    cleans = [t for t in (bubbles or []) if (t or "").strip()]
+    if not cleans:
+        return DeliveryResult(ok=False, target=target, error="empty")
+    if not is_chat_target(target):
+        return DeliveryResult(ok=False, target=target, error="invalid target")
+
+    if indexer is None:
+        try:
+            indexer = get_indexer()
+        except Exception:
+            indexer = None
+
+    print(f"\n[SENDING via {via}] {len(cleans)} bubble(s)... → chat {target}")
+    try:
+        await send_typing(client, int(target))
+    except Exception:
+        pass
+    await asyncio.sleep(random.uniform(0.3, 1.0))
+
+    sent = 0
+    for i, clean in enumerate(cleans):
+        if i > 0:
+            if before_bubble is not None and not await before_bubble(i):
+                break
+            try:
+                await send_typing(client, int(target))
+            except Exception:
+                pass
+            await asyncio.sleep(random.uniform(0.3, 1.0))
+        try:
+            await send_text(client, int(target), clean)
+        except Exception as e:
+            print(f"[Send Error] {target}: {e}")
+            return DeliveryResult(ok=False, target=target, sent=sent,
+                                  error=str(e))
+
+        sent += 1
+        # The message is already delivered: record it in the SAME chat.
+        # A storage failure must not trigger a re-send (that would duplicate),
+        # so both writes are best-effort and independent.
+        chunk_id = None
+        if indexer is not None:
+            try:
+                chunk_id = indexer.add_chunk(
+                    target, my_user_id, content=clean,
+                    llm_full_response=full_response or clean,
+                    token_count=0, type="raw",
+                )
+            except Exception as e:
+                print(f"[Delivery] chunk write failed for {target}: {e}")
+        try:
+            push_message(target, clean, source_chunk_id=chunk_id,
+                         role="assistant")
+        except Exception as e:
+            print(f"[Delivery] buffer write failed for {target}: {e}")
+        print(f"[✓] Bubble {i + 1}/{len(cleans)} sent")
+
+    return DeliveryResult(ok=True, target=target, sent=sent)

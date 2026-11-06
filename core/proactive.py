@@ -87,6 +87,8 @@ def format_relative_ru(last_at: str | None) -> str:
 
 def build_proactive_block(chats: list[dict]) -> str:
     """Top-of-context instructions + chat list old->new (no messages here)."""
+    from core.db import get_chat_alias
+
     lines = [
         "Ты хочешь кому-то написать. Это твоё собственное желание после тишины, "
         "а не ответ на уведомление.",
@@ -95,15 +97,18 @@ def build_proactive_block(chats: list[dict]) -> str:
     ]
     for ch in chats:
         cid = ch.get("chat_id", "?")
-        name = ch.get("chat_name") or cid[:8]
+        name = ch.get("chat_name") or "Без имени"
+        alias = get_chat_alias(cid)
+        if not alias:
+            continue
         rel = format_relative_ru(ch.get("last_at"))
-        lines.append(f"Чат «{name}» ({cid}) — последнее сообщение {rel}")
+        lines.append(f"Чат «{name}» (алиас: {alias}) — последнее сообщение {rel}")
     lines += [
         "",
         "Как действовать:",
-        "1. Можешь СРАЗУ выбрать один чат и вызвать enter_dialog с его chat_id "
+        "1. Можешь СРАЗУ выбрать один чат и вызвать enter_dialog с его chat_alias "
         "(тебя позовут в диалог, там и напишешь), либо отправить одну короткую "
-        "записку через send_message (chat_id + text).",
+        "записку через send_message (chat_alias + text).",
         "2. Можешь СНАЧАЛА вызвать peek_recent_chats (можно без параметров — "
         "тогда вернутся последние сообщения из каждого чата одновременно), "
         "посмотреть их и только потом решить кому писать. limit_per_chat ставишь "

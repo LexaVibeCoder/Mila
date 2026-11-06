@@ -231,15 +231,17 @@ def format_state_block(current_chat_id: str | None = None,
     sees exactly one of them. This block only says where she is and who
     writes, with display names, not bare ids.
     """
+    from core.db import get_chat_alias
+
     p = get_presence()
     state = p["state"]
     lines = ["## Где ты"]
     if state == "rest":
         lines.append("Ты отдыхаешь (rest).")
     elif state == "dialog":
-        focus = p.get("focus_user_name") or p.get("focus_chat_id") or "?"
-        fid = p.get("focus_chat_id") or "?"
-        lines.append(f"Ты в диалоге с {focus} (чат {fid}).")
+        focus = p.get("focus_user_name") or "собеседник"
+        alias = get_chat_alias(p["focus_chat_id"]) if p.get("focus_chat_id") else None
+        lines.append(f"Ты в диалоге с {focus} (алиас чата: {alias or 'неизвестен'}).")
     elif state == "working":
         extra = f" ({p['note']})" if p.get("note") else ""
         lines.append(f"Ты занята своим делом{extra}.")
@@ -248,13 +250,14 @@ def format_state_block(current_chat_id: str | None = None,
     else:
         lines.append(f"Состояние: {state}.")
 
-    if current_chat_id is not None:
-        who = current_user_name or current_chat_id
+    if current_chat_id is not None and current_chat_id not in ("proactive", "system"):
+        who = current_user_name or "собеседник"
+        alias = get_chat_alias(current_chat_id) or "неизвестен"
         if state == "dialog" and str(p.get("focus_chat_id")) != str(current_chat_id):
             lines.append(
                 f"Это уведомление не из твоего диалога: пишет {who} "
-                f"(чат {current_chat_id})."
+                f"(алиас чата: {alias})."
             )
         else:
-            lines.append(f"Уведомление от {who} (чат {current_chat_id}).")
+            lines.append(f"Уведомление от {who} (алиас чата: {alias}).")
     return "\n".join(lines)

@@ -118,7 +118,8 @@ build_main_llm_system_prompt(user_id, chat_id, my_user_id)
 
 ### `context/header.md`
 
-Плейсхолдеры: `{now}`, `{user_name}`, `{chat_id}`.
+Плейсхолдеры: `{now}`, `{user_name}`, `{chat_alias}`. Старый `{chat_id}` при
+сборке также заменяется на алиас, а не на внутренний ID.
 
 ### `context/needs.md`
 

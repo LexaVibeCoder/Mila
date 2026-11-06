@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from core.db import get_user_info, get_recent_chunks
+from core.db import get_user_info, get_recent_chunks, get_chat_alias
 from core.diary.manager import get_today_diary_context
 from core.needs.tracker import get_tracker as get_needs_tracker
 
@@ -197,11 +197,21 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     except Exception:
         pass
 
+    effective_chat_id = chat_id if chat_id not in ("proactive", "system") else None
+    header_name = user_name
+    if chat_id == "proactive":
+        from core.presence import get_presence
+        presence = get_presence()
+        if presence.get("state") == "dialog":
+            effective_chat_id = presence.get("focus_chat_id")
+            header_name = presence.get("focus_user_name") or user_name
+    chat_alias = get_chat_alias(effective_chat_id) if effective_chat_id else None
     header = (
         _load("context/header")
         .replace("{now}", now)
-        .replace("{user_name}", user_name)
-        .replace("{chat_id}", str(chat_id))
+        .replace("{user_name}", header_name)
+        .replace("{chat_id}", chat_alias or "нет текущего чата")
+        .replace("{chat_alias}", chat_alias or "нет текущего чата")
     )
     relationship_block = _load("relationship/block").replace("{relationship}", relationship)
     needs_block = _load("context/needs").replace("{needs_summary}", needs_summary)
@@ -230,7 +240,7 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
 
     # State behavior — exactly one file, only what is needed now.
     state = _get_presence_state_name()
-    parts.append(_load_state_block(state, chat_id))
+    parts.append(_load_state_block(state, chat_alias))
 
     diary_context = get_today_diary_context()
     if diary_context:

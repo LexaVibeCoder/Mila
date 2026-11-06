@@ -92,7 +92,7 @@ def _get_presence_state() -> dict:
 # Reminder when rest/working returns text without entering dialog.
 REST_CONTENT_REMINDER = (
     "PROTOCOL: you are in rest/working. Text replies from here are IGNORED. "
-    "To talk, call enter_dialog with the notification chat_id first "
+    "To talk, call enter_dialog with the notification chat_alias first "
     "(you will be called again in dialog, then answer there). "
     "For a one-line note use the send_message tool once. "
     "To skip, return an empty reply with no tool calls."
@@ -188,8 +188,10 @@ class ThinkPipeline:
         last = (batch_text or "").strip()[:2000]
         if not last:
             return None
+        from core.db import get_chat_alias
+        alias = get_chat_alias(chat_id or self.chat_id) or "неизвестный чат"
         return (
-            f"[уведомление] новый текст из чата {chat_id or self.chat_id}:\n"
+            f"[уведомление] новый текст из чата {alias}:\n"
             f"{last}\n"
             f"(выше в истории — предыдущие сообщения этого чата для контекста.)"
         )
@@ -529,11 +531,19 @@ class ThinkPipeline:
             for action in actions:
                 executed = await self._execute_single_action(action, user_id=req_user, chat_id=req_chat,
                                                             seen_memories=seen_memories)
-                get_needs_tracker().apply_action_effect(action.get("action_type"))
+                if executed.get("status") != "error":
+                    get_needs_tracker().apply_action_effect(action.get("action_type"))
                 yield {"kind": "action", "action": executed}
 
                 atype = executed.get("type")
                 status = executed.get("status")
+
+                if atype in ("enter_dialog", "send_message") and status == "error":
+                    messages.append({"role": "system", "content": (
+                        f"{atype} не выполнен: {executed.get('error', 'ошибка')}. "
+                        "Выбери известный алиас или промолчи."
+                    )})
+                    continue
 
                 if atype == "start_sleep" and status == "sleeping":
                     sleep_started = True
@@ -542,9 +552,12 @@ class ThinkPipeline:
                 if atype in ("enter_dialog", "enter_rest", "enter_working") \
                         and status == "switched":
                     presence_switched = True
+                    from core.db import get_chat_alias
+                    target = (get_chat_alias(executed["chat_id"])
+                              if executed.get("chat_id") else atype)
                     messages.append({"role": "system", "content": (
                         f"Presence switched: {atype} → "
-                        f"{executed.get('chat_id', executed.get('state', ''))}. "
+                        f"{target}. "
                         f"Decide in the new state now."
                     )})
                     print("  [Presence switched → re-calling]")
@@ -592,7 +605,7 @@ class ThinkPipeline:
                             "(old->new, fresh at the bottom):\n"
                             f"{context_addon}\n"
                             "Теперь выбери ОДИН чат и либо вызови enter_dialog "
-                            "с его chat_id, либо отправь одну записку через "
+                            "с его chat_alias, либо отправь одну записку через "
                             "send_message, либо промолчи пустым ответом."
                         )})
                         print("  [Peek results → re-calling]")

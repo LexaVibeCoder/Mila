@@ -97,14 +97,14 @@ def get_tool_definitions(presence_state: str = "rest",
                 "type": "function",
                 "function": {
                     "name": "enter_dialog",
-                    "description": "Switch to a different chat (its ID from the notification).",
+                    "description": "Switch to a different chat using its alias from the notification.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "chat_id": {"type": "string", "description": "Chat to switch to"},
+                            "chat_alias": {"type": "string", "description": "Alias of the chat to switch to"},
                             "note": {"type": "string", "description": "Optional reason"},
                         },
-                        "required": ["chat_id"],
+                        "required": ["chat_alias"],
                     },
                 },
             })
@@ -157,9 +157,9 @@ def get_tool_definitions(presence_state: str = "rest",
     # rest / working / sleep and fallback
     if presence_enabled:
         if state in ("rest", "working", "sleep"):
-            target_desc = "this chat (ID from the notification)"
+            target_desc = "this chat (alias from the notification)"
             if state == "working":
-                target_desc = "this chat (ID from the notification)"
+                target_desc = "this chat (alias from the notification)"
             defs.append({
                 "type": "function",
                 "function": {
@@ -168,10 +168,10 @@ def get_tool_definitions(presence_state: str = "rest",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "chat_id": {"type": "string", "description": "Chat from the notification"},
+                            "chat_alias": {"type": "string", "description": "Chat alias from the notification"},
                             "note": {"type": "string", "description": "Optional reason"},
                         },
-                        "required": ["chat_id"],
+                        "required": ["chat_alias"],
                     },
                 },
             })
@@ -184,7 +184,7 @@ def get_tool_definitions(presence_state: str = "rest",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "chat_id": {"type": "string", "description": "Target chat"},
+                            "chat_alias": {"type": "string", "description": "Target chat alias; omit only when replying to a notification"},
                             "text": {"type": "string", "description": "One short line in your voice"},
                         },
                         "required": ["text"],
@@ -265,11 +265,11 @@ def get_tool_definitions(presence_state: str = "rest",
                                 f"(по умолчанию {_default_peek}, ты можешь поставить своё)"
                             ),
                         },
-                        "chat_ids": {
+                        "chat_aliases": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Необязательно: конкретные chat_id. "
+                                "Необязательно: алиасы конкретных чатов. "
                                 "Если пусто — все доступные чаты."
                             ),
                         },
@@ -332,13 +332,31 @@ class ToolExecutor:
 
     async def _handle_send_message(self, params: Dict) -> Dict:
         text = params.get("text", "")
-        chat_id = params.get("chat_id", self.chat_id)
+        chat_id, error = self._resolve_target(params, allow_default=True)
+        if error:
+            return {"type": "send_message", "status": "error", "error": error}
         return {
             "type": "send_message",
             "text": text,
             "chat_id": chat_id,
             "status": "ready"
         }
+
+    def _resolve_target(self, params: Dict, allow_default: bool = False) -> tuple[str | None, str | None]:
+        """Resolve an explicit model target, never falling back after an error."""
+        from core.db import get_chat_alias, resolve_chat_alias
+
+        supplied = "chat_alias" in params or "chat_id" in params
+        if supplied:
+            raw = params.get("chat_alias") if "chat_alias" in params else params.get("chat_id")
+            chat_id = resolve_chat_alias(raw) if isinstance(raw, str) else None
+            if not chat_id:
+                return None, "Неизвестный или пустой алиас чата. Выбери алиас из уведомления или списка чатов."
+            return chat_id, None
+        if allow_default and self.chat_id not in (None, "", "proactive", "system"):
+            if get_chat_alias(self.chat_id):
+                return str(self.chat_id), None
+        return None, "Укажи chat_alias из уведомления или списка чатов."
 
     @staticmethod
     def _format_memory_context(results: list[dict]) -> str:
@@ -606,16 +624,16 @@ class ToolExecutor:
 
     async def _handle_enter_dialog(self, params: Dict) -> Dict:
         from core.presence import enter_dialog
-        from core.db import get_user_display_name
-        chat_id = str(params.get("chat_id", self.chat_id or "")).strip()
-        if not chat_id:
+        from core.db import get_chat_display_name
+        chat_id, error = self._resolve_target(params)
+        if error:
             return {"type": "enter_dialog", "status": "error",
-                    "error": "Missing chat_id"}
+                    "error": error}
         note = str(params.get("note", "") or "")
         try:
-            user_name = get_user_display_name(chat_id)
+            user_name = get_chat_display_name(chat_id)
         except Exception:
-            user_name = chat_id
+            user_name = "Без имени"
         state = enter_dialog(chat_id, user_name, note)
         print(f"[Presence] → dialog with {user_name} (chat {chat_id})")
         return {"type": "enter_dialog", "chat_id": chat_id,
@@ -695,16 +713,26 @@ class ToolExecutor:
             except Exception:
                 limit = 10
         limit = max(1, min(limit, 50))
-        wanted = params.get("chat_ids") or []
+        wanted = params.get("chat_aliases", params.get("chat_ids")) or []
         if isinstance(wanted, str):
             wanted = [wanted]
-        wanted = [str(x).strip() for x in (wanted or []) if str(x).strip()]
+        if not isinstance(wanted, list):
+            return {"type": "peek_recent_chats", "status": "error", "error": "chat_aliases должен быть списком."}
+        if wanted:
+            from core.db import resolve_chat_alias
+            resolved = [resolve_chat_alias(x) if isinstance(x, str) else None for x in wanted]
+            if not all(resolved):
+                return {"type": "peek_recent_chats", "status": "error",
+                        "error": "Неизвестный алиас чата. Выбери алиасы из списка чатов."}
+            wanted = list(dict.fromkeys(resolved))
 
         try:
             from core.db import (
                 get_chats_by_last_activity,
                 get_recent_chunks,
                 get_user_display_name,
+                get_chat_alias,
+                get_chat_display_name,
             )
             try:
                 from Mila_observatory.runtime import runtime_config as _rc
@@ -722,9 +750,9 @@ class ToolExecutor:
                 for cid in wanted:
                     if cid not in known:
                         try:
-                            nm = get_user_display_name(cid)
+                            nm = get_chat_display_name(cid)
                         except Exception:
-                            nm = cid[:8]
+                            nm = "Без имени"
                         chats.append({"chat_id": cid, "chat_name": nm,
                                       "last_at": "", "count": 0})
             else:
@@ -734,7 +762,10 @@ class ToolExecutor:
             picked: list[dict] = []
             for ch in chats:
                 cid = str(ch["chat_id"])
-                cname = ch.get("chat_name") or cid[:8]
+                alias = get_chat_alias(cid)
+                if not alias:
+                    continue
+                cname = ch.get("chat_name") or "Без имени"
                 try:
                     chunks = get_recent_chunks(cid, limit=limit)
                 except Exception:
@@ -760,7 +791,7 @@ class ToolExecutor:
                 else:
                     body = "(пока пусто)"
                 last = (ch.get("last_at") or "")[:16].replace("T", " ")
-                header = f"Чат «{cname}» ({cid})"
+                header = f"Чат «{cname}» (алиас: {alias})"
                 if last:
                     header += f" — последнее сообщение {last}:"
                 else:

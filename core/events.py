@@ -72,8 +72,11 @@ class Notification:
 
     def llm_event_line(self) -> str:
         """One-line description injected into the LLM context for this event."""
+        from core.db import get_chat_alias
+
         who = self.sender_name or "Unknown"
+        alias = get_chat_alias(self.chat_id) or "неизвестный чат"
         return (
-            f"[уведомление] чат {self.chat_id} ({who}): "
+            f"[уведомление] чат {alias} ({who}): "
             f"{self.placeholder_text() or '(без текста)'}"
         )

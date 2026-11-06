@@ -16,15 +16,15 @@ definitions: молчание = пустой ответ.
 
 | Действие | Состояния | Параметры | Что делает |
 |----------|-----------|-----------|------------|
-| `enter_dialog` | rest, working, dialog | `chat_id!`, `note?` | Переключает presence в диалог; пайплайн перевызывает LLM |
+| `enter_dialog` | rest, working, dialog | `chat_alias!`, `note?` | Переключает presence в диалог; пайплайн перевызывает LLM |
 | `enter_rest` | working, dialog | `note?` | Возврат в rest |
 | `enter_working` | rest, dialog | `note?` | Переход в working |
 | `start_sleep` | все | `duration_minutes!` (1–720), `note?` | Запускает ночной цикл |
-| `send_message` | rest, working | `text!`, `chat_id?` | Одна короткая «отмашка», не диалог |
+| `send_message` | rest, working | `text!`, `chat_alias?` | Одна короткая «отмашка», не диалог |
 | `search_memory` | dialog | `query!` | FAISS top-10 → rerank → top-5 |
 | `write_diary` | dialog | `entry!`, `category?` | Новая запись дневника |
 | `update_diary` | dialog | `entry!`, `entry_id!`, `category?` | Обновление записи |
-| `peek_recent_chats` | proactive (rest/working) | `limit_per_chat?`, `chat_ids?` | Последние сообщения по всем чатам |
+| `peek_recent_chats` | proactive (rest/working) | `limit_per_chat?`, `chat_aliases?` | Последние сообщения по всем чатам |
 
 > В диалоге ответ — обычный текст, а не tool call. `send_message` в диалоге
 > отсутствует. В состоянии `sleep` доступны `enter_dialog` и `start_sleep`
@@ -56,11 +56,11 @@ definitions: молчание = пустой ответ.
 ### `enter_dialog`
 
 ```json
-{"action_type": "enter_dialog", "params": {"chat_id": "123", "note": "хочу поговорить"}}
+{"action_type": "enter_dialog", "params": {"chat_alias": "алекс", "note": "хочу поговорить"}}
 ```
 
-- `chat_id` обязателен;
-- имя берётся из `users.preferred_name/user_name`;
+- `chat_alias` обязателен; executor преобразует его во внутренний `chat_id`;
+- имя для presence берётся из `chats.chat_name`;
 - возвращает `{type, chat_id, user_name, state, status: "switched"}`;
 - пайплайн инжектит system-сообщение и вызывает LLM уже в диалоге.
 
@@ -88,6 +88,15 @@ definitions: молчание = пустой ответ.
 
 В rest/working это финальная короткая отмашка: пайплайн отдаёт `reply_tool`,
 `queue.py` отправляет один пузырь. В диалоге инструмента нет.
+Для ответа на уведомление `chat_alias` можно опустить — используется текущий
+чат. В проактивном ходе алиас обязателен. Явно указанный неизвестный или пустой
+алиас никогда не заменяется текущим чатом: инструмент возвращает ошибку, а LLM
+получает возможность исправить вызов. Аналогично для `enter_dialog`.
+
+Алиас можно писать с `@`, в другом регистре или с пробелами вместо дефисов.
+Для совместимости executor принимает прежний параметр `chat_id` и числовой ID,
+но только для уже существующего чата; в схемах инструментов модели показаны
+только алиасы. Подробнее о постоянных алиасах и миграции — [database.md](database.md#chat_aliases).
 
 ### `search_memory`
 
@@ -123,7 +132,8 @@ Reranker опционален. Если модель не установлена
 - возвращает чаты от старых к свежим, свежие внизу;
 - `limit_per_chat` по умолчанию `proactive.default_peek_limit` (10), клиппится
   в `1..50`;
-- `chat_ids` опционально ограничивает список;
+- `chat_aliases` опционально ограничивает список; неизвестный алиас отклоняет
+  весь запрос, вместо подстановки другого чата;
 - текст сообщений **не обрезается**;
 - статус `peeked` → `context_addon` инжектится в контекст, LLM выбирает один чат.
 

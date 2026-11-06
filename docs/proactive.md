@@ -40,7 +40,7 @@ tracker.run_inference(needs)       # MLP или rule-based
 Для `write_to_user` чаты выбираются `get_chats_by_last_activity(limit=max_chats)`,
 от старых к свежим. В контекст добавляется блок с инструкциями:
 
-1. можно сразу вызвать `enter_dialog` с `chat_id` и ответить в диалоге;
+1. можно сразу вызвать `enter_dialog` с `chat_alias` и ответить в диалоге;
 2. можно сначала вызвать `peek_recent_chats`, чтобы посмотреть сообщения;
 3. можно промолчать пустым ответом;
 4. при желании — `start_sleep` на 480 минут;
@@ -48,6 +48,9 @@ tracker.run_inference(needs)       # MLP или rule-based
 
 `peek_recent_chats` доступен только в проактивном ходе
 (`include_proactive=True`), в обычных ответах его нет.
+Каждый чат показывается с именем и постоянным алиасом; он же передаётся в
+`enter_dialog`, `send_message` или фильтр `chat_aliases` у `peek_recent_chats`.
+Внутри приложения и при отправке по-прежнему используется настоящий `chat_id`.
 
 ## Защиты перед отправкой
 

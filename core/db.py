@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
@@ -39,6 +40,10 @@ def init_db():
         chat_id TEXT PRIMARY KEY,
         chat_name TEXT,
         created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS chat_aliases (
+        alias TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL UNIQUE
     );
     CREATE TABLE IF NOT EXISTS chat_members (
         chat_id TEXT,
@@ -93,6 +98,7 @@ def init_db():
     # Lightweight migrations for multimodality (safe on existing DBs).
     _migrate_multimedia()
     _migrate_indexes()
+    _backfill_chat_aliases()
     print("Database initialized.")
 
 
@@ -156,14 +162,111 @@ def ensure_user_exists(user_id: str, user_name: str = None):
 def ensure_chat_exists(chat_id: str, chat_name: str = None):
     conn = get_conn()
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT chat_id FROM chats WHERE chat_id=?", (chat_id,))
-        if not cur.fetchone():
-            cur.execute(
-                "INSERT INTO chats (chat_id, chat_name) VALUES (?, ?)",
-                (chat_id, chat_name)
-            )
+        name = (chat_name or "").strip()
+        useful_name = bool(name and name not in ("Unknown", "Личный чат"))
+        conn.execute(
+            "INSERT INTO chats (chat_id, chat_name) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET chat_name=CASE "
+            "WHEN ? THEN excluded.chat_name ELSE chats.chat_name END",
+            (chat_id, name or None, useful_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    get_chat_alias(chat_id)
+
+
+def _backfill_chat_aliases():
+    """Assign aliases to old chats without changing their IDs or history."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT c.chat_id FROM chats c LEFT JOIN chat_aliases a ON a.chat_id=c.chat_id "
+            "WHERE a.alias IS NULL ORDER BY c.created_at, c.chat_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        get_chat_alias(row["chat_id"])
+
+
+def normalize_chat_alias(value: str) -> str:
+    """Normalize a name or alias without losing non-Latin letters."""
+    value = unicodedata.normalize("NFKC", str(value or "")).strip().lstrip("@").casefold()
+    parts = []
+    separator = False
+    for char in value:
+        category = unicodedata.category(char)
+        if category[0] in ("L", "N") or (category[0] == "M" and parts and not separator):
+            if separator and parts:
+                parts.append("-")
+            parts.append(char)
+            separator = False
+        else:
+            separator = True
+    return "".join(parts).strip("-")
+
+
+def get_chat_alias(chat_id: str) -> Optional[str]:
+    """Return or atomically allocate a permanent alias for an existing chat.
+
+    Alias rows are intentionally retained if a chat is removed: an old alias
+    must never be reassigned to somebody else.
+    """
+    conn = get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT a.alias FROM chat_aliases a JOIN chats c ON c.chat_id=a.chat_id "
+            "WHERE c.chat_id=?", (str(chat_id),),
+        ).fetchone()
+        if existing:
+            return existing["alias"]
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT c.chat_name, a.alias FROM chats c "
+            "LEFT JOIN chat_aliases a ON a.chat_id=c.chat_id WHERE c.chat_id=?",
+            (str(chat_id),),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        if row["alias"]:
             conn.commit()
+            return row["alias"]
+        name = row["chat_name"] or ""
+        if name in ("Unknown", "Личный чат"):
+            name = ""
+        base = normalize_chat_alias(name)[:32].strip("-") or "чат"
+        if base.isdecimal():
+            base = f"чат-{base}"
+        alias = base
+        suffix = 2
+        while conn.execute("SELECT 1 FROM chat_aliases WHERE alias=?", (alias,)).fetchone():
+            alias = f"{base}-{suffix}"
+            suffix += 1
+        conn.execute("INSERT INTO chat_aliases (alias, chat_id) VALUES (?, ?)",
+                     (alias, str(chat_id)))
+        conn.commit()
+        return alias
+    finally:
+        conn.close()
+
+
+def resolve_chat_alias(value: str) -> Optional[str]:
+    """Resolve an alias, or a legacy numeric ID for an existing chat only."""
+    raw = str(value or "").strip()
+    alias = normalize_chat_alias(raw)
+    if not alias:
+        return None
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT c.chat_id FROM chat_aliases a JOIN chats c ON c.chat_id=a.chat_id "
+            "WHERE a.alias=?", (alias,),
+        ).fetchone()
+        if not row and raw.lstrip("-").isdigit():
+            row = conn.execute("SELECT chat_id FROM chats WHERE chat_id=?", (raw,)).fetchone()
+        return str(row["chat_id"]) if row else None
     finally:
         conn.close()
 
@@ -226,6 +329,16 @@ def get_user_display_name(user_id: str) -> str:
     if not info:
         return f"user {str(user_id)[:8]}"
     return info.get("preferred_name") or info.get("user_name") or f"user {str(user_id)[:8]}"
+
+
+def get_chat_display_name(chat_id: str) -> str:
+    """Return a chat's display name without exposing an ID as a fallback."""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT chat_name FROM chats WHERE chat_id=?", (str(chat_id),)).fetchone()
+        return (row["chat_name"] if row else None) or "Без имени"
+    finally:
+        conn.close()
 
 
 def log_media(chat_id: str, user_id: str, file_path: str, description: str = ""):
@@ -756,12 +869,13 @@ def get_chats_by_last_activity(limit: int = 20) -> list[dict]:
             name = ""
         if not name:
             try:
-                name = get_user_display_name(chat_id)
+                user = get_user_info(chat_id) or {}
+                name = user.get("preferred_name") or user.get("user_name") or "Без имени"
             except Exception:
-                name = chat_id[:8]
+                name = "Без имени"
         out.append({
             "chat_id": chat_id,
-            "chat_name": name or chat_id[:8],
+            "chat_name": name or "Без имени",
             "last_at": r.get("last_at") or "",
             "count": int(r.get("cnt") or 0),
         })
@@ -778,4 +892,3 @@ def get_global_last_activity() -> str | None:
         return row["last_at"] if row else None
     finally:
         conn.close()
-

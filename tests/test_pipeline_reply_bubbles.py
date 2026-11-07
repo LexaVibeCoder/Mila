@@ -80,6 +80,31 @@ def test_leading_timestamp_is_stripped_from_each_bubble():
     assert split_reply_bubbles(raw) == ["первое", "второе"]
 
 
+def test_timestamp_after_single_newline_starts_a_new_bubble():
+    raw = "первое\n[2026-09-07 18:39] второе"
+    assert split_reply_bubbles(raw) == ["первое", "второе"]
+
+
+def test_timestamp_only_line_after_single_newline_splits_bubbles():
+    raw = "первое\n[2026-09-07 18:39:00]\nвторое"
+    assert split_reply_bubbles(raw) == ["первое", "второе"]
+
+
+def test_timestamp_after_newline_with_leading_spaces_splits_bubbles():
+    raw = "первое\n   [2026-09-07 18:39] второе"
+    assert split_reply_bubbles(raw) == ["первое", "второе"]
+
+
+def test_trailing_timestamp_after_newline_is_removed():
+    raw = "первое\n[2026-09-07 18:39]"
+    assert split_reply_bubbles(raw) == ["первое"]
+
+
+def test_timestamp_after_crlf_starts_a_new_bubble():
+    raw = "первое\r\n[2026-09-07 18:39] второе"
+    assert split_reply_bubbles(raw) == ["первое", "второе"]
+
+
 @pytest.mark.asyncio
 async def test_plain_text_reply_is_split_and_sent_as_bubbles(make_pipeline):
     pipeline, fake = make_pipeline([_reply("первое\n\nвторое")])
@@ -91,6 +116,18 @@ async def test_plain_text_reply_is_split_and_sent_as_bubbles(make_pipeline):
     assert events[-1] == {"kind": "reply_bubbles",
                           "texts": ["первое", "второе"]}
     assert "response_format" not in fake.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_timestamp_marked_reply_is_split_and_sent_as_bubbles(make_pipeline):
+    pipeline, fake = make_pipeline([_reply("первое\n[2026-09-07 18:39] второе")])
+
+    events = await _collect(pipeline._run_stream("hi", [], None,
+                                                 request_user_id="user-1",
+                                                 request_chat_id="chat-1"))
+
+    assert events[-1] == {"kind": "reply_bubbles",
+                          "texts": ["первое", "второе"]}
 
 
 @pytest.mark.asyncio

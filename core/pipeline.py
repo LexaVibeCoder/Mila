@@ -17,6 +17,7 @@ Each turn produces a detailed JSON log saved to LOG_DIR.
 
 import json
 import os
+import re
 import time
 import uuid
 import asyncio
@@ -107,26 +108,34 @@ DIALOG_REPLY_REMINDER = (
 )
 
 
+# "[YYYY-MM-DD HH:MM(:SS)]" copied from history metadata by the model.
+_TIMESTAMP_RE = r"\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]"
+_LEADING_TIMESTAMP_RE = re.compile(rf"^{_TIMESTAMP_RE}\s*")
+# Bubble boundary: a blank line, or a newline followed by a line-leading
+# timestamp. The model sometimes marks a wanted split with its own timestamp
+# instead of a blank line.
+_BUBBLE_BREAK_RE = re.compile(rf"\n\s*\n+|\n(?=\s*{_TIMESTAMP_RE})")
+
+
 def _strip_leading_timestamp(text: str) -> str:
-    import re
-    return re.sub(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*", "", text or "", count=1)
+    return _LEADING_TIMESTAMP_RE.sub("", text or "", count=1)
 
 
 def split_reply_bubbles(raw: str) -> list[str]:
-    """Split a plain-text dialog reply into bubbles on blank lines.
+    """Split a plain-text dialog reply into bubbles.
 
-    A blank line (two or more newlines, whitespace allowed between them)
-    starts a new bubble. Single newlines stay inside one bubble. An empty
-    list means no answer.
+    Boundaries are blank lines and a newline followed by a line-leading
+    "[date time]" marker: the model sometimes uses its own timestamp to mark
+    where a new bubble should start. Single newlines stay inside a bubble.
+    An empty list means no answer.
     """
-    import re
     if not raw:
         return []
     text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return []
     bubbles: list[str] = []
-    for part in re.split(r"\n\s*\n+", text):
+    for part in _BUBBLE_BREAK_RE.split(text):
         cleaned = _strip_leading_timestamp(part.strip())
         if cleaned:
             bubbles.append(cleaned)

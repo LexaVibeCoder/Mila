@@ -11,13 +11,14 @@
 | `tg_adapter.py` | Изоляция pytdbot: `NormalizedMessage`, `normalize_event`, `classify_message_content`, `download_notification_media`, send/resolve/parse helpers |
 | `events.py` | `Notification` — единый формат входящего (kind/text/caption/file/local_path) + плейсхолдеры |
 | `presence.py` | `PresenceManager` — состояния `rest/dialog/working/sleep`, авто-выход из диалога в rest |
+| `action_journal.py` | Глобальный журнал действий: состояния, сон, `send_message`; компактный блок промпта |
 | `media.py` | Нативный vision/audio вход: ресайз фото → `image_url`, ogg/opus → wav → `input_audio`, персистентное хранение |
 | `tg_auth.py` | Интерактивный auth TDLib (телефон/код/2FA/email/QR, предупреждения для Docker без TTY) |
 | `pipeline.py` | `ThinkPipeline` — direct-tools цикл: LLM → tool calls или текстовый ответ, до 7 итераций |
 | `proactive.py` | Проактивный планировщик: State Agent после глобальной тишины, ручной trigger, `peek_recent_chats` |
 | `llm/client.py` | `LLMClient` — OpenAI-совместимая обёртка, ретраи, fallback без аудио |
 | `llm/persona.py` | Сборка system prompt из `llm/prompts/*/*.md` + presence/needs/дневник |
-| `llm/prompts/` | 26 `.md`-фрагментов: persona, relationship, context, diary, states |
+| `llm/prompts/` | 27 `.md`-фрагментов: persona, relationship, context, diary, states |
 | `llm/embeddings.py` | Эмбеддинг-клиент (Ollama native / OpenAI-compatible, взаимный fallback) |
 | `llm/reranker.py` | BGE-Reranker-v2-m3 для переранжирования результатов памяти |
 | `llm/counter.py` | Подсчёт токенов через tiktoken (`cl100k_base`) |
@@ -94,6 +95,7 @@
 6. _build_histories(): summary + новейшие сообщения в лимите; префиксы времени.
 7. ThinkPipeline.process_message_stream():
    ├── system prompt и тулзы — из снимка presence на старте хода (TurnContext);
+   ├── journal_context — снимок глобального журнала на старте хода;
    ├── набор тулзов зависит от состояния (rest/dialog/working/proactive);
    ├── LLM.generate(...) с tool_choice="auto";
    ├── dialog: модель возвращает обычный текст, пузыри через пустую строку;
@@ -122,6 +124,7 @@
 - **Direct tools вместо `think()`-обёртки**: LLM вызывает настоящие функции (`enter_dialog`, `send_message`, `search_memory`, ...). В диалоге ответ — обычный текст, а не tool call.
 - **`tool_choice` всегда `auto`**: runtime-значение `required` принудительно переопределяется в пайплайне; иначе модель не смогла бы просто ответить или промолчать.
 - **Состояние определяет инструменты**: `get_tool_definitions(presence_state=...)` отдаёт только релевантный набор; после `enter_*` prompt и tools пересобираются.
+- **Глобальный журнал действий**: `action_journal` хранит смены состояния, сон и `send_message`; блок «что ты делала сегодня» собирает чаты в одну временную ось, а свежее событие хода показывается в конце контекста.
 - **Текстовые ответы в диалоге**: модель пишет обычный текст, пузыри разделяются пустой строкой; пустой ответ = молчание. `response_format` не используется.
 - **Пузыри**: число абзацев не ограничено, персона просит 1–3 коротких сообщения; отправка последовательная, с typing и паузами.
 - **Прерывание**: новое сообщение или печать собеседника отменяют генерацию/отправку; недоставленный батч возвращается в очередь.

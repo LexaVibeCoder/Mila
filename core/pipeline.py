@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 
 from config import settings
+from core.action_journal import get_journal_context
 from core.delivery import TurnContext
 from core.llm.client import LLMClient
 from core.tools.executor import ToolExecutor, get_tool_definitions
@@ -447,6 +448,14 @@ class ThinkPipeline:
             else _get_presence_state()
         )
         state = presence.get("state", "rest")
+        # Snapshot the journal once for the whole turn. Events created by this
+        # turn are appended at the bottom as they happen; they enter the
+        # journal block only on the next turn.
+        try:
+            journal_context = get_journal_context()
+        except Exception as e:
+            print(f"[Pipeline] journal read failed: {e}")
+            journal_context = ""
         # A proactive turn has no owner chat yet: its target is the dialog it
         # opens, or the dialog that is already open at turn start.
         if turn is not None and turn.proactive and state == "dialog":
@@ -480,7 +489,7 @@ class ThinkPipeline:
 
             main_system_prompt = build_main_llm_system_prompt(
                 req_user, chat_id=req_chat, my_user_id=self.my_user_id,
-                presence=presence,
+                presence=presence, journal_context=journal_context,
             )
             # Peek is proactive-only: keep reactive turns clean.
             # After enter_dialog the turn becomes dialog and peek drops out.
@@ -588,23 +597,37 @@ class ThinkPipeline:
                             turn.allow(executed.get("chat_id"))
                     # Update the local snapshot from OUR action only — never
                     # re-read global presence (another turn may be switching).
+                    executed_state = executed.get("state")
+                    if isinstance(executed_state, dict):
+                        # Older executor payloads returned the whole presence
+                        # snapshot in "state"; keep the turn snapshot a string.
+                        executed_state = executed_state.get("state")
                     if atype == "enter_dialog":
                         presence = {**presence, "state": "dialog",
                                     "focus_chat_id": executed.get("chat_id"),
                                     "focus_user_name": executed.get("user_name")}
                     else:
-                        presence = {**presence, "state": executed.get("state", atype),
+                        presence = {**presence, "state": executed_state or atype,
                                     "focus_chat_id": None,
                                     "focus_user_name": None}
                     state = presence.get("state", state)
-                    from core.db import get_chat_alias
-                    target = (get_chat_alias(executed["chat_id"])
-                              if executed.get("chat_id") else atype)
-                    messages.append({"role": "system", "content": (
-                        f"Presence switched: {atype} → "
-                        f"{target}. "
-                        f"Decide in the new state now."
-                    )})
+                    # The fresh event goes to the very bottom of the context;
+                    # on the next turn it is part of the journal block.
+                    event_line = executed.get("journal_event")
+                    if event_line:
+                        messages.append({"role": "system", "content": (
+                            "Presence switched. Decide in the new state now.\n"
+                            f"[событие] {event_line}"
+                        )})
+                    else:
+                        from core.db import get_chat_alias
+                        target = (get_chat_alias(executed["chat_id"])
+                                  if executed.get("chat_id") else atype)
+                        messages.append({"role": "system", "content": (
+                            f"Presence switched: {atype} → "
+                            f"{target}. "
+                            f"Decide in the new state now."
+                        )})
                     print("  [Presence switched → re-calling]")
                     continue
 

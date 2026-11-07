@@ -67,42 +67,80 @@ def get_presence() -> dict:
 
 
 def _set(state: str, focus_chat_id: Optional[str] = None,
-         focus_user_name: Optional[str] = None, note: str = "") -> dict:
+         focus_user_name: Optional[str] = None, note: str = "",
+         journal: bool = True) -> dict:
     assert state in VALID_STATES, f"unknown presence state: {state}"
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
     conn = get_conn()
     try:
         _ensure_table(conn)
-        conn.execute(
-            "UPDATE presence_state SET state=?, focus_chat_id=?, "
-            "focus_user_name=?, note=?, updated_at=? WHERE id=1",
-            (state, focus_chat_id, focus_user_name, note or "", now),
+        cur = conn.execute("SELECT * FROM presence_state WHERE id=1")
+        row = cur.fetchone()
+        prev = _row_to_dict(row) if row is not None else {
+            "state": "rest", "focus_chat_id": None,
+            "focus_user_name": None, "note": "", "updated_at": None,
+        }
+        # Keep updated_at stable for a same-state/same-chat note update:
+        # it is the start of the current span and drives the "до этого была
+        # в ... N мин" duration.
+        same_target = (
+            prev.get("state") == state
+            and str(prev.get("focus_chat_id") or "") == str(focus_chat_id or "")
         )
+        if same_target:
+            conn.execute(
+                "UPDATE presence_state SET focus_user_name=?, note=? WHERE id=1",
+                (focus_user_name, note or ""),
+            )
+        else:
+            conn.execute(
+                "UPDATE presence_state SET state=?, focus_chat_id=?, "
+                "focus_user_name=?, note=?, updated_at=? WHERE id=1",
+                (state, focus_chat_id, focus_user_name, note or "", now.isoformat()),
+            )
         conn.commit()
     finally:
         conn.close()
-    return get_presence()
+
+    # Sleep is journaled by the sleep manager, which knows the real duration
+    # and whether the sleep actually started. Other transitions are written
+    # here so auto-rest and manual Observatory changes are covered too.
+    event_line = None
+    if journal and state in ("rest", "dialog", "working"):
+        try:
+            from core.action_journal import record_state_change
+            event_line = record_state_change(
+                prev, state, chat_id=focus_chat_id,
+                chat_name=focus_user_name, note=note, now=now,
+            )
+        except Exception as e:
+            print(f"[Presence] journal write failed: {e}")
+
+    result = get_presence()
+    if event_line:
+        result["journal_event"] = event_line
+    return result
 
 
-def enter_rest(note: str = "") -> dict:
+def enter_rest(note: str = "", journal: bool = True) -> dict:
     """Leave any dialog/work and return to default rest."""
-    return _set("rest", None, None, note)
+    return _set("rest", None, None, note, journal=journal)
 
 
 def enter_dialog(chat_id: str, user_name: Optional[str] = None,
-                 note: str = "") -> dict:
+                 note: str = "", journal: bool = True) -> dict:
     """Enter dialog with one specific person (focus_chat_id required)."""
-    return _set("dialog", str(chat_id), user_name, note)
+    return _set("dialog", str(chat_id), user_name, note, journal=journal)
 
 
-def enter_working(note: str = "") -> dict:
+def enter_working(note: str = "", journal: bool = True) -> dict:
     """Busy with her own stuff (v1: same visibility as rest)."""
-    return _set("working", None, None, note)
+    return _set("working", None, None, note, journal=journal)
 
 
-def enter_sleep_note(note: str = "") -> dict:
+def enter_sleep_note(note: str = "", journal: bool = False) -> dict:
     """Record sleep intent. The real sleep cycle is owned by sleep manager."""
-    return _set("sleep", None, None, note)
+    return _set("sleep", None, None, note, journal=journal)
 
 
 def is_in_dialog_with(chat_id: str) -> bool:

@@ -130,6 +130,7 @@ async def deliver_messages(
     await asyncio.sleep(random.uniform(0.3, 1.0))
 
     sent = 0
+    sent_texts: list[str] = []
     for i, clean in enumerate(cleans):
         if i > 0:
             if before_bubble is not None and not await before_bubble(i):
@@ -147,6 +148,7 @@ async def deliver_messages(
                                   error=str(e))
 
         sent += 1
+        sent_texts.append(clean)
         # The message is already delivered: record it in the SAME chat.
         # A storage failure must not trigger a re-send (that would duplicate),
         # so both writes are best-effort and independent.
@@ -166,5 +168,16 @@ async def deliver_messages(
         except Exception as e:
             print(f"[Delivery] buffer write failed for {target}: {e}")
         print(f"[✓] Bubble {i + 1}/{len(cleans)} sent")
+
+    # Only the explicit one-shot send_message tool goes into the action
+    # journal. Ordinary dialog bubbles stay in the chat context; the global
+    # journal is about state/location and deliberate outbound notes, not every
+    # reply. Record after a real send, not when the tool merely returns ready.
+    if sent and via == "send_message_brush_off":
+        try:
+            from core.action_journal import record_send_message
+            record_send_message(target, " ".join(sent_texts))
+        except Exception as e:
+            print(f"[Delivery] journal write failed for {target}: {e}")
 
     return DeliveryResult(ok=True, target=target, sent=sent)

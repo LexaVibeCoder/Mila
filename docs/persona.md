@@ -34,6 +34,7 @@ core/llm/prompts/
 │   ├── history_note.md
 │   ├── media_note.md
 │   ├── needs.md
+│   ├── journal_block.md
 │   ├── diary_block.md
 │   ├── session.md
 │   └── session_time.md
@@ -70,21 +71,28 @@ core/llm/prompts/
 ## Порядок сборки
 
 ```
-build_main_llm_system_prompt(user_id, chat_id, my_user_id)
+build_main_llm_system_prompt(user_id, chat_id, my_user_id, presence, journal_context)
     │
     ├── 1. static_prefix (или custom_text)
     ├── 2. context/history_note      — о двойных сообщениях и паузах
     ├── 3. context/media_note        — как смотреть фото и слушать голосовые
-    ├── 4. relationship/block        — выбранная строка отношений
-    ├── 5. format_state_block()      — где Мила и кто пишет (код, не .md)
-    ├── 6. states/{rest|dialog|working}.md — поведение ровно для текущего состояния
-    ├── 7. context/diary_block       — только если дневник не пуст
+    ├── 4. context/header            — «Ты Мила...», время, чат, имя
+    ├── 5. relationship/block        — выбранная строка отношений
+    ├── 6. format_state_block()      — где Мила и кто пишет (код, не .md)
+    ├── 7. states/{rest|dialog|working}.md — поведение ровно для текущего состояния
     ├── 8. context/needs             — fatigue/social/boredom + подсказки
-    ├── 9. context/header           — «Ты Мила...», время, чат, имя
-    └── 10. context/session          — только если пауза ≥ 30с
+    ├── 9. context/journal_block      — «что ты делала сегодня» (если не пусто)
+    ├── 10. context/diary_block       — только если дневник не пуст
+    └── 11. context/session           — только если пауза ≥ 30с
 ```
 
 Финал: `"\n\n".join(parts).strip()`.
+
+`journal_context` — снимок глобального журнала на начало хода. Пайплайн
+передаёт его явно, чтобы события, созданные во время хода, показывались в конце
+контекста и не дублировались в system prompt. Если аргумент не передан,
+`persona.py` читает текущий журнал сам (legacy-вызовы/тесты). Подробности —
+[action-journal.md](action-journal.md).
 
 ## Выбор отношений
 
@@ -133,6 +141,13 @@ build_main_llm_system_prompt(user_id, chat_id, my_user_id)
 
 Плюс подсказки при значениях > 0.7. Состояние влияет на тон и длину ответа, но
 не перечисляется в самом ответе.
+
+### `context/journal_block.md`
+
+`{journal_context}` ← `core.action_journal.get_journal_context()`: компактная
+временная ось за сегодня (состояния, сон, `send_message`) плюс хвост сна/диалога
+с прошлой полуночи. Пайплайн передаёт снимок журнала на начало хода. Подробности
+— [action-journal.md](action-journal.md).
 
 ### `context/diary_block.md`
 

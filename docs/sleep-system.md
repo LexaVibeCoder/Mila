@@ -38,11 +38,13 @@ user_fact_extraction / verification / committing / completed / idle`.
 
 ## Запуск и длительность
 
-`start_sleep(duration_minutes=None, triggered_by="manual")`:
+`start_sleep(duration_minutes=None, triggered_by="manual", note="")`:
 
 - отказывает, если уже `sleeping`/`committing` или `sleep.forced_awake=true`;
 - создаёт `session_id`, пишет `sleeping` + presence `sleep`, сбрасывает офсеты
   потребностей;
+- пишет в глобальный журнал старт сна: время, планируемая длительность,
+  предыдущее состояние (`core/action_journal.py`);
 - запускает `_run_sleep_with_timeout`:
   - с длительностью — таймаут `duration*60 + 300с`; по таймауту принудительный
     wake (если не идёт commit);
@@ -106,7 +108,9 @@ applied}`:
 1. `state = committing`;
 2. все staging-операции помечаются `applied=1`;
 3. дневник сохраняется в `logs/diary_logs/`; при успехе — очищается;
-4. `state = awake`, presence → `rest`.
+4. `state = awake`, presence → `rest`;
+5. в журнал пишется пробуждение с реальной длительностью сна
+   (`now - started_at`).
 
 Сами данные уже лежат в целевых таблицах; commit фиксирует их и убирает
 возможность rollback.
@@ -121,7 +125,9 @@ applied}`:
 2. очищает staging сессии;
 3. всегда пытается сохранить дневник в `logs/diary_logs/`; очищает таблицу
    только при успешном бэкапе;
-4. `state = awake`, presence → `rest`.
+4. `state = awake`, presence → `rest` (`journal=False`, чтобы не дублировать
+   событие);
+5. в журнал пишется пробуждение с реальной длительностью сна.
 
 ## Crash Recovery
 
@@ -134,8 +140,8 @@ applied}`:
     (`_resume_sleep_until_deadline`), при истёкшем — commit;
   - иначе — `rollback_all()` (сон прервался во время обработки);
 - `committing`:
-  - staging пуст → всё применено → `awake`;
-  - иначе → rollback;
+  - staging пуст → всё применено → `awake` (+ событие пробуждения в журнал);
+  - иначе → rollback (+ событие пробуждения в журнал);
 - `sleep_error` → rollback.
 
 Wall-clock дедлайн из БД авторитетнее in-memory таймера: после рестарта сон

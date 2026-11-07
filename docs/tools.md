@@ -61,8 +61,9 @@ definitions: молчание = пустой ответ.
 
 - `chat_alias` обязателен; executor преобразует его во внутренний `chat_id`;
 - имя для presence берётся из `chats.chat_name`;
-- возвращает `{type, chat_id, user_name, state, status: "switched"}`;
-- пайплайн инжектит system-сообщение и вызывает LLM уже в диалоге.
+- возвращает `{type, chat_id, user_name, state: "dialog", presence, status: "switched", journal_event}`;
+- пайплайн инжектит system-сообщение со свежим событием в конце и вызывает LLM
+  уже в диалоге.
 
 ### `enter_rest` / `enter_working`
 
@@ -72,10 +73,9 @@ definitions: молчание = пустой ответ.
 ### `start_sleep`
 
 - `duration_minutes` обязателен, клиппится в `1..720`;
-- presence сначала переводится в `sleep`, затем вызывается
-  `sleep.manager.start_sleep(triggered_by="mila_tool")`;
-- если сон отклонён (например, `forced_awake`), presence восстанавливается в
-  предыдущее состояние;
+- `sleep.manager.start_sleep(triggered_by="mila_tool", note=...)` сам переводит
+  presence в `sleep` и пишет старт в журнал с реальным предыдущим состоянием;
+- если сон отклонён (например, `forced_awake`), presence не меняется;
 - успех → `status: "sleeping"`, пайплайн завершается как при silence.
 
 ### `send_message`
@@ -87,7 +87,8 @@ definitions: молчание = пустой ответ.
 ```
 
 В rest/working это финальная короткая отмашка: пайплайн отдаёт `reply_tool`,
-`queue.py` отправляет один пузырь. В диалоге инструмента нет.
+`queue.py` отправляет один пузырь, после успешной отправки
+`deliver_messages()` пишет строку в глобальный журнал. В диалоге инструмента нет.
 Для ответа на уведомление `chat_alias` можно опустить — используется текущий
 чат. В проактивном ходе алиас обязателен. Явно указанный неизвестный или пустой
 алиас никогда не заменяется текущим чатом: инструмент возвращает ошибку, а LLM
@@ -150,6 +151,20 @@ Reranker опционален. Если модель не установлена
 | `search_memory` / `peek_recent_chats` | boredom −0.1 |
 | `write_diary` | boredom −0.08, fatigue +0.03 |
 | `update_diary` | boredom −0.04 |
+
+## Журнал действий
+
+В глобальный журнал (`core/action_journal.py`) попадают только действия,
+которые меняют место/состояние или влияют на внешний мир:
+
+- `enter_dialog` / `enter_rest` / `enter_working` — с временем, прошлым
+  состоянием и его длительностью (у `enter_dialog`);
+- `start_sleep` и пробуждение — с реальной длительностью сна;
+- `send_message` — после фактической отправки, текст до 200 символов.
+
+`search_memory`, `write_diary`/`update_diary`, `peek_recent_chats` и обычные
+ответы в диалоге в журнал не пишутся. Подробности —
+[action-journal.md](action-journal.md).
 
 ## Управление через API
 

@@ -15,14 +15,16 @@
 process_message_stream() / process_message()
     │
     ├── req_user / req_chat — снимок хода (параллельные чаты не перетирают self.*)
+    ├── journal_context = get_journal_context()   — снимок журнала на весь ход
     ├── messages = list(agent_internal_history)
     │   ├── proactive_block? → system-блок с инструкциями и списком чатов
     │   └── иначе → notification-блок для rest/working (последние 2000 символов)
     ├── _attach_media(): текущие фото/аудио + последние 3 фото и 2 аудио из истории
     │
     ├── while iteration < max_iterations (runtime, по умолчанию 7):
-    │   ├── presence = get_presence()               (может меняться внутри цикла)
-    │   ├── system_prompt = build_main_llm_system_prompt(...)  (заново каждый раз)
+    │   ├── presence = снимок TurnContext / get_presence() (обновляется только этим ходом)
+    │   ├── system_prompt = build_main_llm_system_prompt(
+    │   │       ..., journal_context=journal_context)          (заново каждый раз)
     │   ├── tools = get_tool_definitions(presence_state, include_proactive=...)
     │   ├── LLM.generate(messages, system_prompt, tools, tool_choice="auto")
     │   │
@@ -37,9 +39,9 @@ process_message_stream() / process_message()
     │   └── есть tool_calls:
     │       ├── контент этого хода НЕ отправляется (это рассуждение)
     │       ├── для каждого action: execute_action → apply_action_effect
-    │       ├── start_sleep(sleeping) → silence
-    │       ├── enter_*/switched → system-сообщение → повтор в новом состоянии
-    │       ├── send_message(ready) → кандидат на финальный ответ
+    │       ├── start_sleep(sleeping) → silence (старт журналируется в sleep manager)
+    │       ├── enter_*/switched → system-сообщение с `[событие]` в конце → повтор
+    │       ├── send_message(ready) → кандидат на финальный ответ (журнал — после отправки)
     │       ├── search_memory → инъекция результатов/ошибки → повтор
     │       ├── peek_recent_chats → инъекция чатов → повтор
     │       ├── write/update_diary → инъекция результата → повтор
@@ -65,6 +67,21 @@ LLM снова — уже по правилам диалога. После `ente
 В уведомлении и блоке presence LLM видит постоянный алиас чата вместо ID;
 executor разрешает алиас в ID до изменения presence или отправки. Неверный
 алиас возвращается в контекст как ошибка и не приводит к отправке.
+
+При смене состояния пайплайн добавляет в **самый конец** контекста свежее
+событие журнала:
+
+```
+Presence switched. Decide in the new state now.
+[событие] [2026-11-06 19:14:30] ты зашла в чат sokol (Федос) из rest, до этого была в rest 21 мин. заметка: ...
+```
+
+`journal_context` читается один раз в начале хода, поэтому это событие не
+дублируется в system prompt. На следующем ходе оно уже находится в блоке
+«Что ты делала сегодня». `send_message` пишется в журнал в
+`core.delivery.deliver_messages()` после успешной отправки. `search_memory`,
+`peek_recent_chats` и дневник в журнал не попадают. Подробности —
+[action-journal.md](action-journal.md).
 
 ## Формат ответа в диалоге
 
@@ -191,6 +208,8 @@ base64 в ответ API не попадает.
 | `MAX_THINK_ITERATIONS` | 7 | `core/pipeline.py` | Fallback-лимит, runtime может переопределить |
 | `MAX_HISTORY_IMAGES` | 3 | `core/media.py` | Фото, остающиеся нативными в истории |
 | `MAX_HISTORY_AUDIOS` | 2 | `core/media.py` | Аудио, остающиеся нативными в истории |
+| `JOURNAL_MAX_LINES` | 60 | `core/action_journal.py` | Сколько строк журнала попадает в промпт |
+| `SEND_TEXT_LIMIT` | 200 | `core/action_journal.py` | Максимум текста `send_message` в журнале |
 | `CONTEXT_MAX_TOKENS` | 30000 | `config.py` | Лимит токенов сообщений в буфере |
 | `MAX_CONTEXT_TOKENS` | 10000 | `config.py` | Целевой лимит выборки контекста |
 | `MAIN_LLM_MAX_TOKENS` | 2048 | `config.py` | Дефолт; пайплайн явно просит 2048 |

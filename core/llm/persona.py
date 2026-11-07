@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
+from core.action_journal import get_journal_context
 from core.db import get_user_info, get_recent_chunks, get_chat_alias
 from core.diary.manager import get_today_diary_context
 from core.needs.tracker import get_tracker as get_needs_tracker
@@ -181,11 +182,17 @@ def _load_state_block(state: str, chat_id: str | None = None) -> str:
 
 
 def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: str = None,
-                                 presence: dict | None = None) -> str:
+                                 presence: dict | None = None,
+                                 journal_context: str | None = None) -> str:
     """Assemble the system prompt for one turn.
 
     ``presence`` is the turn snapshot (see core.delivery.TurnContext). When
     omitted, the current global presence is read (legacy callers/tests).
+
+    ``journal_context`` is the action-journal snapshot for the whole turn.
+    The pipeline reads it once at turn start, so events created *during* the
+    turn are shown separately at the bottom and only move into the journal on
+    the next turn.
     """
     user_name, relationship, now = _get_profile_context(user_id)
     static_prefix = _get_static_prompt_prefix()
@@ -231,6 +238,9 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     if media_note:
         parts.append(media_note)
 
+    # Header before relationship/presence: its text says "see the state block
+    # below", so it must not come after the state.
+    parts.append(header)
     parts.append(relationship_block)
 
     # Presence block — location only (where am I + who writes).
@@ -250,12 +260,22 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     state = presence.get("state") or "rest"
     parts.append(_load_state_block(state, chat_alias))
 
+    # Internal state (fatigue/boredom/social need) belongs with the state
+    # blocks, before the action journal.
+    parts.append(needs_block)
+
+    if journal_context is None:
+        try:
+            journal_context = get_journal_context()
+        except Exception:
+            journal_context = ""
+    if journal_context:
+        parts.append(_load("context/journal_block").replace(
+            "{journal_context}", journal_context))
+
     diary_context = get_today_diary_context()
     if diary_context:
         parts.append(_load("context/diary_block").replace("{diary_context}", diary_context))
-
-    parts.append(needs_block)
-    parts.append(header)
 
     if chat_id and my_user_id:
         session_time = _get_session_time_info(chat_id, my_user_id)

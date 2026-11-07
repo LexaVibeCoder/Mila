@@ -634,27 +634,35 @@ class ToolExecutor:
             user_name = get_chat_display_name(chat_id)
         except Exception:
             user_name = "Без имени"
-        state = enter_dialog(chat_id, user_name, note)
+        presence = enter_dialog(chat_id, user_name, note)
         print(f"[Presence] → dialog with {user_name} (chat {chat_id})")
         return {"type": "enter_dialog", "chat_id": chat_id,
-                "user_name": user_name, "state": state, "status": "switched"}
+                "user_name": user_name,
+                "state": presence.get("state", "dialog"),
+                "presence": presence, "status": "switched",
+                "journal_event": presence.get("journal_event")}
 
     async def _handle_enter_rest(self, params: Dict) -> Dict:
         from core.presence import enter_rest
         note = str(params.get("note", "") or "")
-        state = enter_rest(note)
+        presence = enter_rest(note)
         print("[Presence] → rest")
-        return {"type": "enter_rest", "state": state, "status": "switched"}
+        return {"type": "enter_rest", "state": presence.get("state", "rest"),
+                "presence": presence, "status": "switched",
+                "journal_event": presence.get("journal_event")}
 
     async def _handle_enter_working(self, params: Dict) -> Dict:
         from core.presence import enter_working
         note = str(params.get("note", "") or "")
-        state = enter_working(note)
+        presence = enter_working(note)
         print(f"[Presence] → working ({note[:60]})")
-        return {"type": "enter_working", "state": state, "status": "switched"}
+        return {"type": "enter_working",
+                "state": presence.get("state", "working"),
+                "presence": presence, "status": "switched",
+                "journal_event": presence.get("journal_event")}
 
     async def _handle_start_sleep(self, params: Dict) -> Dict:
-        from core.presence import enter_sleep_note, get_presence
+        from core.presence import get_presence
         try:
             duration = int(params.get("duration_minutes", 0) or 0)
         except (TypeError, ValueError):
@@ -665,29 +673,32 @@ class ToolExecutor:
         duration = max(1, min(duration, 12 * 60))
         note = str(params.get("note", "") or "")
         prev = get_presence()
-        enter_sleep_note(note or f"{duration} min")
+        # start_sleep switches presence itself. Calling enter_sleep_note here
+        # would make the journal lose the real previous state.
         try:
-            from core.sleep.manager import start_sleep, is_sleeping
+            from core.sleep.manager import start_sleep
             result = await start_sleep(duration_minutes=duration,
-                                       triggered_by="mila_tool")
+                                       triggered_by="mila_tool", note=note)
         except Exception as e:
             result = {"success": False, "message": str(e)}
         if not result.get("success"):
             # Refused (e.g. forced_awake) → don't leave presence stuck
             # in sleep while Mila is actually awake; restore previous state.
+            # journal=False: a refused sleep is not a real transition.
             try:
                 from core.sleep.manager import is_sleeping as _is_sleeping
                 if not _is_sleeping():
                     if prev.get("state") == "dialog" and prev.get("focus_chat_id"):
                         from core.presence import enter_dialog as _ed
                         _ed(str(prev["focus_chat_id"]),
-                            prev.get("focus_user_name"), "sleep refused")
+                            prev.get("focus_user_name"), "sleep refused",
+                            journal=False)
                     elif prev.get("state") == "working":
                         from core.presence import enter_working as _ew
-                        _ew(prev.get("note", ""))
+                        _ew(prev.get("note", ""), journal=False)
                     else:
                         from core.presence import enter_rest as _er
-                        _er("sleep refused")
+                        _er("sleep refused", journal=False)
             except Exception:
                 pass
             return {"type": "start_sleep", "status": "error",

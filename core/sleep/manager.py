@@ -50,11 +50,15 @@ def _seconds_until_deadline(deadline_iso: str | None) -> float | None:
 
 
 def _presence_to_rest(note: str) -> None:
-    """Best-effort presence sync on wake: sleep ended → back to rest."""
+    """Best-effort presence sync on wake: sleep ended → back to rest.
+
+    ``journal=False``: waking is journaled once by ``_record_sleep_wake`` with
+    the real duration. A second "перешла в rest" line would only add noise.
+    """
     try:
         from core.presence import get_presence, enter_rest
         if get_presence().get("state") == "sleep":
-            enter_rest(note)
+            enter_rest(note, journal=False)
     except Exception:
         pass
 
@@ -67,6 +71,28 @@ def _ensure_presence_sleep(note: str) -> None:
             enter_sleep_note(note)
     except Exception:
         pass
+
+
+def _presence_snapshot() -> dict:
+    try:
+        from core.presence import get_presence
+        return get_presence()
+    except Exception:
+        return {"state": "rest", "focus_chat_id": None,
+                "focus_user_name": None, "note": "", "updated_at": None}
+
+
+def _record_sleep_wake(started_at: datetime | None, source: str) -> None:
+    """Journal one wake event with the real wall-clock sleep duration."""
+    if started_at is None:
+        return
+    try:
+        from core.action_journal import record_sleep_wake
+        now = datetime.now(timezone.utc)
+        duration = max(0.0, (now - started_at).total_seconds())
+        record_sleep_wake(duration, now=now, source=source)
+    except Exception as e:
+        print(f"[Sleep] journal wake failed: {e}")
 
 
 async def _resume_sleep_until_deadline(session_id: str, deadline_iso: str):
@@ -155,6 +181,7 @@ async def recover_from_crash() -> bool:
         if not staged:
             print("[Recovery] All changes were committed. Resuming normal operation.")
             set_state(SleepState.AWAKE)
+            _record_sleep_wake(_parse_iso(current.get("started_at")), "recovery")
             return True
         else:
             print(f"[Recovery] {len(staged)} unapplied operations found → rolling back")
@@ -171,14 +198,20 @@ async def recover_from_crash() -> bool:
 
 
 async def rollback_all(session_id: str = None):
+    before_rollback = get_current_state()
+    sleep_started = _parse_iso(before_rollback.get("started_at"))
+    was_sleeping = before_rollback.get("state") in (
+        "sleeping", "committing", "sleep_error")
+
     if not session_id:
-        current = get_current_state()
-        session_id = current.get("session_id")
+        session_id = before_rollback.get("session_id")
 
     if not session_id:
         print("[Rollback] No session_id to rollback")
         set_state(SleepState.AWAKE)
         _presence_to_rest("sleep rollback")
+        if was_sleeping:
+            _record_sleep_wake(sleep_started, "rollback")
         return
 
     print(f"[Rollback] Rolling back session {session_id[:8]}...")
@@ -247,6 +280,8 @@ async def rollback_all(session_id: str = None):
         print("[Rollback] WARNING: diary backup failed — keeping entries")
     set_state(SleepState.AWAKE)
     _presence_to_rest("sleep rollback")
+    if was_sleeping:
+        _record_sleep_wake(sleep_started, "rollback")
     print(f"[Rollback] Complete")
 
 
@@ -254,6 +289,12 @@ async def commit_all(session_id: str) -> bool:
     print(f"\n{'='*60}")
     print(f"  COMMITTING SLEEP CHANGES")
     print(f"{'='*60}\n")
+
+    # Capture the session start before COMMITTING overwrites the state: the
+    # wake event needs the real wall-clock duration.
+    before_commit = get_current_state()
+    sleep_started = _parse_iso(before_commit.get("started_at"))
+    was_sleeping = before_commit.get("state") in ("sleeping", "committing")
 
     set_state(SleepState.COMMITTING)
 
@@ -276,6 +317,8 @@ async def commit_all(session_id: str) -> bool:
 
     set_state(SleepState.AWAKE)
     _presence_to_rest("sleep complete")
+    if was_sleeping:
+        _record_sleep_wake(sleep_started, "commit")
 
     print(f"[Commit] Sleep session {session_id[:8]}... committed successfully")
     return True
@@ -337,9 +380,13 @@ async def execute_sleep(session_id: str, duration_minutes: int = None) -> bool:
         _sleep_in_progress = False
 
 
-async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual") -> Dict[str, Any]:
+async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual",
+                      note: str = "") -> Dict[str, Any]:
     global _sleep_in_progress, _current_session_id, _sleep_start_time, _sleep_duration
 
+    # Snapshot BEFORE presence is switched to sleep: the journal needs to know
+    # where Mila was (rest/working/dialog) and for how long.
+    prev_presence = _presence_snapshot()
     current_state = get_state()
     if current_state == SleepState.SLEEPING:
         return {
@@ -382,7 +429,18 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
               duration_minutes=duration_minutes)
     # Single source of truth for "Mila sleeps": sleep_state row + presence.
     # Centralized here so manual (/sleep API), auto and tool paths agree.
-    _ensure_presence_sleep(f"{duration_minutes} min" if duration_minutes else "until woken")
+    _ensure_presence_sleep(
+        note or (f"{duration_minutes} min" if duration_minutes else "until woken"))
+
+    # Journal the start once, here — this is the only place that knows the
+    # real planned duration and the previous presence. Never fail sleep because
+    # of the journal.
+    try:
+        from core.action_journal import record_sleep_start
+        record_sleep_start(duration_minutes, prev_presence,
+                           note=note, source=triggered_by)
+    except Exception as e:
+        print(f"[Sleep] journal start failed: {e}")
 
     # Reset needs tracker offsets to avoid double-counting during sleep
     get_needs_tracker().reset_offsets()

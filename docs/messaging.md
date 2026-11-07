@@ -118,7 +118,8 @@ loop:
      pre-send interruption-check → проверка сна → **единый шлюз**
      `core.delivery.deliver_messages` (`send_typing` → пауза 0.3–1.0с →
      `send_text`; после каждого пузыря `add_chunk` + `push_message(
-     role="assistant")` в тот же чат);
+     role="assistant")` в тот же чат; для `via="send_message_brush_off"` —
+     ещё и строка в глобальный `action_journal`);
    - `silence` — флаг, отправки нет;
    - `search_result` — лог;
    - `error` — лог.

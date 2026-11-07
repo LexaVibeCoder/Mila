@@ -171,6 +171,34 @@ CREATE TABLE presence_state (
 Одна строка `id=1`, создаётся лениво. Сон как цикл принадлежит `sleep_state`;
 здесь только намерение/локация.
 
+### action_journal (глобальный журнал действий)
+
+Создаётся лениво `core/action_journal.py::_ensure_table()`:
+
+```sql
+CREATE TABLE action_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,          -- UTC ISO
+    kind TEXT NOT NULL,                -- state | wake | send_message
+    state TEXT,                        -- rest | dialog | working | sleep
+    prev_state TEXT,
+    chat_id TEXT,
+    chat_name TEXT,
+    chat_alias TEXT,
+    prev_chat_id TEXT,
+    prev_chat_name TEXT,
+    prev_chat_alias TEXT,
+    prev_duration_seconds REAL,
+    note TEXT DEFAULT '',
+    text TEXT DEFAULT '',
+    meta TEXT DEFAULT ''               -- JSON: source, duration_minutes, duration_seconds
+);
+```
+
+Индекс `idx_action_journal_created` ускоряет выборку «с локальной полуночи».
+Записи не удаляются при ротации промпта; в system prompt попадают только
+последние `JOURNAL_MAX_LINES = 60` строк. Подробности — [action-journal.md](action-journal.md).
+
 ### user_attitude_history
 
 Создаётся лениво при первом обращении к истории отношения или первом изменении:
@@ -334,6 +362,7 @@ memories.user_id                ──→ users.user_id
 chunks.chat_id                  ──→ chats.chat_id
 chunks.user_id                  ──→ users.user_id
 user_attitude_history.user_id   ──→ users.user_id
+action_journal.chat_id          ──→ chats.chat_id (снимок имени/алиаса, без FK)
 sleep_message_queue.session_id  ──→ sleep_state.session_id
 sleep_transaction_staging.session_id ──→ sleep_state.session_id
 ```
@@ -354,5 +383,6 @@ init_db()  # users/chats/chat_members/chunks/memories/media_logs
 - `diary_entries` — `_ensure_diary_table()`;
 - `mila_memory_chunks` — `_ensure_table()`;
 - `presence_state` — `_ensure_table()` при первом обращении;
+- `action_journal` — `_ensure_table()` при первом чтении/записи;
 - сон — `_ensure_sleep_tables()`;
 - `user_attitude_history` — при первом изменении отношения / запросе истории.

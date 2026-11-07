@@ -1,16 +1,7 @@
-"""Turn ownership and the single outbound delivery gateway.
+"""Turn-local routing and the single outbound delivery gateway.
 
-The recipient of a reply is decided by the chat that OWNS the turn, never by
-the global presence focus. ``presence`` decides HOW Mila behaves (state,
-prompt, tools); it must not decide WHERE the message goes.
-
-A turn may explicitly allow another destination:
-
-- ``send_message`` with a resolved alias (the model picked a chat), and
-- a proactive turn that entered a dialog (it had no chat to begin with).
-
-Everything else is rejected before anything is sent (fail closed), so a stale
-or foreign chat id can never silently redirect a reply.
+Ordinary speech goes to the current dialog focus, never to the notification
+sender by default. Explicit one-shot notes may grant a different target.
 
 Keeping the chunk/context writes here means every sent bubble is recorded in
 exactly the chat it was delivered to, and only after a successful send.
@@ -41,10 +32,9 @@ def is_chat_target(value: str | None) -> bool:
 class TurnContext:
     """Immutable identity of a turn + explicit delivery grants.
 
-    ``chat_id``/``user_id``/``presence`` are snapshotted once when the turn
-    starts. ``presence`` is a dict from ``core.presence.get_presence()`` so the
-    pipeline never has to re-read global state mid-flight (a parallel turn
-    switching focus must not change this turn's mode, prompt or recipient).
+    ``chat_id`` and ``user_id`` identify the notification. ``presence`` is
+    snapshotted at turn start and refreshed after this turn's transitions.
+    Callers check it against global state before delivering.
     """
 
     turn_id: str
@@ -53,6 +43,16 @@ class TurnContext:
     presence: dict = field(default_factory=dict)
     proactive: bool = False
     _granted: list[str] = field(default_factory=list, repr=False)
+
+    def __post_init__(self) -> None:
+        self.set_presence(self.presence)
+
+    def set_presence(self, presence: dict) -> None:
+        """Refresh the turn's focus after its own successful transition."""
+        self.presence = dict(presence)
+        self._granted.clear()
+        if self.mode == "dialog":
+            self.allow(self.presence.get("focus_chat_id"))
 
     @property
     def mode(self) -> str:
@@ -71,18 +71,17 @@ class TurnContext:
     def resolve_target(self, requested: str | None = None) -> Optional[str]:
         """Return a valid target, or None when the request is not allowed.
 
-        With no ``requested`` value: the last explicit grant wins (proactive
-        ``enter_dialog`` / ``send_message``), otherwise the turn owner.
-        With a ``requested`` value: it must be the owner or an explicit grant.
+        The focus or the last explicit one-shot grant wins; the notification
+        sender is not an implicit destination.
         """
         if requested is not None:
             raw = str(requested).strip()
-            if raw == str(self.chat_id) or raw in self._granted:
+            if raw in self._granted:
                 return raw if is_chat_target(raw) else None
             return None
         if self._granted:
             return self._granted[-1]
-        return str(self.chat_id) if is_chat_target(self.chat_id) else None
+        return None
 
 
 @dataclass
@@ -106,8 +105,8 @@ async def deliver_messages(
 ) -> DeliveryResult:
     """Send text bubbles to ``target`` and record each one after the send.
 
-    ``before_bubble(i)`` is an optional async guard called before bubbles
-    after the first one (used by the reactive worker for interruption checks);
+    ``before_bubble(i)`` is an optional async guard called before each bubble
+    and again after the typing delay (used for interruption checks);
     returning False aborts the rest of the batch without failing it.
     """
     cleans = [t for t in (bubbles or []) if (t or "").strip()]
@@ -123,6 +122,8 @@ async def deliver_messages(
             indexer = None
 
     print(f"\n[SENDING via {via}] {len(cleans)} bubble(s)... → chat {target}")
+    if before_bubble is not None and not await before_bubble(0):
+        return DeliveryResult(ok=False, target=target, error="interrupted")
     try:
         await send_typing(client, int(target))
     except Exception:
@@ -140,6 +141,8 @@ async def deliver_messages(
             except Exception:
                 pass
             await asyncio.sleep(random.uniform(0.3, 1.0))
+        if before_bubble is not None and not await before_bubble(i):
+            return DeliveryResult(ok=False, target=target, sent=sent, error="interrupted")
         try:
             await send_text(client, int(target), clean)
         except Exception as e:

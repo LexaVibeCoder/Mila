@@ -55,6 +55,8 @@ class MessageCoordinate:
         self._tasks = {}       # chat_id -> asyncio.Task
         self._chat_user = {}   # chat_id -> sender user_id (for persona/pipeline)
         self._batch_media = {} # chat_id -> {"image_data_urls": [...], "audio": (b64, fmt)|None}
+        self.turn_lock = asyncio.Lock()  # one global Mila, including proactive turns
+        self._revisions: dict[str, int] = {}
         # Peer typing state: chat_id -> monotonic timestamp of last
         # non-cancel updateChatAction. Expires via TYPING_FRESHNESS_SECONDS.
         self._typing_last: dict[str, float] = {}
@@ -180,6 +182,7 @@ class MessageCoordinate:
 
         # Accumulate text for this batch.
         self._pending.setdefault(chat_id, []).append(placeholder)
+        self._revisions[chat_id] = self._revisions.get(chat_id, 0) + 1
         self._chat_user[chat_id] = user_id
 
         # Accumulate native media for the current batch.
@@ -250,8 +253,19 @@ class MessageCoordinate:
 
                 # 3. Generate for whatever accumulated; restart if new message
                 #    arrived or typing started while we were generating.
-                restart = await self._generate_for_chat(client, chat_id)
+                async with self.turn_lock:
+                    restart = await self._generate_for_chat(client, chat_id)
                 if restart:
+                    # A focused peer may be typing while this worker handles
+                    # another chat's notification; don't spin under the lock.
+                    focus = str(get_presence().get("focus_chat_id") or "")
+                    if focus and focus != chat_id and self._should_abort_for_typing(focus):
+                        max_wait = getattr(settings, "TYPING_WAIT_MAX_SECONDS", 8.0)
+                        step = getattr(settings, "TYPING_POLL_INTERVAL", 0.5)
+                        waited = 0.0
+                        while self._should_abort_for_typing(focus) and waited < max_wait:
+                            await asyncio.sleep(step)
+                            waited += step
                     continue
 
                 # If a message slipped in after generation finished (e.g. during
@@ -343,7 +357,7 @@ class MessageCoordinate:
             return "typing"
         return None
 
-    def _restore_pending(self, chat_id: str, batch_text: str) -> None:
+    def _restore_pending(self, chat_id: str, batch_text: str, media: dict | None = None) -> None:
         """Put a drained-but-undelivered batch back to the front of the queue.
 
         Called when a run is aborted (new message / peer typing) after its
@@ -355,6 +369,11 @@ class MessageCoordinate:
             return
         current = self._pending.get(chat_id) or []
         self._pending[chat_id] = [batch_text] + current
+        if media:
+            slot = self._batch_media.setdefault(chat_id, {})
+            for key in ("image_data_urls", "audios", "image_paths", "audio_paths", "event_lines"):
+                if media.get(key):
+                    slot[key] = list(media[key]) + list(slot.get(key) or [])
 
     async def _generate_for_chat(self, client, chat_id: str) -> bool:
         """Send the accumulated batch to the pipeline.
@@ -445,17 +464,13 @@ class MessageCoordinate:
             user_visible_history = bot._resolve_roles_in_histories(raw_user_visible, chat_id)
             agent_internal_history = bot._resolve_roles_in_histories(raw_internal, chat_id)
 
-            # Pin the pipeline to this chat/user (legacy mutable fields kept
-            # for observatory compat) + snapshot explicitly for this turn so a
-            # parallel chat can't hijack routing mid-generation.
+            # Pin the notification identity separately from dialog focus.
             bot.pipeline.user_id = user_id
             bot.pipeline.chat_id = chat_id
             request_user_id = user_id
             request_chat_id = chat_id
 
-            # Snapshot presence once per turn. The pipeline never re-reads the
-            # global state mid-flight, so a parallel chat switching focus can't
-            # change this turn's mode, prompt, tools or recipient.
+            # Snapshot global presence; detect external changes before sending.
             try:
                 presence_snapshot = get_presence()
             except Exception:
@@ -466,6 +481,27 @@ class MessageCoordinate:
                 user_id=user_id,
                 presence=presence_snapshot,
             )
+            revisions = dict(self._revisions)
+
+            def interrupted() -> str | None:
+                reason = self._interrupted(chat_id, event)
+                if reason:
+                    return reason
+                focus = str(turn.presence.get("focus_chat_id") or "") if turn.mode == "dialog" else ""
+                if focus and focus != chat_id:
+                    if self._revisions.get(focus, 0) > revisions.get(focus, 0):
+                        return "focus message"
+                    if self._should_abort_for_typing(focus):
+                        return "focus typing"
+                current = get_presence()
+                for key in ("state", "focus_chat_id", "updated_at"):
+                    if current.get(key) != turn.presence.get(key):
+                        return "presence changed"
+                return None
+
+            def load_history(target):
+                _, history = bot._build_histories(target)
+                return bot._resolve_roles_in_histories(history, target)
 
             full_response = ""
             has_silence_action = False
@@ -474,8 +510,7 @@ class MessageCoordinate:
             async def _send_bubbles(texts: list, turn: TurnContext, via: str) -> bool:
                 """Pre-send checks + the shared delivery gateway.
 
-                The destination comes from `turn` (owner chat or an explicit
-                grant), never from the pipeline event or global presence.
+                The destination comes from the turn's focus or explicit note.
                 """
                 nonlocal sent_any
                 cleans = [strip_leading_timestamp((t or "").strip())
@@ -491,11 +526,9 @@ class MessageCoordinate:
                         return False
                 except Exception:
                     pass
-                pre_send = self._interrupted(chat_id, event)
+                pre_send = interrupted()
                 if pre_send is not None:
-                    if not sent_any and not has_silence_action:
-                        self._restore_pending(chat_id, batch_text)
-                    print(f"[Batch] Interrupted before send ({pre_send}) — batch restored")
+                    print(f"[Batch] Interrupted before send ({pre_send})")
                     return False
 
                 target = turn.resolve_target()
@@ -506,7 +539,7 @@ class MessageCoordinate:
                     return False
 
                 async def _bubble_guard(_index: int) -> bool:
-                    return self._interrupted(chat_id, event) is None
+                    return interrupted() is None
 
                 result = await deliver_messages(
                     client=client,
@@ -531,15 +564,16 @@ class MessageCoordinate:
                 request_user_id=request_user_id,
                 request_chat_id=request_chat_id,
                 turn=turn,
+                history_loader=load_history,
             ):
                 # If a new message arrived or the peer started typing
                 # mid-generation → stop and wait for their message.
                 # The batch was already drained: put it back if nothing was
                 # delivered yet, otherwise this turn would be silently lost.
-                reason = self._interrupted(chat_id, event)
+                reason = interrupted()
                 if reason is not None:
                     if not sent_any and not has_silence_action:
-                        self._restore_pending(chat_id, batch_text)
+                        self._restore_pending(chat_id, batch_text, media)
                     print(f"[Batch] Interrupted during generation ({reason}) — batch restored")
                     return True
 
@@ -571,12 +605,13 @@ class MessageCoordinate:
                     via = gen_event.get("via", "bubbles")
                     joined = "\n".join(t for t in texts if t)
                     full_response = joined or full_response
-                    # Recipient comes from the turn owner/grant, not the event.
+                    # Recipient comes from focus/grant, not the event.
                     ok = await _send_bubbles(texts, turn, via)
                     if not ok:
                         # Interrupted before send → restart batch.
-                        post_check = self._interrupted(chat_id, event)
+                        post_check = interrupted()
                         if post_check is not None and not sent_any:
+                            self._restore_pending(chat_id, batch_text, media)
                             return True
                 elif etype == "silence":
                     has_silence_action = True
@@ -597,10 +632,10 @@ class MessageCoordinate:
             # rest answers via enter_dialog/send_message tools.
             # Don't do anything while the user is typing or a new message
             # arrived — restore the batch and wait for the full message instead.
-            post_reason = self._interrupted(chat_id, event)
+            post_reason = interrupted()
             if post_reason is not None:
                 if not sent_any and not has_silence_action:
-                    self._restore_pending(chat_id, batch_text)
+                    self._restore_pending(chat_id, batch_text, media)
                 print(f"[Batch] Interrupted after generation ({post_reason}) — batch restored")
                 return True
             if not sent_any:

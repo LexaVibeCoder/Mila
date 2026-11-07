@@ -1,4 +1,4 @@
-"""Replies are routed by the turn owner, never by global presence."""
+"""Replies follow the global dialog focus, not the notification sender."""
 
 import asyncio
 from types import SimpleNamespace
@@ -46,7 +46,7 @@ async def _run(pipeline, turn, user="user-2", chat="20002"):
 
 
 @pytest.mark.asyncio
-async def test_dialog_turn_replies_to_owner_not_focus(monkeypatch):
+async def test_dialog_turn_replies_to_focus_not_notification_sender(monkeypatch):
     fake = _FakeLLM([_reply("hello")])
     monkeypatch.setattr(ThinkPipeline, "main_llm", property(lambda self: fake))
     monkeypatch.setattr(pipeline_module, "_max_iterations", lambda: 3)
@@ -63,9 +63,8 @@ async def test_dialog_turn_replies_to_owner_not_focus(monkeypatch):
 
     # The event itself has no destination...
     assert events[-1] == {"kind": "reply_bubbles", "texts": ["hello"]}
-    # ...and the turn owner is the only implicit recipient.
-    assert turn.resolve_target() == "20002"
-    assert turn.resolve_target("10001") is None
+    assert turn.resolve_target() == "10001"
+    assert turn.resolve_target("20002") is None
 
 
 @pytest.mark.asyncio
@@ -85,6 +84,7 @@ async def test_presence_snapshot_is_not_reread_mid_turn(monkeypatch):
                         lambda *a, **k: prompts.append(k.get("presence")) or "system")
     pipeline = ThinkPipeline(None, None, "user-2", "20002")
     monkeypatch.setattr(pipeline, "_attach_media", lambda m, media, default_chat_id=None: m)
+    monkeypatch.setattr(pipeline, "_build_notification_block", lambda *a, **k: None)
 
     turn = TurnContext(turn_id="turn-1", chat_id="20002", user_id="user-2",
                        presence=DIALOG_A)
@@ -94,19 +94,19 @@ async def test_presence_snapshot_is_not_reread_mid_turn(monkeypatch):
     assert read_calls == []
     assert prompts and prompts[0]["state"] == "dialog"
     assert prompts[0]["focus_chat_id"] == "10001"
-    assert turn.resolve_target() == "20002"
+    assert turn.resolve_target() == "10001"
 
 
 def test_resolve_target_fails_closed_for_foreign_chat():
     turn = TurnContext(turn_id="turn-1", chat_id="20002", user_id="user-2",
                        presence=DIALOG_A)
 
-    assert turn.resolve_target() == "20002"
-    assert turn.resolve_target("10001") is None
+    assert turn.resolve_target() == "10001"
+    assert turn.resolve_target("20002") is None
     assert turn.resolve_target("30003") is None
 
-    turn.allow("10001")
-    assert turn.resolve_target() == "10001"
+    turn.allow("20002")
+    assert turn.resolve_target() == "20002"
     assert turn.resolve_target("30003") is None
 
 
@@ -201,7 +201,7 @@ class _FakeBot:
 
 
 @pytest.mark.asyncio
-async def test_queue_turn_sends_to_owner_not_presence_focus(monkeypatch):
+async def test_queue_turn_sends_to_presence_focus(monkeypatch):
     bot = _FakeBot()
     monkeypatch.setattr(queue_module, "get_presence", lambda: dict(DIALOG_A))
     monkeypatch.setattr(queue_module, "get_user_info", lambda user_id: {})
@@ -230,10 +230,160 @@ async def test_queue_turn_sends_to_owner_not_presence_focus(monkeypatch):
 
     await coordinator._generate_for_chat(client=None, chat_id="20002")
 
-    # The turn owner (B) gets the reply; A's focus changes nothing.
-    assert bot.sent == [("20002", "hello from B")]
-    assert "10001" not in [chat for chat, _ in bot.sent]
-    assert bot.recorded == ["20002"]
+    assert bot.sent == [("10001", "hello from B")]
+    assert bot.recorded == ["10001"]
     turn = bot.pipeline.calls[0]["turn"]
     assert turn.chat_id == "20002"
     assert turn.presence["focus_chat_id"] == "10001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("incoming", "should_interrupt"), [
+    ("10001", True),   # current dialog
+    ("20002", True),   # source of the notification
+    ("30003", False),  # unrelated chat
+])
+async def test_queue_interrupts_only_focus_or_notification(monkeypatch, incoming, should_interrupt):
+    bot = _FakeBot()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stream(**kwargs):
+        entered.set()
+        await release.wait()
+        yield {"type": "reply", "texts": ["response"], "via": "bubbles"}
+
+    bot.pipeline.process_message_stream = stream
+    monkeypatch.setattr(queue_module, "get_presence", lambda: dict(DIALOG_A))
+    monkeypatch.setattr(queue_module, "get_user_info", lambda user_id: {})
+    monkeypatch.setattr(queue_module, "get_needs_tracker", lambda: SimpleNamespace(
+        get_needs=lambda chat_id=None: {"current_hour": 12, "fatigue": 0.0},
+        apply_action_effect=lambda *a: None))
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+
+    async def send(client, chat_id, text):
+        bot.sent.append((str(chat_id), text))
+
+    async def typing(client, chat_id):
+        pass
+
+    monkeypatch.setattr(delivery, "send_text", send)
+    monkeypatch.setattr(delivery, "send_typing", typing)
+    monkeypatch.setattr(delivery.random, "uniform", lambda *a: 0)
+    monkeypatch.setattr(delivery, "push_message", lambda *a, **k: None)
+    coordinator = MessageCoordinate(bot)
+    coordinator._events["20002"] = asyncio.Event()
+    coordinator._pending["20002"] = ["initial notification"]
+    coordinator._chat_user["20002"] = "user-2"
+    coordinator._batch_media["20002"] = {"image_data_urls": ["synthetic-image"]}
+    task = asyncio.create_task(coordinator._generate_for_chat(None, "20002"))
+    await entered.wait()
+    coordinator._revisions[incoming] = 1
+    if incoming == "20002":
+        coordinator._pending["20002"].append("additional notification")
+        coordinator._events["20002"].set()
+    release.set()
+    assert await task is should_interrupt
+    if should_interrupt:
+        assert not bot.sent
+        assert coordinator._pending["20002"][0] == "initial notification"
+        assert coordinator._batch_media["20002"]["image_data_urls"] == ["synthetic-image"]
+        if incoming == "20002":
+            assert coordinator._pending["20002"] == ["initial notification", "additional notification"]
+    else:
+        assert bot.sent == [("10001", "response")]
+
+
+@pytest.mark.asyncio
+async def test_workers_serialize_turns_without_blocking_incoming(monkeypatch):
+    bot = _FakeBot()
+    first_started, release = asyncio.Event(), asyncio.Event()
+    started = []
+
+    async def stream(**kwargs):
+        started.append(kwargs["request_chat_id"])
+        if len(started) == 1:
+            first_started.set()
+            await release.wait()
+        yield {"type": "silence", "reason": "test"}
+
+    bot.pipeline.process_message_stream = stream
+    monkeypatch.setattr(queue_module, "get_presence", lambda: dict(DIALOG_A))
+    monkeypatch.setattr(queue_module, "get_user_info", lambda user_id: {})
+    monkeypatch.setattr(queue_module, "get_needs_tracker", lambda: SimpleNamespace(
+        get_needs=lambda chat_id=None: {"current_hour": 12, "fatigue": 0.0},
+        apply_action_effect=lambda *a: None))
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+    monkeypatch.setattr(queue_module.settings, "ENABLE_TYPING_WAIT", False)
+    coordinator = MessageCoordinate(bot)
+    for chat in ("10001", "20002"):
+        coordinator._events[chat] = asyncio.Event()
+        coordinator._pending[chat] = ["message"]
+        coordinator._chat_user[chat] = "user"
+    first = asyncio.create_task(coordinator._worker(None, "10001"))
+    await first_started.wait()
+    second = asyncio.create_task(coordinator._worker(None, "20002"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert started == ["10001"]
+    assert coordinator._pending["20002"] == ["message"]
+    release.set()
+    await asyncio.gather(first, second)
+    assert started == ["10001", "20002"]
+
+
+@pytest.mark.asyncio
+async def test_external_presence_change_blocks_stale_reply(monkeypatch):
+    bot = _FakeBot()
+    entered, release = asyncio.Event(), asyncio.Event()
+    presence = dict(DIALOG_A)
+
+    async def stream(**kwargs):
+        entered.set()
+        await release.wait()
+        yield {"type": "reply", "texts": ["response"], "via": "bubbles"}
+
+    bot.pipeline.process_message_stream = stream
+    monkeypatch.setattr(queue_module, "get_presence", lambda: dict(presence))
+    monkeypatch.setattr(queue_module, "get_user_info", lambda user_id: {})
+    monkeypatch.setattr(queue_module, "get_needs_tracker", lambda: SimpleNamespace(
+        get_needs=lambda chat_id=None: {"current_hour": 12, "fatigue": 0.0},
+        apply_action_effect=lambda *a: None))
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+    coordinator = MessageCoordinate(bot)
+    coordinator._events["10001"] = asyncio.Event()
+    coordinator._pending["10001"] = ["message"]
+    task = asyncio.create_task(coordinator._generate_for_chat(None, "10001"))
+    await entered.wait()
+    presence.update(state="dialog", focus_chat_id="20002", updated_at="new")
+    release.set()
+    assert await task is True
+    assert coordinator._pending["10001"] == ["message"]
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_presence_change_during_typing_delay_blocks_first_bubble(monkeypatch):
+    bot = _FakeBot()
+    presence = dict(DIALOG_A)
+    monkeypatch.setattr(queue_module, "get_presence", lambda: dict(presence))
+    monkeypatch.setattr(queue_module, "get_user_info", lambda user_id: {})
+    monkeypatch.setattr(queue_module, "get_needs_tracker", lambda: SimpleNamespace(
+        get_needs=lambda chat_id=None: {"current_hour": 12, "fatigue": 0.0},
+        apply_action_effect=lambda *a: None))
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+
+    async def typing(client, chat_id):
+        presence.update(focus_chat_id="20002", updated_at="new")
+
+    async def send(client, chat_id, text):
+        bot.sent.append(text)
+
+    monkeypatch.setattr(delivery, "send_typing", typing)
+    monkeypatch.setattr(delivery, "send_text", send)
+    monkeypatch.setattr(delivery.random, "uniform", lambda *a: 0)
+    coordinator = MessageCoordinate(bot)
+    coordinator._events["10001"] = asyncio.Event()
+    coordinator._pending["10001"] = ["message"]
+    assert await coordinator._generate_for_chat(None, "10001") is True
+    assert bot.sent == []
+    assert coordinator._pending["10001"] == ["message"]

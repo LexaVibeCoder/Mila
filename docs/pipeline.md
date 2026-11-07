@@ -18,7 +18,7 @@ process_message_stream() / process_message()
     ├── journal_context = get_journal_context()   — снимок журнала на весь ход
     ├── messages = list(agent_internal_history)
     │   ├── proactive_block? → system-блок с инструкциями и списком чатов
-    │   └── иначе → notification-блок для rest/working (последние 2000 символов)
+    │   └── иначе → notification-блок для rest/working или чужого чата (последние 2000 символов)
     ├── _attach_media(): текущие фото/аудио + последние 3 фото и 2 аудио из истории
     │
     ├── while iteration < max_iterations (runtime, по умолчанию 7):
@@ -58,12 +58,17 @@ process_message_stream() / process_message()
 |-----------|-------|-------------|
 | `rest` | текстовый ответ здесь игнорируется | `enter_dialog`, `send_message` (одна отмашка), `enter_working`, `start_sleep` |
 | `working` | то же | `enter_dialog`, `send_message`, `enter_rest`, `start_sleep` |
-| `dialog` | обычный текст; пузыри через пустую строку; пустой ответ = молчание | `search_memory`, `write_diary`, `update_diary`, presence-тулы, `start_sleep` |
+| `dialog` | обычный текст в текущий чат; пустой ответ = молчание | `send_message` (разовая отмашка), `search_memory`, `write_diary`, `update_diary`, presence-тулы, `start_sleep` |
 | `sleep` | пайплайн обычно не работает | `enter_dialog`, `start_sleep` |
 | proactive | `rest/working` + `peek_recent_chats` | те же + peek |
 
 После `enter_dialog` пайплайн **пересобирает system prompt и tools** и вызывает
 LLM снова — уже по правилам диалога. После `enter_rest`/`enter_working` — наоборот.
+Причина `note` обязательна и явно включается в сообщение о переходе даже при
+ошибке журнала. В контекст добавляются история и профиль выбранного чата; чужая
+история не переносится, кроме указанной самой моделью причины перехода. Если
+уведомление пришло не из фокусного чата, его текст помечается отдельно.
+Список всех известных чатов с алиасами доступен модели в system prompt.
 В уведомлении и блоке presence LLM видит постоянный алиас чата вместо ID;
 executor разрешает алиас в ID до изменения presence или отправки. Неверный
 алиас возвращается в контекст как ошибка и не приводит к отправке.
@@ -121,11 +126,11 @@ done          → {"type": "done", "result": {...}}
 error         → {"type": "error", "error": "..."}
 ```
 
-Событие `reply` **не содержит получателя**: маршрут определяется `TurnContext`
-(владелец хода или явно разрешённая цель), а не глобальным `presence`.
+Событие `reply` **не содержит получателя**: `TurnContext` хранит снимок
+глобального фокуса для обычного текста или явно разрешённую цель записки.
 `_run_stream`/`process_message_stream` принимают `turn=TurnContext(...)`;
-внутри `presence` снимается один раз на старте хода и перечитывается только
-после собственного `enter_dialog/enter_rest/enter_working` этого же хода.
+внутри `presence` снимается на старте и обновляется после собственных переходов;
+перед отправкой проверяется, что внешнее изменение не сделало снимок устаревшим.
 
 `process_message()` выполняет тот же цикл и возвращает `result` целиком.
 `result["reply_chat_id"]` остаётся для логов/Observatory и вычисляется из

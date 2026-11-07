@@ -36,6 +36,22 @@ def get_tool_definitions(presence_state: str = "rest",
     defs: List[Dict] = []
 
     if state == "dialog":
+        if send_enabled:
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "description": "Send one short note to another chat without switching dialogs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_alias": {"type": "string", "description": "Target chat alias"},
+                            "text": {"type": "string", "description": "One short line"},
+                        },
+                        "required": ["chat_alias", "text"],
+                    },
+                },
+            })
         if search_enabled:
             defs.append({
                 "type": "function",
@@ -97,14 +113,14 @@ def get_tool_definitions(presence_state: str = "rest",
                 "type": "function",
                 "function": {
                     "name": "enter_dialog",
-                    "description": "Switch to a different chat using its alias from the notification.",
+                    "description": "Switch to a chat using its alias and explain why.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "chat_alias": {"type": "string", "description": "Alias of the chat to switch to"},
-                            "note": {"type": "string", "description": "Optional reason"},
+                            "note": {"type": "string", "description": "Reason for entering this dialog"},
                         },
-                        "required": ["chat_alias"],
+                        "required": ["chat_alias", "note"],
                     },
                 },
             })
@@ -157,9 +173,7 @@ def get_tool_definitions(presence_state: str = "rest",
     # rest / working / sleep and fallback
     if presence_enabled:
         if state in ("rest", "working", "sleep"):
-            target_desc = "this chat (alias from the notification)"
-            if state == "working":
-                target_desc = "this chat (alias from the notification)"
+            target_desc = "a chat from the available list"
             defs.append({
                 "type": "function",
                 "function": {
@@ -168,10 +182,10 @@ def get_tool_definitions(presence_state: str = "rest",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "chat_alias": {"type": "string", "description": "Chat alias from the notification"},
-                            "note": {"type": "string", "description": "Optional reason"},
+                            "chat_alias": {"type": "string", "description": "Chat alias from the available list"},
+                            "note": {"type": "string", "description": "Reason for entering this dialog"},
                         },
-                        "required": ["chat_alias"],
+                        "required": ["chat_alias", "note"],
                     },
                 },
             })
@@ -625,11 +639,15 @@ class ToolExecutor:
     async def _handle_enter_dialog(self, params: Dict) -> Dict:
         from core.presence import enter_dialog
         from core.db import get_chat_display_name
+        note = params.get("note")
+        if not isinstance(note, str) or not note.strip():
+            return {"type": "enter_dialog", "status": "error",
+                    "error": "Укажи непустую причину перехода в поле note."}
+        note = note.strip()
         chat_id, error = self._resolve_target(params)
         if error:
             return {"type": "enter_dialog", "status": "error",
                     "error": error}
-        note = str(params.get("note", "") or "")
         try:
             user_name = get_chat_display_name(chat_id)
         except Exception:
@@ -640,7 +658,7 @@ class ToolExecutor:
                 "user_name": user_name,
                 "state": presence.get("state", "dialog"),
                 "presence": presence, "status": "switched",
-                "journal_event": presence.get("journal_event")}
+                "journal_event": presence.get("journal_event"), "note": note}
 
     async def _handle_enter_rest(self, params: Dict) -> Dict:
         from core.presence import enter_rest

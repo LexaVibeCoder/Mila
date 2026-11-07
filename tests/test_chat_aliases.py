@@ -1,5 +1,6 @@
 """Chat aliases are stable, migrated, and resolved before routing."""
 
+import asyncio
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,7 @@ import pytest
 import core.db as db
 import core.pipeline as pipeline_module
 import core.llm.persona as persona
+import core.proactive as proactive
 from core.delivery import TurnContext
 from core.events import Notification
 from core.pipeline import ThinkPipeline
@@ -116,7 +118,7 @@ async def test_executor_routes_aliases_and_rejects_bad_targets(database):
     db.ensure_chat_exists("10001", "Алекс")
     db.ensure_chat_exists("10002", "Сэм")
     executor = ToolExecutor(None, None, "user-1", "10001")
-    result = await executor.execute_action({"action_type": "enter_dialog", "params": {"chat_alias": "сэм"}})
+    result = await executor.execute_action({"action_type": "enter_dialog", "params": {"chat_alias": "сэм", "note": "reason"}})
     assert result["chat_id"] == "10002"
     assert get_presence()["focus_chat_id"] == "10002"
     result = await executor.execute_action({"action_type": "send_message", "params": {"chat_alias": "алекс", "text": "hi"}})
@@ -175,6 +177,8 @@ def test_tool_schemas_expose_aliases():
             assert "chat_id" not in properties and "chat_ids" not in properties
             if fn["name"] in ("enter_dialog", "send_message"):
                 assert "chat_alias" in properties
+            if fn["name"] == "enter_dialog":
+                assert "note" in fn["parameters"]["required"]
             if fn["name"] == "peek_recent_chats":
                 assert "chat_aliases" in properties
 
@@ -224,7 +228,7 @@ async def test_proactive_peek_then_enter_dialog_routes_real_chat(database, monke
             if len(calls) == 1:
                 name, params = "peek_recent_chats", {}
             elif len(calls) == 2:
-                name, params = "enter_dialog", {"chat_alias": "алекс"}
+                name, params = "enter_dialog", {"chat_alias": "алекс", "note": "reason"}
             else:
                 return {"thoughts": "hello", "tool_calls": None, "finish_reason": "stop"}
             tool = SimpleNamespace(function=SimpleNamespace(name=name, arguments=json.dumps(params)))
@@ -250,3 +254,145 @@ async def test_proactive_peek_then_enter_dialog_routes_real_chat(database, monke
     assert get_presence()["focus_chat_id"] == "10001"
     assert "Диалог: чат алекс с Алекс." in calls[-1]["system_prompt"]
     assert "10001" not in json.dumps(calls, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_enter_dialog_requires_nonempty_reason(database):
+    db.ensure_chat_exists("10001", "alpha")
+    executor = ToolExecutor(None, None, "user-1", "10001")
+    for note in (None, "", "  ", 5):
+        result = await executor.execute_action({
+            "action_type": "enter_dialog",
+            "params": {"chat_alias": "alpha", "note": note},
+        })
+        assert result["status"] == "error"
+        assert get_presence()["state"] == "rest"
+    result = await executor.execute_action({
+        "action_type": "enter_dialog",
+        "params": {"chat_alias": "alpha", "note": "test reason"},
+    })
+    assert result["note"] == "test reason"
+    assert get_presence()["note"] == "test reason"
+
+
+@pytest.mark.asyncio
+async def test_notification_and_switch_use_focused_history_and_peer(database, monkeypatch):
+    for cid, name, uid in [("10001", "alpha", "user-1"),
+                           ("10002", "beta", "user-2"),
+                           ("10003", "gamma", "user-3")]:
+        db.ensure_chat_exists(cid, name)
+        db.ensure_user_exists(uid, name)
+        db.add_chunk(cid, uid, f"{name} history")
+    db.ensure_chat_exists("10004", "empty")
+    enter_dialog("10001", "alpha")
+    calls, prompts = [], []
+
+    class FakeLLM:
+        default_temperature = 0.7
+
+        async def generate(self, **kwargs):
+            calls.append(json.loads(json.dumps(kwargs)))
+            if len(calls) == 1:
+                tc = SimpleNamespace(function=SimpleNamespace(name="enter_dialog", arguments=json.dumps({
+                    "chat_alias": "gamma", "note": "chosen reason"})))
+                return {"thoughts": "", "tool_calls": [tc], "finish_reason": "tool_calls"}
+            return {"thoughts": "hello gamma", "tool_calls": None, "finish_reason": "stop"}
+
+    monkeypatch.setattr(ThinkPipeline, "main_llm", property(lambda self: FakeLLM()))
+    monkeypatch.setattr(pipeline_module, "build_main_llm_system_prompt",
+                        lambda user, **kw: prompts.append((user, kw)) or "system")
+    monkeypatch.setattr(pipeline_module, "get_needs_tracker",
+                        lambda: SimpleNamespace(apply_action_effect=lambda *a: None))
+    pipeline = ThinkPipeline(None, None, "user-2", "10002", my_user_id="self")
+    monkeypatch.setattr(pipeline, "_attach_media", lambda messages, *a, **k: messages)
+    histories = {"10001": [{"role": "user", "content": "alpha history"}],
+                 "10003": [{"role": "user", "content": "gamma history"}]}
+    turn = TurnContext("turn-1", "10002", "user-2", presence=get_presence())
+    events = [event async for event in pipeline._run_stream(
+        "beta notification", [{"role": "user", "content": "beta history"}], None,
+        request_user_id="user-2", request_chat_id="10002", turn=turn,
+        history_loader=lambda cid: histories.get(cid, []))]
+
+    assert turn.resolve_target() == "10003"
+    assert events[-1]["texts"] == ["hello gamma"]
+    first = json.dumps(calls[0], ensure_ascii=False)
+    second = json.dumps(calls[1], ensure_ascii=False)
+    assert "alpha history" in first and "beta notification" in first
+    assert "beta history" not in first
+    assert "gamma history" in second and "chosen reason" in second
+    assert "alpha history" not in second and "beta notification" not in second
+    assert "empty" in calls[0]["system_prompt"]
+    assert [item[0] for item in prompts] == ["user-1", "user-3"]
+    assert prompts[0][1]["notification_user_id"] == "user-2"
+
+
+@pytest.mark.asyncio
+async def test_note_to_notification_does_not_switch_global_focus(database, monkeypatch):
+    db.ensure_chat_exists("10001", "alpha")
+    db.ensure_chat_exists("10002", "beta")
+    enter_dialog("10001", "alpha")
+
+    class FakeLLM:
+        default_temperature = 0.7
+
+        async def generate(self, **kwargs):
+            tc = SimpleNamespace(function=SimpleNamespace(name="send_message", arguments=json.dumps({
+                "chat_alias": "beta", "text": "short note"})))
+            return {"thoughts": "", "tool_calls": [tc], "finish_reason": "tool_calls"}
+
+    monkeypatch.setattr(ThinkPipeline, "main_llm", property(lambda self: FakeLLM()))
+    monkeypatch.setattr(pipeline_module, "build_main_llm_system_prompt", lambda *a, **kw: "system")
+    monkeypatch.setattr(pipeline_module, "get_needs_tracker",
+                        lambda: SimpleNamespace(apply_action_effect=lambda *a: None))
+    pipeline = ThinkPipeline(None, None, "user-2", "10002")
+    monkeypatch.setattr(pipeline, "_attach_media", lambda messages, *a, **k: messages)
+    turn = TurnContext("turn-1", "10002", "user-2", presence=get_presence())
+    events = [event async for event in pipeline._run_stream(
+        "notification", [], None, request_user_id="user-2", request_chat_id="10002",
+        turn=turn, history_loader=lambda chat: [])]
+    assert events[-1]["kind"] == "reply_tool"
+    assert turn.resolve_target() == "10002"
+    assert get_presence()["focus_chat_id"] == "10001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("incoming", "sends"), [("10001", False), ("10002", True)])
+async def test_proactive_uses_shared_lock_and_only_target_interrupts(database, monkeypatch, incoming, sends):
+    db.ensure_chat_exists("10001", "alpha")
+    db.ensure_chat_exists("10002", "beta")
+    db.add_chunk("10001", "user-1", "alpha")
+    enter_dialog("10001", "alpha")
+    started, release = asyncio.Event(), asyncio.Event()
+    sent = []
+
+    class Pipeline:
+        async def process_message_stream(self, **kwargs):
+            started.set()
+            await release.wait()
+            yield {"type": "reply", "texts": ["hello"], "via": "bubbles"}
+
+    coordinator = SimpleNamespace(turn_lock=asyncio.Lock(), _revisions={},
+                                  is_user_typing=lambda chat: False)
+    bot = SimpleNamespace(messages=coordinator, pipeline=Pipeline(), app=None,
+                          me=SimpleNamespace(id=42), indexer=None)
+
+    async def deliver(**kwargs):
+        assert await kwargs["before_bubble"](0)
+        sent.append(kwargs["target"])
+        return SimpleNamespace(ok=True, sent=1, error=None)
+
+    monkeypatch.setattr(proactive, "deliver_messages", deliver)
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+    await coordinator.turn_lock.acquire()
+    task = asyncio.create_task(proactive.run_proactive_turn(bot))
+    await asyncio.sleep(0)
+    assert not started.is_set()
+    coordinator.turn_lock.release()
+    await started.wait()
+    coordinator._revisions[incoming] = 1
+    release.set()
+    result = await task
+    assert bool(sent) is sends
+    assert result["success"] is sends
+    if sends:
+        assert sent == ["10001"]

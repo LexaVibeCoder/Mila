@@ -108,7 +108,7 @@ def build_proactive_block(chats: list[dict]) -> str:
     lines += [
         "",
         "Как действовать:",
-        "1. Можешь СРАЗУ выбрать один чат и вызвать enter_dialog с его chat_alias "
+        "1. Можешь СРАЗУ выбрать один чат и вызвать enter_dialog с его chat_alias и причиной в note "
         "(тебя позовут в диалог, там и напишешь), либо отправить одну короткую "
         "записку через send_message (chat_alias + text).",
         "2. Можешь СНАЧАЛА вызвать peek_recent_chats (можно без параметров — "
@@ -125,7 +125,15 @@ def build_proactive_block(chats: list[dict]) -> str:
 
 async def run_proactive_turn(bot) -> dict:
     """One proactive LLM turn. Returns pipeline result dict (may be empty)."""
-    from core.db import get_chats_by_last_activity, get_global_last_activity
+    lock = getattr(getattr(bot, "messages", None), "turn_lock", None)
+    if lock is not None:
+        async with lock:
+            return await _run_proactive_turn_locked(bot)
+    return await _run_proactive_turn_locked(bot)
+
+
+async def _run_proactive_turn_locked(bot) -> dict:
+    from core.db import get_chats_by_last_activity
 
     max_chats = int(_cfg("max_chats", 20) or 20)
     chats = get_chats_by_last_activity(limit=max_chats)
@@ -133,7 +141,7 @@ async def run_proactive_turn(bot) -> dict:
         print("[Proactive] write_to_user but no chats — skip")
         return {"success": False, "error": "no chats"}
 
-    before = get_global_last_activity()
+    revisions = dict(getattr(getattr(bot, "messages", None), "_revisions", {}))
     block = build_proactive_block(chats)
     print(f"[Proactive] write_to_user: {len(chats)} чатов, запуск хода")
 
@@ -157,7 +165,20 @@ async def run_proactive_turn(bot) -> dict:
     reply_via = ""
     silence_reason = ""
     all_actions: list[dict] = []
-    entered_dialog_chat = ""
+
+    def load_history(chat_id):
+        if not hasattr(bot, "_build_histories"):
+            return []
+        _, history = bot._build_histories(chat_id)
+        return bot._resolve_roles_in_histories(history, chat_id)
+
+    def interrupted(target=""):
+        from core.presence import get_presence
+        current = get_presence()
+        if any(current.get(k) != turn.presence.get(k) for k in ("state", "focus_chat_id", "updated_at")):
+            return True
+        coordinator = getattr(bot, "messages", None)
+        return bool(target and getattr(coordinator, "_revisions", {}).get(target, 0) > revisions.get(target, 0))
 
     try:
         async for ev in bot.pipeline.process_message_stream(
@@ -171,7 +192,10 @@ async def run_proactive_turn(bot) -> dict:
             turn=turn,
             enable_peek=True,
             proactive_block=block,
+            history_loader=load_history,
         ):
+            if interrupted(str(turn.presence.get("focus_chat_id") or "")):
+                return {"success": False, "error": "interrupted"}
             etype = ev.get("type")
             if etype == "thought":
                 preview = (ev.get("thoughts") or "")[:120].replace("\n", " ")
@@ -185,8 +209,6 @@ async def run_proactive_turn(bot) -> dict:
                     print(f"  [Proactive] peek: {len(a.get('chats') or [])} чатов")
                 elif at in ("enter_dialog", "enter_rest", "enter_working"):
                     print(f"  [Proactive] {at} → {a.get('chat_id', a.get('state', ''))}")
-                    if at == "enter_dialog" and a.get("status") == "switched":
-                        entered_dialog_chat = str(a.get("chat_id") or "")
                 elif at == "start_sleep":
                     print(f"  [Proactive] sleep started for {a.get('duration_minutes')} мин")
                 elif at == "send_message":
@@ -216,16 +238,8 @@ async def run_proactive_turn(bot) -> dict:
         print(f"[Proactive] turn failed: {e}")
         return {"success": False, "error": str(e)}
 
-    # No reply → leave presence clean if we entered a dialog speculatively.
+    # Entering a dialog is a global decision even when Mila stays silent.
     if not reply_texts:
-        if entered_dialog_chat:
-            try:
-                from core.presence import get_presence, enter_rest
-                p = get_presence()
-                if p.get("state") == "dialog" and str(p.get("focus_chat_id")) == entered_dialog_chat:
-                    enter_rest("proactive: решила не писать")
-            except Exception:
-                pass
         try:
             from Mila_observatory.api.dashboard import add_event
             add_event("proactive", f"write_to_user → silence ({silence_reason or 'no reply'})")
@@ -234,22 +248,8 @@ async def run_proactive_turn(bot) -> dict:
         return {"success": True, "reply_texts": [], "silence_reason": silence_reason,
                 "actions": all_actions}
 
-    # Guard: new incoming message during generation → abort (reactive worker owns it).
-    try:
-        after = get_global_last_activity()
-        if after != before:
-            print("[Proactive] new message arrived during generation — abort send")
-            try:
-                from core.presence import get_presence, enter_rest
-                p = get_presence()
-                if p.get("state") == "dialog" and entered_dialog_chat \
-                        and str(p.get("focus_chat_id")) == entered_dialog_chat:
-                    enter_rest("proactive: прервано новым сообщением")
-            except Exception:
-                pass
-            return {"success": False, "error": "interrupted by new message"}
-    except Exception:
-        pass
+    if interrupted(reply_chat_id):
+        return {"success": False, "error": "interrupted by new message or presence change"}
 
     if not reply_chat_id or reply_chat_id == "proactive":
         print("[Proactive] reply without target chat — skip send")
@@ -277,6 +277,9 @@ async def run_proactive_turn(bot) -> dict:
     if not cleans:
         return {"success": True, "reply_texts": [], "silence_reason": "empty reply"}
 
+    async def guard(_index):
+        return not interrupted(reply_chat_id) and not bot.messages.is_user_typing(reply_chat_id)
+
     delivery = await deliver_messages(
         client=bot.app,
         target=reply_chat_id,
@@ -284,6 +287,7 @@ async def run_proactive_turn(bot) -> dict:
         my_user_id=str(bot.me.id),
         indexer=getattr(bot, "indexer", None),
         via=reply_via,
+        before_bubble=guard,
     )
     if not delivery.ok or not delivery.sent:
         print(f"[Proactive] send failed: {delivery.error or 'no bubbles sent'}")

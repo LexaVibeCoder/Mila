@@ -95,7 +95,7 @@ def _get_presence_state() -> dict:
 # Reminder when rest/working returns text without entering dialog.
 REST_CONTENT_REMINDER = (
     "PROTOCOL: you are in rest/working. Text replies from here are IGNORED. "
-    "To talk, call enter_dialog with the notification chat_alias first "
+    "To talk, call enter_dialog with a known chat_alias and a non-empty note first "
     "(you will be called again in dialog, then answer there). "
     "For a one-line note use the send_message tool once. "
     "To skip, return an empty reply with no tool calls."
@@ -202,7 +202,7 @@ class ThinkPipeline:
         """
         presence = presence if presence is not None else _get_presence_state()
         state = presence.get("state", "rest")
-        if state not in ("rest", "working"):
+        if state == "dialog" and str(presence.get("focus_chat_id")) == str(chat_id):
             return None
         last = (batch_text or "").strip()[:2000]
         if not last:
@@ -212,7 +212,7 @@ class ThinkPipeline:
         return (
             f"[уведомление] новый текст из чата {alias}:\n"
             f"{last}\n"
-            f"(выше в истории — предыдущие сообщения этого чата для контекста.)"
+            "(Это уведомление, а не смена текущего диалога.)"
         )
 
     @staticmethod
@@ -429,6 +429,7 @@ class ThinkPipeline:
         turn: TurnContext | None = None,
         enable_peek: bool = False,
         proactive_block: str | None = None,
+        history_loader=None,
     ):
         """Yield low-level step dicts; caller translates to public events.
 
@@ -436,11 +437,9 @@ class ThinkPipeline:
         mutate self.user_id/self.chat_id (queue pinning), so the loop must
         never read self.* mid-flight — only these locals.
 
-        `turn` owns delivery: the reply steps deliberately carry no chat id,
-        so the caller (queue/proactive) can only send to the turn owner or an
-        explicitly granted target. Presence is snapshotted once here; a
-        parallel turn switching focus cannot change this turn's mode, prompt
-        or tools mid-flight. Only a switch performed by THIS turn refreshes it.
+        Reply steps carry no chat id: the caller routes through the turn's
+        focused dialog or an explicit note target. Presence is snapshotted and
+        refreshed by this turn's own switches; callers reject stale snapshots.
 
         Yields internal dicts:
           {"kind": "llm", "content": str, "tool_calls": [...], "finish_reason": str}
@@ -465,11 +464,22 @@ class ThinkPipeline:
         except Exception as e:
             print(f"[Pipeline] journal read failed: {e}")
             journal_context = ""
-        # A proactive turn has no owner chat yet: its target is the dialog it
-        # opens, or the dialog that is already open at turn start.
-        if turn is not None and turn.proactive and state == "dialog":
-            turn.allow(presence.get("focus_chat_id"))
+        focus_chat = str(presence.get("focus_chat_id") or "") if state == "dialog" else ""
+        def history_for(chat_id):
+            return list(history_loader(chat_id)) if history_loader and chat_id else []
+
+        def subject_for(chat_id):
+            if not chat_id or chat_id == req_chat:
+                return req_user
+            try:
+                from core.db import get_chat_peer_id
+                return get_chat_peer_id(chat_id, self.my_user_id) or "system"
+            except Exception:
+                return "system"
+
         messages = list(agent_internal_history)
+        if focus_chat and focus_chat != req_chat:
+            messages = history_for(focus_chat)
         if proactive_block:
             # Proactive turn: instructions + chat list on top, no fake notification.
             messages.append({"role": "system", "content": proactive_block})
@@ -480,7 +490,23 @@ class ThinkPipeline:
                 messages.append({"role": "system", "content": notif_block})
         # Always attach: history media (last 3 photos + 2 audios) must load
         # even on text-only turns (media=None). chat_id fallback = req_chat.
-        messages = self._attach_media(messages, media or {}, default_chat_id=req_chat)
+        if focus_chat and focus_chat != req_chat and not proactive_block:
+            # Attach notification media to its own marked message, never to a
+            # user message in the focused chat's history.
+            notification_media = self._attach_media(
+                [{"role": "user", "content": "[Медиа уведомления из другого чата]"}],
+                media or {}, default_chat_id=req_chat)
+            if media and (media.get("image_data_urls") or media.get("audios") or media.get("audio")):
+                messages.extend(notification_media)
+        else:
+            messages = self._attach_media(messages, media or {}, default_chat_id=req_chat)
+
+        try:
+            from core.db import get_available_chats
+            chats = get_available_chats()
+            chat_list = "\n".join(f"- {c.get('chat_name') or 'Без имени'}: {c['alias']}" for c in chats)
+        except Exception:
+            chat_list = ""
 
         max_iterations = _max_iterations()
         choice = _tool_choice()
@@ -496,10 +522,14 @@ class ThinkPipeline:
             # bleed their focus into this prompt/tools.
             print(f"\n── Iteration {iteration}/{max_iterations} [{state}] ──")
 
+            active_chat = focus_chat or req_chat
             main_system_prompt = build_main_llm_system_prompt(
-                req_user, chat_id=req_chat, my_user_id=self.my_user_id,
+                subject_for(focus_chat), chat_id=active_chat, my_user_id=self.my_user_id,
                 presence=presence, journal_context=journal_context,
+                notification_chat_id=req_chat, notification_user_id=req_user,
             )
+            if chat_list:
+                main_system_prompt += "\n\n## Доступные чаты и алиасы\n" + chat_list
             # Peek is proactive-only: keep reactive turns clean.
             # After enter_dialog the turn becomes dialog and peek drops out.
             tool_definitions = self._current_tool_defs(
@@ -546,8 +576,7 @@ class ThinkPipeline:
                     if not bubbles:
                         yield {"kind": "silence", "reason": "empty reply"}
                         return
-                    # No target here: the recipient is the turn owner (or an
-                    # explicit grant), decided by the turn context in routing.
+                    # No target here: routing uses the focused dialog.
                     yield {"kind": "reply_bubbles", "texts": bubbles}
                     return
                 text = content.strip()
@@ -575,10 +604,18 @@ class ThinkPipeline:
             sleep_started = False
 
             for action in actions:
-                executed = await self._execute_single_action(action, user_id=req_user, chat_id=req_chat,
-                                                            seen_memories=seen_memories)
+                if (state == "dialog" and action.get("action_type") == "send_message"
+                        and "chat_alias" not in action.get("params", {})
+                        and "chat_id" not in action.get("params", {})):
+                    executed = {"type": "send_message", "status": "error",
+                                "error": "Для записки в диалоге укажи chat_alias."}
+                else:
+                    executed = await self._execute_single_action(action, user_id=subject_for(focus_chat), chat_id=focus_chat or req_chat,
+                                                                seen_memories=seen_memories)
                 if executed.get("status") != "error":
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
+                if turn is not None and executed.get("status") == "switched" and executed.get("presence"):
+                    turn.set_presence(executed["presence"])
                 yield {"kind": "action", "action": executed}
 
                 atype = executed.get("type")
@@ -587,7 +624,7 @@ class ThinkPipeline:
                 if atype in ("enter_dialog", "send_message") and status == "error":
                     messages.append({"role": "system", "content": (
                         f"{atype} не выполнен: {executed.get('error', 'ошибка')}. "
-                        "Выбери известный алиас или промолчи."
+                        "Исправь параметры или промолчи."
                     )})
                     continue
 
@@ -598,12 +635,6 @@ class ThinkPipeline:
                 if atype in ("enter_dialog", "enter_rest", "enter_working") \
                         and status == "switched":
                     presence_switched = True
-                    if turn is not None and atype == "enter_dialog":
-                        # A proactive turn has no chat of its own: the chat it
-                        # just entered is the explicit destination for the
-                        # reply that follows in this same turn.
-                        if turn.proactive:
-                            turn.allow(executed.get("chat_id"))
                     # Update the local snapshot from OUR action only — never
                     # re-read global presence (another turn may be switching).
                     executed_state = executed.get("state")
@@ -612,21 +643,38 @@ class ThinkPipeline:
                         # snapshot in "state"; keep the turn snapshot a string.
                         executed_state = executed_state.get("state")
                     if atype == "enter_dialog":
+                        focus_chat = str(executed.get("chat_id") or "")
+                        # Replace the former chat's history and notification
+                        # with the entered chat's own history. Only the
+                        # explicit reason carries across the transition.
+                        if history_loader:
+                            messages = history_for(focus_chat)
+                            messages = self._attach_media(messages, {"chat_id": focus_chat}, default_chat_id=focus_chat)
+                        elif focus_chat != req_chat:
+                            # Legacy callers without a loader must not carry a
+                            # foreign chat's history into the new dialog.
+                            messages = []
+                        seen_memories.clear()
                         presence = {**presence, "state": "dialog",
                                     "focus_chat_id": executed.get("chat_id"),
                                     "focus_user_name": executed.get("user_name")}
                     else:
+                        focus_chat = ""
                         presence = {**presence, "state": executed_state or atype,
-                                    "focus_chat_id": None,
-                                    "focus_user_name": None}
+                                     "focus_chat_id": None,
+                                     "focus_user_name": None}
+                    if isinstance(executed.get("presence"), dict):
+                        presence = dict(executed["presence"])
                     state = presence.get("state", state)
                     # The fresh event goes to the very bottom of the context;
                     # on the next turn it is part of the journal block.
                     event_line = executed.get("journal_event")
+                    reason_line = (f"\nПричина перехода: {executed.get('note')}"
+                                   if atype == "enter_dialog" else "")
                     if event_line:
                         messages.append({"role": "system", "content": (
                             "Presence switched. Decide in the new state now.\n"
-                            f"[событие] {event_line}"
+                            f"[событие] {event_line}{reason_line}"
                         )})
                     else:
                         from core.db import get_chat_alias
@@ -635,17 +683,13 @@ class ThinkPipeline:
                         messages.append({"role": "system", "content": (
                             f"Presence switched: {atype} → "
                             f"{target}. "
-                            f"Decide in the new state now."
+                            f"Decide in the new state now.{reason_line}"
                         )})
                     print("  [Presence switched → re-calling]")
                     continue
 
                 if atype == "send_message" and status == "ready":
                     if (executed.get("text") or "").strip():
-                        # The model picked the destination explicitly (alias
-                        # was resolved by the executor) — allow that target.
-                        if turn is not None:
-                            turn.allow(executed.get("chat_id"))
                         send_tool_reply = executed
                     continue
 
@@ -705,7 +749,9 @@ class ThinkPipeline:
 
             if send_tool_reply is not None and not has_search and not has_peek \
                     and not presence_switched:
-                # Single note in rest/working — final, no re-call.
+                # Single note — final, without changing the dialog focus.
+                if turn is not None:
+                    turn.allow(send_tool_reply.get("chat_id"))
                 yield {"kind": "reply_tool", "action": send_tool_reply}
                 return
 
@@ -891,6 +937,7 @@ class ThinkPipeline:
         enable_peek: bool = False,
         proactive_block: str | None = None,
         turn: TurnContext | None = None,
+        history_loader=None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Streaming version consumed by core/queue.py and core/proactive.py.
 
@@ -904,7 +951,7 @@ class ThinkPipeline:
           {"type": "error", "error": str}
 
         The reply event intentionally has no destination: the consumer sends
-        via the turn context (owner chat or explicit grant).
+        via the turn context (dialog focus or explicit note target).
         """
         total_start = time.time()
         req_user = request_user_id or self.user_id
@@ -924,6 +971,7 @@ class ThinkPipeline:
                 request_user_id=req_user, request_chat_id=req_chat,
                 turn=turn,
                 enable_peek=enable_peek, proactive_block=proactive_block,
+                history_loader=history_loader,
             ):
                 kind = step.get("kind")
                 if kind == "llm":

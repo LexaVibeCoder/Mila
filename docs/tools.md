@@ -16,18 +16,18 @@ definitions: молчание = пустой ответ.
 
 | Действие | Состояния | Параметры | Что делает |
 |----------|-----------|-----------|------------|
-| `enter_dialog` | rest, working, dialog | `chat_alias!`, `note?` | Переключает presence в диалог; пайплайн перевызывает LLM |
+| `enter_dialog` | rest, working, dialog | `chat_alias!`, `note!` | Переключает presence в диалог; пайплайн перевызывает LLM |
 | `enter_rest` | working, dialog | `note?` | Возврат в rest |
 | `enter_working` | rest, dialog | `note?` | Переход в working |
 | `start_sleep` | все | `duration_minutes!` (1–720), `note?` | Запускает ночной цикл |
-| `send_message` | rest, working | `text!`, `chat_alias?` | Одна короткая «отмашка», не диалог |
+| `send_message` | rest, working, dialog | `text!`, `chat_alias?` (в dialog обязателен) | Одна короткая «отмашка», не диалог |
 | `search_memory` | dialog | `query!` | FAISS top-10 → rerank → top-5 |
 | `write_diary` | dialog | `entry!`, `category?` | Новая запись дневника |
 | `update_diary` | dialog | `entry!`, `entry_id!`, `category?` | Обновление записи |
 | `peek_recent_chats` | proactive (rest/working) | `limit_per_chat?`, `chat_aliases?` | Последние сообщения по всем чатам |
 
-> В диалоге ответ — обычный текст, а не tool call. `send_message` в диалоге
-> отсутствует. В состоянии `sleep` доступны `enter_dialog` и `start_sleep`
+> В диалоге обычный ответ — текст, а `send_message` позволяет отмахнуться от
+> уведомления другого чата без переключения. В состоянии `sleep` доступны `enter_dialog` и `start_sleep`
 > (пайплайн там почти не работает).
 
 ## Динамический набор
@@ -59,7 +59,7 @@ definitions: молчание = пустой ответ.
 {"action_type": "enter_dialog", "params": {"chat_alias": "алекс", "note": "хочу поговорить"}}
 ```
 
-- `chat_alias` обязателен; executor преобразует его во внутренний `chat_id`;
+- `chat_alias` и непустой `note` обязательны; executor преобразует алиас во внутренний `chat_id`;
 - имя для presence берётся из `chats.chat_name`;
 - возвращает `{type, chat_id, user_name, state: "dialog", presence, status: "switched", journal_event}`;
 - пайплайн инжектит system-сообщение со свежим событием в конце и вызывает LLM
@@ -86,9 +86,9 @@ definitions: молчание = пустой ответ.
 {"type": "send_message", "text": "...", "chat_id": "...", "status": "ready"}
 ```
 
-В rest/working это финальная короткая отмашка: пайплайн отдаёт `reply_tool`,
+Это финальная короткая отмашка: пайплайн отдаёт `reply_tool`,
 `queue.py` отправляет один пузырь, после успешной отправки
-`deliver_messages()` пишет строку в глобальный журнал. В диалоге инструмента нет.
+`deliver_messages()` пишет строку в глобальный журнал. В диалоге схема требует алиас.
 Для ответа на уведомление `chat_alias` можно опустить — используется текущий
 чат. В проактивном ходе алиас обязателен. Явно указанный неизвестный или пустой
 алиас никогда не заменяется текущим чатом: инструмент возвращает ошибку, а LLM

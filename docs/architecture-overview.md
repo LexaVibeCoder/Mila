@@ -104,7 +104,7 @@
    ├── enter_* → снимок обновляется ТОЛЬКО этим ходом, LLM вызывается заново;
    └── start_sleep / пустой ответ → завершение без отправки.
 8. queue.py: reply-событие (без chat_id) → проверки прерывания и сна →
-   получатель из TurnContext (владелец хода / явный grant) →
+   получатель из TurnContext (глобальный фокус диалога / явная разовая записка) →
    core.delivery.deliver_messages: send_typing → пауза 0.3–1.0с → send_text
    для каждого пузыря → chunks + context_buffer в тот же чат.
    Текст в rest без enter_dialog игнорируется; fallback-отправки больше нет.

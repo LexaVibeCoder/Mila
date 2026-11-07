@@ -829,6 +829,33 @@ def get_all_chat_ids_from_chunks() -> list[str]:
         conn.close()
 
 
+def get_available_chats() -> list[dict]:
+    """Return all known chats with resolvable aliases, including empty chats."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT c.chat_id, c.chat_name, a.alias FROM chats c "
+            "JOIN chat_aliases a ON a.chat_id=c.chat_id ORDER BY a.alias"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_chat_peer_id(chat_id: str, my_user_id: str | None = None) -> str | None:
+    """Find the most recent known sender in a private chat, excluding Mila."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_id FROM chunks WHERE chat_id=? AND user_id IS NOT NULL "
+            "AND user_id != ? AND content != '' ORDER BY time_start DESC LIMIT 1",
+            (str(chat_id), str(my_user_id or "")),
+        ).fetchone()
+        return str(row["user_id"]) if row else None
+    finally:
+        conn.close()
+
+
 def get_chats_by_last_activity(limit: int = 20) -> list[dict]:
     """Chats sorted by last activity, oldest first (for proactive).
 

@@ -183,7 +183,9 @@ def _load_state_block(state: str, chat_id: str | None = None) -> str:
 
 def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: str = None,
                                  presence: dict | None = None,
-                                 journal_context: str | None = None) -> str:
+                                 journal_context: str | None = None,
+                                 notification_chat_id: str | None = None,
+                                 notification_user_id: str | None = None) -> str:
     """Assemble the system prompt for one turn.
 
     ``presence`` is the turn snapshot (see core.delivery.TurnContext). When
@@ -214,10 +216,9 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     effective_chat_id = chat_id if chat_id not in ("proactive", "system") else None
     header_name = user_name
     presence = presence if presence is not None else _get_presence_state()
-    if chat_id == "proactive":
-        if presence.get("state") == "dialog":
-            effective_chat_id = presence.get("focus_chat_id")
-            header_name = presence.get("focus_user_name") or user_name
+    if presence.get("state") == "dialog":
+        effective_chat_id = presence.get("focus_chat_id") or effective_chat_id
+        header_name = presence.get("focus_user_name") or user_name
     chat_alias = get_chat_alias(effective_chat_id) if effective_chat_id else None
     header = (
         _load("context/header")
@@ -247,9 +248,11 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     # Behavior rules live in states/{state}.md, not here.
     try:
         from core.presence import format_state_block
+        notification_name = (_get_profile_context(notification_user_id)[0]
+                             if notification_user_id else user_name)
         parts.append(format_state_block(
-            current_chat_id=str(chat_id) if chat_id else None,
-            current_user_name=user_name,
+            current_chat_id=str(notification_chat_id or chat_id) if (notification_chat_id or chat_id) else None,
+            current_user_name=notification_name,
             presence=presence,
         ))
     except Exception:

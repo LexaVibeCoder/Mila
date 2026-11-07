@@ -54,7 +54,7 @@ npm-debug.log*
 
 #Telegram (TDLib / pytdbot)
 data/tdlib/
-data/tdlib_test/
+data/tdlib_test_bot/
 tdlib.log
 *.session
 *.session-journal

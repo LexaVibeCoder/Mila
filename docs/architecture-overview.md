@@ -75,7 +75,7 @@
 | `create_session.py` | One-shot TDLib-логин (300с ожидание `AuthorizationStateReady`, `--qr`) |
 | `start/create_session.sh` / `.bat` | Обёртки: временный venv + зависимости + `create_session.py` |
 | `install_reranker.py` | Скачивание `BAAI/bge-reranker-v2-m3` → `models/rerankers/BGE-Reranker-v2-m3` |
-| `test_tg_mila_dialogue.py` | E2E-тест диалога: тестер-LLM ↔ Мила через Telegram, стенограмма + оценка в `logs/` |
+| `test_tg_bot_dialogue.py` | E2E-тест диалога: LLM-агент ↔ Мила через тестового Telegram-бота, стенограмма + оценка в `logs/` |
 | `Mila_Observatory.bat` | Windows-лаунчер Observatory (venv + `server.py` + браузер) |
 | `runtime_config.json` | Живой динамический конфиг (gitignored, может содержать секреты) |
 

@@ -66,7 +66,7 @@ cd state_agent && python train_state_agent.py # обучение MLP (свой r
 | `core/db.py` | схема `mila.db`, TEXT-UUID идентификаторы |
 | `Mila_observatory/` | FastAPI, runtime-конфиг, API-роутеры, React-панель |
 | `state_agent/` | обучение/инференс MLP 6→128→64→4 + `state_agent.pt` |
-| `test_tg_mila_dialogue.py` | ручной E2E-диалог через Telegram |
+| `test_tg_bot_dialogue.py` | ручной E2E: LLM-агент ↔ Мила через тестового Telegram-бота |
 | `docs/` | актуальное описание подсистем |
 
 ## Конфигурация (два слоя)
@@ -86,7 +86,7 @@ runtime-конфиге. Агенту **нельзя читать `runtime_config
 - **`runtime_config.json` нельзя читать** (может содержать ключи); менять — только
   через пользователя/API.
 - **`data/tdlib/` — живая TDLib-сессия. Не трогать, не копировать, не удалять,
-  не запускать второй процесс на этом каталоге.** То же для `data/tdlib_test/`.
+  не запускать второй процесс на этом каталоге.** То же для `data/tdlib_test_bot/`.
   Смена `TD_DATABASE_ENCRYPTION_KEY` делает сессию нечитаемой.
 - `data/` в остальном читать/писать можно (тесты — только во временных каталогах).
   `models/` читать можно. **Ничего из `data/`, `models/`, `logs/`, `.env`,
@@ -116,8 +116,38 @@ runtime-конфиге. Агенту **нельзя читать `runtime_config
 - Frontend: обязательный гейт — `npm run build` (typecheck + сборка). Для чистой
   логики (форматирование, API-клиент) можно добавить Vitest; браузерные E2E — только
   по просьбе. `dist/` не коммитить.
-- `test_tg_mila_dialogue.py` — интерактивный E2E, не часть `pytest`; запускать только
-  с разрешения (шлёт реальные сообщения, отдельная сессия `data/tdlib_test`).
+### E2E-тест через тестового Telegram-бота
+
+`test_tg_bot_dialogue.py` — ручной E2E, не часть `pytest`. LLM-агент пишет Миле
+от имени отдельного бота и вызывает тулы `send_message` / `wait_for_reply` /
+`finish`; в конце LLM оценивает диалог.
+
+Подготовка:
+
+1. Создать бота у `@BotFather`.
+2. С аккаунта Милы отправить этому боту `/start` — Telegram не даёт ботам писать первыми.
+3. Выставить `TEST_BOT_TOKEN` в окружении или `.env`; при необходимости —
+   `MILA_TEST_TARGET_ID` (числовой ID Милы).
+4. Запустить Милу (`.venv/bin/python main.py`) — тест не поднимает её сам.
+
+Запуск:
+
+```bash
+export TEST_BOT_TOKEN='123456:AA...'
+.venv/bin/python test_tg_bot_dialogue.py --target <id Милы> --scenario all
+```
+
+Без `--target` скрипт выберет единственный чат бота. Сценарии: `all`, `casual`,
+`memory`, `persona`, `boundaries`, `custom` (+ `--goal`). Полезные флаги:
+`--turns`, `--timeout`, `--agent-model`, `--no-analysis`.
+
+Правила:
+
+- Запускать только с разрешения: тест шлёт реальные сообщения и пишет в контекст,
+  память и, возможно, дневник Милы.
+- TDLib-сессия тестового бота — `data/tdlib_test_bot/`; не запускать на ней второй процесс.
+- Результат: `logs/test_bot_dialogue/<timestamp>/{transcript.json,report.md}`;
+  presence Милы до/после также попадает в отчёт.
 
 ## Инварианты и подводные камни
 

@@ -223,6 +223,8 @@ python -m venv .venv
 cd ..
 #   или из корня: ./state_agent/train_and_test.sh
 
-# Ручной E2E-тест (отправляет реальные сообщения!)
-.venv/bin/python test_tg_mila_dialogue.py
+# E2E через отдельного тестового бота + LLM-агента (реальные сообщения!)
+# 1) создать бота у @BotFather и отправить ему /start с аккаунта Милы
+export TEST_BOT_TOKEN='123456:AA...'
+.venv/bin/python test_tg_bot_dialogue.py --target <id Милы> --scenario all
 ```

@@ -335,6 +335,51 @@ CREATE TABLE diary_entries (
 );
 ```
 
+### test_chat_sessions / test_chat_messages / test_chat_diary
+
+Изолированное хранилище Observatory Test Chat (`core/test_chat/store.py`).
+Намеренно **не** называется `chat_*`, чтобы код буфера/сна не принимал тестовые
+диалоги за реальные чаты. Удаление сессии удаляет сообщения и дневник только
+этой сессии.
+
+```sql
+CREATE TABLE test_chat_sessions (
+    session_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    chat_id TEXT NOT NULL UNIQUE,     -- синтетический numeric id
+    user_id TEXT NOT NULL,            -- test-user:<slug имени>
+    user_name TEXT NOT NULL DEFAULT '',-- имя собеседника в промпте
+    state TEXT NOT NULL DEFAULT 'dialog', -- dialog | rest | working
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE test_chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,               -- 'user' | 'assistant'
+    kind TEXT NOT NULL DEFAULT 'text',-- text | bubble | silence | error
+    content TEXT NOT NULL DEFAULT '',
+    debug_json TEXT,                  -- system prompt/tools/timing
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES test_chat_sessions(session_id)
+);
+
+CREATE TABLE test_chat_diary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    entry_number INTEGER NOT NULL,
+    content_md TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'day_entries',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES test_chat_sessions(session_id)
+);
+```
+
+`user_id` и алиас (`<slug>` имени) вычисляются в `store.user_id_for_name()` /
+`store.alias_for_name()`; смена `user_name` переключает идентичность памяти.
+
 ## 3. FAISS индексы
 
 **Файлы:**
@@ -400,4 +445,6 @@ init_db()  # users/chats/chat_members/chunks/memories/media_logs
 - `presence_state` — `_ensure_table()` при первом обращении;
 - `action_journal` — `_ensure_table()` при первом чтении/записи;
 - сон — `_ensure_sleep_tables()`;
-- `user_attitude_history` — при первом изменении отношения / запросе истории.
+- `user_attitude_history` — при первом изменении отношения / запросе истории;
+- `test_chat_sessions` / `test_chat_messages` / `test_chat_diary` —
+  `core/test_chat/store._connect()`.

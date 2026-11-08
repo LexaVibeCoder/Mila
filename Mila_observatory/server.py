@@ -36,6 +36,7 @@ from Mila_observatory.api.sleep import router as sleep_router
 from Mila_observatory.api.diary import router as diary_router
 from Mila_observatory.api.needs import router as needs_router
 from Mila_observatory.api.users import router as users_router
+from Mila_observatory.api.test_chat import router as test_chat_router
 
 
 @asynccontextmanager
@@ -89,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(diary_router, dependencies=auth_dep)
     app.include_router(needs_router, dependencies=auth_dep)
     app.include_router(users_router, dependencies=auth_dep)
+    app.include_router(test_chat_router, dependencies=auth_dep)
 
     # Health check
     @app.get("/api/health")

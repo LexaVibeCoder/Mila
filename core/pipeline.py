@@ -208,7 +208,9 @@ class ThinkPipeline:
         if not last:
             return None
         from core.db import get_chat_alias
-        alias = get_chat_alias(chat_id or self.chat_id) or "неизвестный чат"
+        # Sandbox snapshots carry their own alias (no chats row exists).
+        alias = (presence.get("chat_alias") or presence.get("focus_chat_alias")
+                 or get_chat_alias(chat_id or self.chat_id) or "неизвестный чат")
         return (
             f"[уведомление] новый текст из чата {alias}:\n"
             f"{last}\n"
@@ -244,13 +246,17 @@ class ThinkPipeline:
         return actions
 
     async def _execute_single_action(self, action: Dict, user_id: str | None = None, chat_id: str | None = None,
-                                     seen_memories: set[str] | None = None) -> Dict:
+                                     seen_memories: set[str] | None = None,
+                                     sandbox: bool = False,
+                                     sandbox_context=None) -> Dict:
         """Execute a single direct-tool action with an explicit request context.
 
         user_id/chat_id are snapshotted per-turn by the caller so two parallel
         chats can't overwrite each other's Tools via self.user_id mutation.
         seen_memories is shared by all searches within the turn to keep
         duplicate facts out of the context.
+        sandbox keeps the turn away from global DB state; sandbox_context maps
+        diary/presence/notes to the Observatory test session.
         """
         executor = ToolExecutor(
             text_memory=self.text_memory,
@@ -258,6 +264,8 @@ class ThinkPipeline:
             current_user_id=user_id or self.user_id,
             chat_id=chat_id or self.chat_id,
             seen_memories=seen_memories,
+            sandbox=sandbox,
+            sandbox_context=sandbox_context,
         )
         return await executor.execute_action(action)
 
@@ -430,12 +438,20 @@ class ThinkPipeline:
         enable_peek: bool = False,
         proactive_block: str | None = None,
         history_loader=None,
+        sandbox: bool = False,
+        sandbox_context=None,
+        sandbox_diary_context: str | None = None,
     ):
         """Yield low-level step dicts; caller translates to public events.
 
         request_user_id/request_chat_id snapshot the turn: parallel chats
         mutate self.user_id/self.chat_id (queue pinning), so the loop must
         never read self.* mid-flight — only these locals.
+
+        sandbox keeps the turn outside global DB state; sandbox_context maps
+        diary/presence/notes to one Observatory test session. The test chat
+        receives the same prompts/tools as a real dialog (no test-mode text),
+        only the diary block and chat list come from the sandbox.
 
         Reply steps carry no chat id: the caller routes through the turn's
         focused dialog or an explicit note target. Presence is snapshotted and
@@ -501,12 +517,17 @@ class ThinkPipeline:
         else:
             messages = self._attach_media(messages, media or {}, default_chat_id=req_chat)
 
-        try:
-            from core.db import get_available_chats
-            chats = get_available_chats()
-            chat_list = "\n".join(f"- {c.get('chat_name') or 'Без имени'}: {c['alias']}" for c in chats)
-        except Exception:
-            chat_list = ""
+        if sandbox_context is not None:
+            # The sandbox has exactly one chat; showing real aliases would only
+            # tempt Mila to write into chats that do not exist here.
+            chat_list = f"- {sandbox_context.user_name}: {sandbox_context.alias}"
+        else:
+            try:
+                from core.db import get_available_chats
+                chats = get_available_chats()
+                chat_list = "\n".join(f"- {c.get('chat_name') or 'Без имени'}: {c['alias']}" for c in chats)
+            except Exception:
+                chat_list = ""
 
         max_iterations = _max_iterations()
         choice = _tool_choice()
@@ -523,11 +544,19 @@ class ThinkPipeline:
             print(f"\n── Iteration {iteration}/{max_iterations} [{state}] ──")
 
             active_chat = focus_chat or req_chat
-            main_system_prompt = build_main_llm_system_prompt(
-                subject_for(focus_chat), chat_id=active_chat, my_user_id=self.my_user_id,
-                presence=presence, journal_context=journal_context,
+            prompt_kwargs = dict(
+                chat_id=active_chat,
+                my_user_id=self.my_user_id, presence=presence,
+                journal_context=journal_context,
                 notification_chat_id=req_chat, notification_user_id=req_user,
             )
+            if sandbox:
+                # Replace the real diary with the session's own diary and keep
+                # the builder signature untouched for normal turns/tests.
+                prompt_kwargs["diary_context_override"] = (
+                    sandbox_diary_context or "")
+            main_system_prompt = build_main_llm_system_prompt(
+                subject_for(focus_chat), **prompt_kwargs)
             if chat_list:
                 main_system_prompt += "\n\n## Доступные чаты и алиасы\n" + chat_list
             # Peek is proactive-only: keep reactive turns clean.
@@ -604,15 +633,23 @@ class ThinkPipeline:
             sleep_started = False
 
             for action in actions:
-                if (state == "dialog" and action.get("action_type") == "send_message"
+                if (not sandbox and state == "dialog"
+                        and action.get("action_type") == "send_message"
                         and "chat_alias" not in action.get("params", {})
                         and "chat_id" not in action.get("params", {})):
                     executed = {"type": "send_message", "status": "error",
                                 "error": "Для записки в диалоге укажи chat_alias."}
                 else:
-                    executed = await self._execute_single_action(action, user_id=subject_for(focus_chat), chat_id=focus_chat or req_chat,
-                                                                seen_memories=seen_memories)
-                if executed.get("status") != "error":
+                    action_kwargs = dict(
+                        user_id=subject_for(focus_chat),
+                        chat_id=focus_chat or req_chat,
+                        seen_memories=seen_memories,
+                    )
+                    if sandbox:
+                        action_kwargs["sandbox"] = True
+                        action_kwargs["sandbox_context"] = sandbox_context
+                    executed = await self._execute_single_action(action, **action_kwargs)
+                if executed.get("status") != "error" and not sandbox:
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
                 if turn is not None and executed.get("status") == "switched" and executed.get("presence"):
                     turn.set_presence(executed["presence"])
@@ -677,9 +714,13 @@ class ThinkPipeline:
                             f"[событие] {event_line}{reason_line}"
                         )})
                     else:
-                        from core.db import get_chat_alias
-                        target = (get_chat_alias(executed["chat_id"])
-                                  if executed.get("chat_id") else atype)
+                        # Sandbox snapshots carry the alias; real chats use DB.
+                        target = (presence.get("chat_alias")
+                                  or presence.get("focus_chat_alias"))
+                        if not target and executed.get("chat_id"):
+                            from core.db import get_chat_alias
+                            target = get_chat_alias(executed["chat_id"])
+                        target = target or atype
                         messages.append({"role": "system", "content": (
                             f"Presence switched: {atype} → "
                             f"{target}. "
@@ -786,6 +827,9 @@ class ThinkPipeline:
         enable_peek: bool = False,
         proactive_block: str | None = None,
         turn: TurnContext | None = None,
+        sandbox: bool = False,
+        sandbox_context=None,
+        sandbox_diary_context: str | None = None,
     ) -> Dict[str, Any]:
         total_start = time.time()
         req_user = request_user_id or self.user_id
@@ -798,6 +842,7 @@ class ThinkPipeline:
             reply_via = ""
             reply_chat_id = ""
             silence_reason = ""
+            system_prompt = ""
             iterations = 0
 
             async for step in self._run_stream(
@@ -805,10 +850,14 @@ class ThinkPipeline:
                 request_user_id=req_user, request_chat_id=req_chat,
                 turn=turn,
                 enable_peek=enable_peek, proactive_block=proactive_block,
+                sandbox=sandbox,
+                sandbox_context=sandbox_context,
+                sandbox_diary_context=sandbox_diary_context,
             ):
                 kind = step.get("kind")
                 if kind == "llm":
                     iterations = step.get("iteration", iterations)
+                    system_prompt = step.get("system_prompt") or system_prompt
                     raw_llm_responses.append({
                         "iteration": step.get("iteration"),
                         "thoughts": step.get("content", ""),
@@ -824,7 +873,8 @@ class ThinkPipeline:
                     reply_chat_id = (turn.resolve_target() if turn is not None
                                      else req_chat) or ""
                     reply_via = "bubbles"
-                    get_needs_tracker().apply_action_effect("send_message")
+                    if not sandbox:
+                        get_needs_tracker().apply_action_effect("send_message")
                     break
                 elif kind == "reply_tool":
                     a = step["action"]
@@ -838,7 +888,8 @@ class ThinkPipeline:
                     break
                 elif kind == "silence":
                     silence_reason = step.get("reason", "")
-                    get_needs_tracker().apply_action_effect("silence")
+                    if not sandbox:
+                        get_needs_tracker().apply_action_effect("silence")
                     break
 
             s_time = time.time() - total_start
@@ -852,14 +903,15 @@ class ThinkPipeline:
                 "reply_via": reply_via,
                 "reply_chat_id": reply_chat_id,
                 "silence_reason": silence_reason,
-                "system_prompt": "",
+                "system_prompt": system_prompt,
                 "llm_messages": [],
                 "error": None,
                 "raw_llm_responses": raw_llm_responses,
                 "timing": {"total": f"{s_time:.2f}s", "iterations": iterations},
             }
-            await self._save_log(result, proactive_block or user_message,
-                                 request_user_id=req_user, request_chat_id=req_chat)
+            if not sandbox:
+                await self._save_log(result, proactive_block or user_message,
+                                     request_user_id=req_user, request_chat_id=req_chat)
             return result
         except Exception as e:
             total_time = time.time() - total_start
@@ -874,7 +926,8 @@ class ThinkPipeline:
                 "error": str(e),
                 "timing": {"total": f"{total_time:.2f}s"},
             }
-            await self._save_log({**error_result, "traceback": tb}, user_message, request_user_id=request_user_id, request_chat_id=request_chat_id)
+            if not sandbox:
+                await self._save_log({**error_result, "traceback": tb}, user_message, request_user_id=request_user_id, request_chat_id=request_chat_id)
             return error_result
 
     async def _save_log(self, result: Dict, user_message: str, request_user_id: str | None = None, request_chat_id: str | None = None):
@@ -938,6 +991,9 @@ class ThinkPipeline:
         proactive_block: str | None = None,
         turn: TurnContext | None = None,
         history_loader=None,
+        sandbox: bool = False,
+        sandbox_context=None,
+        sandbox_diary_context: str | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Streaming version consumed by core/queue.py and core/proactive.py.
 
@@ -964,6 +1020,7 @@ class ThinkPipeline:
             reply_via = ""
             reply_chat_id = ""
             silence_reason = ""
+            system_prompt = ""
             iteration = 0
 
             async for step in self._run_stream(
@@ -972,10 +1029,14 @@ class ThinkPipeline:
                 turn=turn,
                 enable_peek=enable_peek, proactive_block=proactive_block,
                 history_loader=history_loader,
+                sandbox=sandbox,
+                sandbox_context=sandbox_context,
+                sandbox_diary_context=sandbox_diary_context,
             ):
                 kind = step.get("kind")
                 if kind == "llm":
                     iteration = step.get("iteration", iteration)
+                    system_prompt = step.get("system_prompt") or system_prompt
                     raw_llm_responses.append({
                         "iteration": step.get("iteration"),
                         "thoughts": step.get("content", ""),
@@ -1001,7 +1062,8 @@ class ThinkPipeline:
                     reply_chat_id = (turn.resolve_target() if turn is not None
                                      else req_chat) or ""
                     reply_via = "bubbles"
-                    get_needs_tracker().apply_action_effect("send_message")
+                    if not sandbox:
+                        get_needs_tracker().apply_action_effect("send_message")
                     yield {"type": "reply", "texts": reply_texts, "text": reply_text,
                            "via": "bubbles"}
                     break
@@ -1021,7 +1083,8 @@ class ThinkPipeline:
                     break
                 elif kind == "silence":
                     silence_reason = step.get("reason", "")
-                    get_needs_tracker().apply_action_effect("silence")
+                    if not sandbox:
+                        get_needs_tracker().apply_action_effect("silence")
                     yield {"type": "silence", "reason": silence_reason}
                     break
 
@@ -1035,14 +1098,15 @@ class ThinkPipeline:
                 "reply_via": reply_via,
                 "reply_chat_id": reply_chat_id,
                 "silence_reason": silence_reason,
-                "system_prompt": "",
+                "system_prompt": system_prompt,
                 "llm_messages": [],
                 "error": None,
                 "raw_llm_responses": raw_llm_responses,
                 "timing": {"total": f"{s_time:.2f}s", "iterations": iteration},
             }
-            await self._save_log(result, proactive_block or user_message,
-                                 request_user_id=req_user, request_chat_id=req_chat)
+            if not sandbox:
+                await self._save_log(result, proactive_block or user_message,
+                                     request_user_id=req_user, request_chat_id=req_chat)
             yield {"type": "done", "result": result}
         except Exception as e:
             import traceback
@@ -1056,10 +1120,11 @@ class ThinkPipeline:
                 "error": str(e),
                 "timing": {"total": f"{time.time() - total_start:.2f}s"},
             }
-            await self._save_log({**error_result, "traceback": tb},
-                                 proactive_block or user_message,
-                                 request_user_id=request_user_id,
-                                 request_chat_id=request_chat_id)
+            if not sandbox:
+                await self._save_log({**error_result, "traceback": tb},
+                                     proactive_block or user_message,
+                                     request_user_id=request_user_id,
+                                     request_chat_id=request_chat_id)
             yield {"type": "error", "error": str(e)}
 
 

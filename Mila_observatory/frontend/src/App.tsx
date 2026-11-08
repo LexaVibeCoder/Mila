@@ -12,6 +12,7 @@ import SleepControl from './pages/SleepControl';
 import StateAgentControl from './pages/StateAgentControl';
 import UsersList from './pages/UsersList';
 import UserDetail from './pages/UserDetail';
+import TestChat from './pages/TestChat';
 
 export default function App() {
   return (
@@ -28,6 +29,7 @@ export default function App() {
         <Route path="/config" element={<ConfigPage />} />
         <Route path="/sleep" element={<SleepControl />} />
         <Route path="/state-agent" element={<StateAgentControl />} />
+        <Route path="/test-chat" element={<TestChat />} />
       </Routes>
     </Layout>
   );

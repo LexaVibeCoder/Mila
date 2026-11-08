@@ -279,7 +279,10 @@ def format_state_block(current_chat_id: str | None = None,
         lines.append("Ты отдыхаешь (rest).")
     elif state == "dialog":
         focus = p.get("focus_user_name") or "собеседник"
-        alias = get_chat_alias(p["focus_chat_id"]) if p.get("focus_chat_id") else None
+        # Test chats carry their own alias in the snapshot; real chats use DB.
+        alias = p.get("chat_alias") or p.get("focus_chat_alias")
+        if not alias and p.get("focus_chat_id"):
+            alias = get_chat_alias(p["focus_chat_id"])
         lines.append(f"Ты в диалоге с {focus} (алиас чата: {alias or 'неизвестен'}).")
     elif state == "working":
         extra = f" ({p['note']})" if p.get("note") else ""
@@ -291,7 +294,10 @@ def format_state_block(current_chat_id: str | None = None,
 
     if current_chat_id is not None and current_chat_id not in ("proactive", "system"):
         who = current_user_name or "собеседник"
-        alias = get_chat_alias(current_chat_id) or "неизвестен"
+        alias = p.get("chat_alias")
+        if not alias and str(p.get("focus_chat_id")) == str(current_chat_id):
+            alias = p.get("focus_chat_alias")
+        alias = alias or get_chat_alias(current_chat_id) or "неизвестен"
         if state == "dialog" and str(p.get("focus_chat_id")) != str(current_chat_id):
             lines.append(
                 f"Это уведомление не из твоего диалога: пишет {who} "

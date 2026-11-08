@@ -116,6 +116,10 @@ CREATE TABLE memories (
 `ToolExecutor._handle_search_memory()` передаёт `user_id` в
 `search_memories_by_faiss_ids()`. Legacy-строки с `NULL user_id` видны только
 если per-user совпадений нет — это осознанный backward-compat, а не общий доступ.
+В sandbox-режиме Observatory Test Chat (`sandbox=True`) этот fallback отключён:
+тестовый чат читает факты только своего синтетического `user_id`
+(`test-user:<slug имени собеседника>`) и не может случайно увидеть
+legacy-строки реальных пользователей.
 
 ### SQLite fallback
 

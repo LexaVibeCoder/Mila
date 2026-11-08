@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 
@@ -14,6 +15,10 @@ def get_tool_definitions(presence_state: str = "rest",
       enter_rest, enter_working, start_sleep.
     - sleep: start_sleep only (pipeline rarely runs here).
     - proactive: rest/working + peek_recent_chats (one shot view of all chats).
+
+    The Observatory test chat receives the same definitions as a real chat;
+    actions it cannot perform are ignored by the executor instead of being
+    removed from the list (so Mila does not notice a special mode).
     """
     try:
         from Mila_observatory.runtime import runtime_config
@@ -303,15 +308,58 @@ class ToolExecutor:
         current_user_id: str,
         chat_id: str,
         seen_memories: set[str] | None = None,
+        sandbox: bool = False,
+        sandbox_context=None,
     ):
         self.text_memory = text_memory
         self.emb_client = embedding_client
         self.current_user_id = current_user_id
         self.chat_id = chat_id
+        # Sandbox (Observatory test chat) never touches global DB state. The
+        # optional context maps diary/presence/send actions to one session.
+        self.sandbox = sandbox or sandbox_context is not None
+        self.sandbox_context = sandbox_context
         # Shared across every search_memory call in one turn: the model often
         # issues several overlapping queries, and the same fact must not be
         # injected into the context once per query.
         self.seen_memories = seen_memories if seen_memories is not None else set()
+
+    def _sandbox_presence(self, state: str, note: str = "") -> Dict:
+        """Session-scoped presence dict (global presence is never touched)."""
+        ctx = self.sandbox_context
+        in_dialog = state == "dialog"
+        return {
+            "state": state,
+            "focus_chat_id": ctx.chat_id if in_dialog else None,
+            "focus_user_name": ctx.user_name if in_dialog else None,
+            "focus_chat_alias": ctx.alias if in_dialog else None,
+            # Alias of the notification chat, needed by the header and the
+            # rest/working notification block.
+            "chat_alias": ctx.alias,
+            "user_name": ctx.user_name,
+            "note": note,
+            "updated_at": datetime.now().isoformat(),
+        }
+
+    def _resolve_sandbox_target(self, params: Dict, allow_default: bool = False):
+        """Resolve a target inside the sandbox: only the session chat exists.
+
+        Returns ``(chat_id, None)`` for the session chat, ``(None, "ignored")``
+        for any foreign alias — the caller must then silently ignore the action
+        instead of reporting a test-mode error to the model.
+        """
+        ctx = self.sandbox_context
+        supplied = "chat_alias" in params or "chat_id" in params
+        if supplied:
+            raw = params.get("chat_alias") if "chat_alias" in params else params.get("chat_id")
+            if isinstance(raw, str):
+                value = raw.strip()
+                if value == ctx.chat_id or value.casefold() == ctx.alias.casefold():
+                    return ctx.chat_id, None
+            return None, "ignored"
+        if allow_default:
+            return ctx.chat_id, None
+        return None, "ignored"
 
     async def execute_action(self, action: Dict) -> Dict:
         action_type = action.get("action_type", "")
@@ -338,6 +386,9 @@ class ToolExecutor:
         elif action_type == "peek_recent_chats":
             return await self._handle_peek_recent_chats(params)
         else:
+            if self.sandbox:
+                # Unknown/unsupported action in a test session: ignore quietly.
+                return {"type": action_type, "status": "ignored"}
             return {
                 "type": action_type,
                 "status": "unknown",
@@ -346,6 +397,18 @@ class ToolExecutor:
 
     async def _handle_send_message(self, params: Dict) -> Dict:
         text = params.get("text", "")
+        if self.sandbox_context:
+            chat_id, error = self._resolve_sandbox_target(params, allow_default=True)
+            if error:
+                return {"type": "send_message", "status": "ignored"}
+            return {
+                "type": "send_message",
+                "text": text,
+                "chat_id": chat_id,
+                "status": "ready",
+            }
+        if self.sandbox:
+            return {"type": "send_message", "status": "ignored"}
         chat_id, error = self._resolve_target(params, allow_default=True)
         if error:
             return {"type": "send_message", "status": "error", "error": error}
@@ -434,7 +497,7 @@ class ToolExecutor:
         from core.db import search_memories_like
 
         memories = search_memories_like(self.current_user_id, query, limit=5)
-        if not memories:
+        if not memories and not self.sandbox:
             # Legacy rows with NULL user_id (same rule as the FAISS path).
             memories = search_memories_like(None, query, limit=5)
         raw_results = [{**m, "score": None} for m in memories]
@@ -490,7 +553,9 @@ class ToolExecutor:
                 # Legacy rows with NULL user_id are visible to everyone only
                 # when no per-user rows matched (backward compat).
                 memories = search_memories_by_faiss_ids(valid_indices, user_id=self.current_user_id)
-                if not memories:
+                if not memories and not self.sandbox:
+                    # Legacy rows with NULL user_id are shared only outside the
+                    # sandbox: a test chat reads exactly one synthetic user.
                     memories = [m for m in search_memories_by_faiss_ids(valid_indices)
                                 if not m.get("user_id")]
 
@@ -587,6 +652,26 @@ class ToolExecutor:
                 "error": "Missing diary entry text (param 'entry')"
             }
 
+        if self.sandbox_context:
+            from core.test_chat import store
+            category = params.get("category", "day_entries")
+            saved = store.add_diary_entry(
+                self.sandbox_context.session_id, entry, category=category)
+            if not saved:
+                return {"type": "write_diary", "status": "error",
+                        "error": "Diary write failed"}
+            return {
+                "type": "write_diary",
+                "entry_number": saved["entry_number"],
+                "entry_id": saved["id"],
+                "category": saved["category"],
+                "status": "written",
+            }
+
+        if self.sandbox:
+            # No session context: never fall through to the real diary.
+            return {"type": "write_diary", "status": "ignored"}
+
         from core.diary.manager import add_diary_entry
         category = params.get("category", "day_entries")
         result = add_diary_entry(entry.strip(), category=category)
@@ -615,6 +700,31 @@ class ToolExecutor:
                 "error": "Missing entry_id"
             }
 
+        if self.sandbox_context:
+            from core.test_chat import store
+            try:
+                numeric_id = int(entry_id)
+            except (TypeError, ValueError):
+                numeric_id = -1
+            updated = store.update_diary_entry(
+                self.sandbox_context.session_id, numeric_id, entry,
+                category=params.get("category"))
+            if not updated:
+                return {
+                    "type": "update_diary",
+                    "entry_id": entry_id,
+                    "status": "not_found",
+                    "error": f"Diary entry ID {entry_id} not found",
+                }
+            return {
+                "type": "update_diary",
+                "entry_id": entry_id,
+                "status": "updated",
+            }
+
+        if self.sandbox:
+            return {"type": "update_diary", "status": "ignored"}
+
         from core.diary.manager import update_diary_entry
         category = params.get("category")
         updated = update_diary_entry(int(entry_id), entry.strip(), category=category)
@@ -637,13 +747,32 @@ class ToolExecutor:
     # ------------------------------------------------------------------
 
     async def _handle_enter_dialog(self, params: Dict) -> Dict:
-        from core.presence import enter_dialog
-        from core.db import get_chat_display_name
         note = params.get("note")
         if not isinstance(note, str) or not note.strip():
             return {"type": "enter_dialog", "status": "error",
                     "error": "Укажи непустую причину перехода в поле note."}
         note = note.strip()
+
+        if self.sandbox_context:
+            from core.test_chat import store
+            chat_id, error = self._resolve_sandbox_target(params)
+            if error:
+                # A real/unknown chat does not exist in the sandbox.
+                return {"type": "enter_dialog", "status": "ignored"}
+            store.set_state(self.sandbox_context.session_id, "dialog")
+            self.sandbox_context.state = "dialog"
+            presence = self._sandbox_presence("dialog", note)
+            return {"type": "enter_dialog", "chat_id": chat_id,
+                    "user_name": self.sandbox_context.user_name,
+                    "state": "dialog", "presence": presence,
+                    "status": "switched", "journal_event": None,
+                    "note": note}
+
+        if self.sandbox:
+            return {"type": "enter_dialog", "status": "ignored"}
+
+        from core.presence import enter_dialog
+        from core.db import get_chat_display_name
         chat_id, error = self._resolve_target(params)
         if error:
             return {"type": "enter_dialog", "status": "error",
@@ -661,8 +790,17 @@ class ToolExecutor:
                 "journal_event": presence.get("journal_event"), "note": note}
 
     async def _handle_enter_rest(self, params: Dict) -> Dict:
-        from core.presence import enter_rest
         note = str(params.get("note", "") or "")
+        if self.sandbox_context:
+            from core.test_chat import store
+            store.set_state(self.sandbox_context.session_id, "rest")
+            self.sandbox_context.state = "rest"
+            return {"type": "enter_rest", "state": "rest",
+                    "presence": self._sandbox_presence("rest", note),
+                    "status": "switched", "journal_event": None}
+        if self.sandbox:
+            return {"type": "enter_rest", "status": "ignored"}
+        from core.presence import enter_rest
         presence = enter_rest(note)
         print("[Presence] → rest")
         return {"type": "enter_rest", "state": presence.get("state", "rest"),
@@ -670,8 +808,17 @@ class ToolExecutor:
                 "journal_event": presence.get("journal_event")}
 
     async def _handle_enter_working(self, params: Dict) -> Dict:
-        from core.presence import enter_working
         note = str(params.get("note", "") or "")
+        if self.sandbox_context:
+            from core.test_chat import store
+            store.set_state(self.sandbox_context.session_id, "working")
+            self.sandbox_context.state = "working"
+            return {"type": "enter_working", "state": "working",
+                    "presence": self._sandbox_presence("working", note),
+                    "status": "switched", "journal_event": None}
+        if self.sandbox:
+            return {"type": "enter_working", "status": "ignored"}
+        from core.presence import enter_working
         presence = enter_working(note)
         print(f"[Presence] → working ({note[:60]})")
         return {"type": "enter_working",
@@ -680,6 +827,10 @@ class ToolExecutor:
                 "journal_event": presence.get("journal_event")}
 
     async def _handle_start_sleep(self, params: Dict) -> Dict:
+        if self.sandbox:
+            # Sleep needs the global transactional night cycle; a test dialog
+            # only ignores the action without telling the model why.
+            return {"type": "start_sleep", "status": "ignored"}
         from core.presence import get_presence
         try:
             duration = int(params.get("duration_minutes", 0) or 0)
@@ -731,6 +882,8 @@ class ToolExecutor:
         No truncation of message texts (per spec). Chats ordered by last
         activity ASC: stale in the middle of context, fresh at the bottom.
         """
+        if self.sandbox:
+            return {"type": "peek_recent_chats", "status": "ignored"}
         try:
             limit = int(params.get("limit_per_chat", 0) or 0)
         except (TypeError, ValueError):

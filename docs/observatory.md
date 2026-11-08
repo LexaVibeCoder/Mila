@@ -210,6 +210,46 @@ main-пайплайна. Ночные процессы читают `night_llm.t
 
 Подробности про trigger — [proactive.md](proactive.md).
 
+### Тест-чат (sandbox)
+
+Изолированный диалог из панели: реальная персона, промпт и tool-loop, но
+`presence` берётся из состояния **сессии** и не трогает глобальный
+`presence_state`. Ничего не пишется в `chunks`, контекст реальных чатов,
+`memories`, реальный дневник, `presence_state` или `action_journal`;
+JSON-лог пайплайна тоже не создаётся. История, тестовый дневник и debug
+живут в `test_chat_*` (`context_buffer.db`) и удаляются вместе с сессией.
+
+Сессия задаёт:
+- **имя собеседника** → из него выводятся `user_id` (`test-user:<slug>`) и
+  алиас чата (`<slug>`). Две сессии с одним именем делят память; смена имени
+  переключает `user_id`;
+- **состояние** Милы: `dialog` / `rest` / `working`. Оно стартовое и может
+  меняться её же тулами `enter_dialog` / `enter_rest` / `enter_working`
+  (только внутри сессии);
+- **тестовый дневник**: `write_diary` / `update_diary` пишут в него, в промпте
+  показывается только он (реальный дневник скрыт). Записи можно править и
+  удалять из панели.
+
+Мила не получает специального «тестового» промпта: тулы те же, что в реальном
+диалоге. `send_message` в тестовый чат становится её репликой; `send_message`
+в другие чаты, `start_sleep`, `peek_recent_chats` и неизвестные действия тихо
+игнорируются. Память собеседника можно пополнять вручную (вкладка Test Chat
+или `/api/users/{user_id}/memories`); она переживает удаление диалога и не
+видна другим пользователям.
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/api/test-chat/meta` | Имя по умолчанию, состояния, тулы |
+| GET | `/api/test-chat/sessions` | Список сессий (новые сверху) |
+| POST | `/api/test-chat/sessions` | Создать сессию (`title?`, `user_name?`, `state?`) |
+| GET | `/api/test-chat/sessions/{id}` | Сессия + сообщения + debug |
+| PUT | `/api/test-chat/sessions/{id}` | Переименовать / сменить состояние |
+| DELETE | `/api/test-chat/sessions/{id}` | Удалить диалог, дневник и все строки |
+| DELETE | `/api/test-chat/sessions/{id}/messages` | Очистить сообщения, оставить сессию и дневник |
+| POST | `/api/test-chat/sessions/{id}/messages` | Один ход пайплайна (`text`) |
+| GET/POST | `/api/test-chat/sessions/{id}/diary` | Список / добавить запись тестового дневника |
+| PUT/DELETE | `/api/test-chat/sessions/{id}/diary/{entry_id}` | Изменить / удалить запись |
+
 ## Фронтенд
 
 React SPA на TypeScript + Vite. В dev-режиме проксирует API на
@@ -217,7 +257,7 @@ React SPA на TypeScript + Vite. В dev-режиме проксирует API �
 `OBSERVATORY_HOST:OBSERVATORY_PORT`; по умолчанию `127.0.0.1:8080`.
 В проде сервится FastAPI из `frontend/dist/`.
 
-### Маршруты (11)
+### Маршруты (12)
 
 | Путь | Компонент | Описание |
 |------|-----------|----------|
@@ -232,6 +272,7 @@ React SPA на TypeScript + Vite. В dev-режиме проксирует API �
 | `/tools` | ToolsControl | 7 тумблеров |
 | `/personality` | PersonalityEditor | `custom_text` + слайдеры parameters |
 | `/state-agent` | StateAgentControl | Потребности, инференс, trigger/dry-run |
+| `/test-chat` | TestChat | Sandbox-диалог: имя/алиас, состояние, тестовый дневник, память, debug |
 
 ### Сборка
 

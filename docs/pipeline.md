@@ -169,6 +169,25 @@ error         → {"type": "error", "error": "..."}
   нативный звук пропускается (плейсхолдер остаётся);
 - при ошибке провайдера на аудио `LLMClient` делает один текстовый ретрай.
 
+## Sandbox (Observatory Test Chat)
+
+`process_message(..., sandbox=True, sandbox_context=..., sandbox_diary_context=...)`
+и потоковый вариант:
+
+- presence берётся из `TurnContext`-снимка сессии (`dialog` / `rest` /
+  `working`); глобальный `presence_state` не читается и не меняется;
+- определения тулов **не фильтруются** — Мила видит обычный набор для своего
+  состояния. `ToolExecutor` с `sandbox_context` пишет `write_diary` /
+  `update_diary` в дневник сессии, переключает состояние сессии через
+  `enter_*`, а `send_message` в чат сессии отдаёт как реплику;
+- `start_sleep`, `peek_recent_chats`, `send_message` в чужие чаты и неизвестные
+  действия возвращают `status="ignored"` без сообщения модели;
+- блок реального дневника заменяется `sandbox_diary_context`; в чат-листе
+  остаётся только чат сессии; никакого «тестового» текста в промпт не
+  добавляется;
+- эффекты State Agent (`apply_action_effect`) не применяются;
+- `logs/pipeline_*.json` не создаётся.
+
 ## Логирование
 
 Каждый прогон пишется в `logs/pipeline_*.json` (`LOG_DIR`), хранится 200 последних
@@ -180,7 +199,7 @@ error         → {"type": "error", "error": "..."}
   "user_id": "...",
   "chat_id": "...",
   "user_message": "...",
-  "system_prompt": "",
+  "system_prompt": "полный system prompt последней итерации",
   "llm_messages": [],
   "thoughts": "...",
   "reply_text": "...",

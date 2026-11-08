@@ -51,6 +51,21 @@ definitions: молчание = пустой ответ.
 - `peek_recent` действует только при `include_proactive=True` (проактивный ход);
 - отключённые тулзы не попадают в definitions и недоступны модели.
 
+### Sandbox (Observatory Test Chat)
+
+Определения тулов для теста **не отличаются** от обычного диалога. Особенности
+поведения задаёт `ToolExecutor(..., sandbox_context=...)`:
+
+- `write_diary` / `update_diary` → дневник текущей тестовой сессии;
+- `enter_dialog` / `enter_rest` / `enter_working` → состояние сессии (алиас
+  тестового чата), глобальный presence не трогается;
+- `send_message` в тестовый чат → `status="ready"` (реплика); в чужой чат →
+  `status="ignored"`;
+- `start_sleep`, `peek_recent_chats`, неизвестные действия → `status="ignored"`
+  без текста ошибки, чтобы Мила не догадалась о песочнице.
+
+Подробности — [observatory.md](observatory.md#тест-чат-sandbox).
+
 ## Поведение executor-а
 
 ### `enter_dialog`

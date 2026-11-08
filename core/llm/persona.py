@@ -108,7 +108,7 @@ def _format_time_delta(delta: timedelta) -> str:
         return f"{minutes} minutes"
 
 
-def _get_profile_context(user_id: str) -> tuple[str, str, str]:
+def _get_profile_context(user_id: str, name_override: str | None = None) -> tuple[str, str, str]:
     user = get_user_info(user_id)
     if not user:
         user_name = "user"
@@ -116,6 +116,9 @@ def _get_profile_context(user_id: str) -> tuple[str, str, str]:
     else:
         user_name = user.get("preferred_name") or user.get("user_name") or "user"
         sentiment = user.get("sentiment", 0.0)
+    # Test sessions have no users row: their snapshot carries the real name.
+    if name_override:
+        user_name = name_override
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     # sentiment maps to closeness tier: друг / знакомый / чужой.
     # history length refines it in the prompt (just met -> чужой even if sentiment neutral).
@@ -185,7 +188,8 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
                                  presence: dict | None = None,
                                  journal_context: str | None = None,
                                  notification_chat_id: str | None = None,
-                                 notification_user_id: str | None = None) -> str:
+                                 notification_user_id: str | None = None,
+                                 diary_context_override: str | None = None) -> str:
     """Assemble the system prompt for one turn.
 
     ``presence`` is the turn snapshot (see core.delivery.TurnContext). When
@@ -195,8 +199,17 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     The pipeline reads it once at turn start, so events created *during* the
     turn are shown separately at the bottom and only move into the journal on
     the next turn.
+
+    ``diary_context_override`` replaces the real daily diary block (the
+    Observatory test chat passes its session diary). ``None`` keeps the real
+    diary; an empty string suppresses the block.
     """
-    user_name, relationship, now = _get_profile_context(user_id)
+    presence_name = (presence or {}).get("user_name")
+    if presence_name:
+        user_name, relationship, now = _get_profile_context(
+            user_id, name_override=presence_name)
+    else:
+        user_name, relationship, now = _get_profile_context(user_id)
     static_prefix = _get_static_prompt_prefix()
 
     try:
@@ -214,12 +227,18 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
         pass
 
     effective_chat_id = chat_id if chat_id not in ("proactive", "system") else None
-    header_name = user_name
+    header_name = (presence or {}).get("user_name") or user_name
     presence = presence if presence is not None else _get_presence_state()
     if presence.get("state") == "dialog":
         effective_chat_id = presence.get("focus_chat_id") or effective_chat_id
-        header_name = presence.get("focus_user_name") or user_name
-    chat_alias = get_chat_alias(effective_chat_id) if effective_chat_id else None
+        header_name = presence.get("focus_user_name") or header_name
+    # Test chats live only in the Observatory store: their alias comes from
+    # the presence snapshot instead of chat_aliases.
+    chat_alias = presence.get("chat_alias")
+    if not chat_alias and presence.get("state") == "dialog":
+        chat_alias = presence.get("focus_chat_alias")
+    if not chat_alias:
+        chat_alias = get_chat_alias(effective_chat_id) if effective_chat_id else None
     header = (
         _load("context/header")
         .replace("{now}", now)
@@ -248,8 +267,12 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
     # Behavior rules live in states/{state}.md, not here.
     try:
         from core.presence import format_state_block
-        notification_name = (_get_profile_context(notification_user_id)[0]
-                             if notification_user_id else user_name)
+        presence_name = presence.get("user_name")
+        notification_name = (
+            presence_name
+            or (_get_profile_context(notification_user_id)[0]
+                if notification_user_id else user_name)
+        )
         parts.append(format_state_block(
             current_chat_id=str(notification_chat_id or chat_id) if (notification_chat_id or chat_id) else None,
             current_user_name=notification_name,
@@ -276,7 +299,9 @@ def build_main_llm_system_prompt(user_id: str, chat_id: str = None, my_user_id: 
         parts.append(_load("context/journal_block").replace(
             "{journal_context}", journal_context))
 
-    diary_context = get_today_diary_context()
+    diary_context = (get_today_diary_context()
+                     if diary_context_override is None
+                     else diary_context_override)
     if diary_context:
         parts.append(_load("context/diary_block").replace("{diary_context}", diary_context))
 

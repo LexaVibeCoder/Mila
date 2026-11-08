@@ -497,3 +497,120 @@ export interface ProactiveTriggerState {
 export const triggerProactive = (data: ProactiveTriggerRequest) =>
   request<ProactiveTriggerState>('/state-agent/trigger', { method: 'POST', body: JSON.stringify(data) });
 export const getTriggerState = () => request<ProactiveTriggerState>('/state-agent/trigger');
+
+// ─── Test Chat (sandbox) ────────────────────────────────────
+
+export interface TestChatSession {
+  session_id: string;
+  title: string;
+  chat_id: string;
+  user_name: string;
+  user_id: string;
+  alias: string;
+  state: 'dialog' | 'rest' | 'working' | string;
+  created_at: string | null;
+  updated_at: string | null;
+  message_count: number;
+  preview: string;
+}
+
+export interface TestChatMessage {
+  id: number;
+  role: 'user' | 'assistant' | string;
+  kind: 'text' | 'bubble' | 'silence' | 'error' | string;
+  content: string;
+  created_at: string | null;
+  debug: Record<string, unknown> | null;
+}
+
+export interface TestChatSessionDetail {
+  session: TestChatSession;
+  messages: TestChatMessage[];
+}
+
+export interface TestChatSendResult {
+  session_id: string;
+  session: TestChatSession | null;
+  messages: TestChatMessage[];
+  debug: Record<string, unknown> | null;
+}
+
+export interface TestChatMeta {
+  default_user_name: string;
+  default_state: string;
+  states: string[];
+  tools: string[];
+  model: string;
+}
+
+export interface TestChatDiaryEntry {
+  id: number;
+  entry_number: number;
+  content: string;
+  category: 'day_entries' | 'reflection_entries' | string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export const getTestChatMeta = () => request<TestChatMeta>('/test-chat/meta');
+export const getTestChatSessions = () => request<TestChatSession[]>('/test-chat/sessions');
+export const createTestChatSession = (data?: { title?: string; user_name?: string; state?: string }) =>
+  request<TestChatSession>('/test-chat/sessions', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: data?.title || null,
+      user_name: data?.user_name || null,
+      state: data?.state || 'dialog',
+    }),
+  });
+export const getTestChatSession = (sessionId: string) =>
+  request<TestChatSessionDetail>(`/test-chat/sessions/${encodeURIComponent(sessionId)}`);
+export const updateTestChatSession = (
+  sessionId: string,
+  data: { title?: string; user_name?: string; state?: string },
+) =>
+  request<TestChatSession>(`/test-chat/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+export const deleteTestChatSession = (sessionId: string) =>
+  request<{ success: boolean }>(`/test-chat/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+export const clearTestChatSession = (sessionId: string) =>
+  request<{ success: boolean; deleted: number }>(
+    `/test-chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    { method: 'DELETE' },
+  );
+export const sendTestChatMessage = (sessionId: string, text: string) =>
+  request<TestChatSendResult>(
+    `/test-chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    { method: 'POST', body: JSON.stringify({ text }) },
+  );
+
+export const getTestChatDiary = (sessionId: string) =>
+  request<TestChatDiaryEntry[]>(
+    `/test-chat/sessions/${encodeURIComponent(sessionId)}/diary`,
+  );
+export const createTestChatDiaryEntry = (
+  sessionId: string,
+  data: { content: string; category?: string },
+) =>
+  request<TestChatDiaryEntry>(
+    `/test-chat/sessions/${encodeURIComponent(sessionId)}/diary`,
+    { method: 'POST', body: JSON.stringify(data) },
+  );
+export const updateTestChatDiaryEntry = (
+  sessionId: string,
+  entryId: number,
+  data: { content: string; category?: string },
+) =>
+  request<TestChatDiaryEntry>(
+    `/test-chat/sessions/${encodeURIComponent(sessionId)}/diary/${entryId}`,
+    { method: 'PUT', body: JSON.stringify(data) },
+  );
+export const deleteTestChatDiaryEntry = (sessionId: string, entryId: number) =>
+  request<{ success: boolean }>(
+    `/test-chat/sessions/${encodeURIComponent(sessionId)}/diary/${entryId}`,
+    { method: 'DELETE' },
+  );

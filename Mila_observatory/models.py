@@ -275,6 +275,88 @@ class PortraitResponse(BaseModel):
     timing: str = ""
 
 
+# ─── Test Chat (Observatory) ─────────────────────────────────
+
+class TestChatSession(BaseModel):
+    session_id: str
+    title: str = ""
+    chat_id: str = ""
+    user_name: str = ""
+    user_id: str = ""
+    alias: str = ""
+    state: str = "dialog"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    message_count: int = 0
+    preview: str = ""
+
+
+class TestChatMessage(BaseModel):
+    id: int
+    role: str
+    kind: str = "text"
+    content: str = ""
+    created_at: Optional[str] = None
+    debug: Optional[Dict[str, Any]] = None
+
+
+class TestChatSessionDetail(BaseModel):
+    session: TestChatSession
+    messages: List[TestChatMessage] = []
+
+
+class TestChatSessionCreateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=120)
+    user_name: Optional[str] = Field(default=None, max_length=80)
+    state: str = Field(default="dialog", pattern="^(dialog|rest|working)$")
+
+
+class TestChatSessionUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=120)
+    user_name: Optional[str] = Field(default=None, max_length=80)
+    state: Optional[str] = Field(default=None, pattern="^(dialog|rest|working)$")
+
+
+class TestChatSendRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=8000)
+
+
+class TestChatSendResponse(BaseModel):
+    session_id: str
+    session: Optional[TestChatSession] = None
+    messages: List[TestChatMessage] = []
+    debug: Optional[Dict[str, Any]] = None
+
+
+class TestChatDiaryEntry(BaseModel):
+    id: int
+    entry_number: int = 0
+    content: str = ""
+    category: str = "day_entries"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class TestChatDiaryRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=8000)
+    category: str = Field(default="day_entries",
+                          pattern="^(day_entries|reflection_entries)$")
+
+
+class TestChatDiaryUpdateRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=8000)
+    category: Optional[str] = Field(
+        default=None, pattern="^(day_entries|reflection_entries)$")
+
+
+class TestChatMeta(BaseModel):
+    default_user_name: str
+    default_state: str = "dialog"
+    states: List[str] = []
+    tools: List[str] = []
+    model: str = ""
+
+
 # ─── Config ──────────────────────────────────────────────────
 
 class ConfigResponse(BaseModel):

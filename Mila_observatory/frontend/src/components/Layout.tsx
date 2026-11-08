@@ -12,6 +12,7 @@ const navItems = [
   { path: '/tools', label: 'Tools', icon: '⊞' },
   { path: '/personality', label: 'Personality', icon: '◇' },
   { path: '/state-agent', label: 'State Agent', icon: '◔' },
+  { path: '/test-chat', label: 'Test Chat', icon: '✎' },
 ];
 
 const styles: Record<string, React.CSSProperties> = {

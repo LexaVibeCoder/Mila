@@ -170,7 +170,9 @@ def get_user_fact_extraction_tools() -> List[Dict]:
                     "properties": {
                         "user_id": {
                             "type": "string",
-                            "description": "The user_id this fact belongs to"
+                            "description": "The exact full Telegram user_id this fact "
+                                           "belongs to (copy it from the [user_id] prefix; "
+                                           "never truncate it)"
                         },
                         "content": {
                             "type": "string",

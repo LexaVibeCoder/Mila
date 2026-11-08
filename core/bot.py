@@ -110,6 +110,10 @@ class MilaUserbot:
         self.me = await self.app.getMe()
         if isinstance(self.me, types.Error):
             raise RuntimeError(f"TDLib getMe failed: {self.me.message}")
+        # Persist our own sender id: chunks store outgoing bubbles under it,
+        # and Observatory must not present Mila as one of her own users.
+        from core.db import set_bot_user_id
+        set_bot_user_id(str(self.me.id))
         username = ""
         if self.me.usernames and self.me.usernames.editable_username:
             username = f" (@{self.me.usernames.editable_username})"

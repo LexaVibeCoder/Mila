@@ -41,6 +41,21 @@ CREATE TABLE users (
 
 `id` — это `user_id`; полей `is_bot/language_code/created_at/updated_at` нет.
 
+### bot_identity
+
+```sql
+CREATE TABLE bot_identity (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+```
+
+Служебная key-value таблица. `core/bot.py` после `getMe()` пишет сюда
+`telegram_user_id` — id самого аккаунта Милы. По нему Observatory отличает
+исходящие сообщения Милы (`chunks.user_id`) от её собеседников и не показывает
+карточку Милы в списке пользователей. До первого перезапуска бота
+`get_bot_user_id()` использует best-effort fallback по `chunks`.
+
 ### chats
 
 ```sql

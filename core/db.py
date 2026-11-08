@@ -41,6 +41,10 @@ def init_db():
         chat_name TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS bot_identity (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
     CREATE TABLE IF NOT EXISTS chat_aliases (
         alias TEXT PRIMARY KEY,
         chat_id TEXT NOT NULL UNIQUE
@@ -145,17 +149,75 @@ def _migrate_indexes():
     finally:
         conn.close()
 
-def ensure_user_exists(user_id: str, user_name: str = None):
+def ensure_user_exists(user_id: str, user_name: str = None) -> bool:
+    """Create a ``users`` row if missing.
+
+    Returns True only when this call actually inserted the row. Sleep staging
+    uses that to roll back users created solely by a rejected fact extraction,
+    without touching profiles that existed before the session.
+    """
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
-        if not cur.fetchone():
-            cur.execute(
-                "INSERT INTO users (user_id, user_name) VALUES (?, ?)",
-                (user_id, user_name)
-            )
-            conn.commit()
+        if cur.fetchone():
+            return False
+        cur.execute(
+            "INSERT INTO users (user_id, user_name) VALUES (?, ?)",
+            (user_id, user_name)
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def set_bot_user_id(user_id: str) -> None:
+    """Persist the logged-in Telegram account id (Mila's own sender id)."""
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO bot_identity (key, value) VALUES ('telegram_user_id', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (user_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_bot_user_id() -> Optional[str]:
+    """Mila's own Telegram id, or a best-effort fallback before first restart.
+
+    The authoritative value is written by ``core.bot`` after ``getMe()``.
+    ``bot_identity`` is new, so an old DB may not have it yet; the fallback
+    picks the sender that appears in at least two different chats and is never
+    a private chat id. That is enough to hide Mila's own card from the Users
+    API until the bot restarts and stores the exact id.
+    """
+    conn = get_conn()
+    try:
+        try:
+            row = conn.execute(
+                "SELECT value FROM bot_identity WHERE key='telegram_user_id'"
+            ).fetchone()
+        except Exception:
+            row = None
+        if row and row["value"]:
+            return str(row["value"])
+        try:
+            row = conn.execute(
+                "SELECT user_id FROM chunks "
+                "WHERE user_id IS NOT NULL AND user_id != '' AND user_id != chat_id "
+                "GROUP BY user_id HAVING COUNT(DISTINCT chat_id) >= 2 "
+                "ORDER BY COUNT(DISTINCT chat_id) DESC, COUNT(*) DESC LIMIT 1"
+            ).fetchone()
+        except Exception:
+            row = None
+        return str(row["user_id"]) if row else None
     finally:
         conn.close()
 

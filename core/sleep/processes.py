@@ -97,12 +97,56 @@ def _create_verifier_llm() -> LLMClient:
     )
 
 
+def resolve_fact_user_id(
+    raw: Any, known_user_ids: Optional[set[str]]
+) -> tuple[Optional[str], Optional[str]]:
+    """Map an LLM-provided user id to a full id seen in this dialog.
+
+    Returns ``(user_id, error)``. The model sometimes copies an 8-char prefix
+    from the prompt ("65660908...") or hallucinates an id. We accept a full id
+    or a unique prefix, but never create a new user row from a truncated one.
+    """
+    candidate = str(raw or "").strip().strip("[](){}<> \t")
+    candidate = candidate.rstrip(".…").strip()
+    if not candidate:
+        return None, "empty user_id"
+
+    known = {str(uid) for uid in (known_user_ids or set()) if uid}
+    if not known:
+        return None, "no dialog participants are known"
+    if candidate in known:
+        return candidate, None
+
+    matches = sorted(uid for uid in known if uid.startswith(candidate))
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, (
+            f"user_id {candidate!r} is ambiguous ({', '.join(matches)}); "
+            "use the full id"
+        )
+    return None, (
+        f"user_id {candidate!r} is not a participant in this dialog; "
+        f"valid ids: {', '.join(sorted(known))}"
+    )
+
+
 class StagingExecutor:
-    def __init__(self, session_id: str, process_type: str):
+    def __init__(
+        self,
+        session_id: str,
+        process_type: str,
+        known_user_ids: Optional[set[str]] = None,
+        default_source_chat_id: Optional[str] = None,
+    ):
         self.session_id = session_id
         self.process_type = process_type
         self.staged_ids: List[int] = []
         self.skipped = False
+        # Fact extraction gets the full ids actually present in this dialog.
+        # Unknown/truncated ids are rejected instead of creating ghost users.
+        self.known_user_ids = {str(uid) for uid in (known_user_ids or set()) if uid}
+        self.default_source_chat_id = str(default_source_chat_id or "") or None
 
     async def execute_tool_call(self, tool_call) -> Dict[str, Any]:
         import json
@@ -309,12 +353,54 @@ class StagingExecutor:
         }
 
     async def _stage_user_fact(self, args: Dict) -> Dict:
+        from core.db import ensure_user_exists
         from core.memory.indexer import get_indexer
 
-        user_id = args["user_id"]
-        content = args["content"]
-        importance = args.get("importance", 0.5)
-        source_chat_id = args.get("source_chat_id", "")
+        user_id, error = resolve_fact_user_id(
+            args.get("user_id"), self.known_user_ids)
+        if error:
+            return {
+                "role": "system",
+                "content": (
+                    f"ERROR: {error}. Do not truncate ids; call add_user_fact "
+                    "again with the exact full user_id from the [user_id] prefix."
+                ),
+            }
+
+        content = str(args.get("content") or "").strip()
+        if not content:
+            return {
+                "role": "system",
+                "content": "ERROR: empty content; call add_user_fact with a non-empty fact.",
+            }
+
+        try:
+            importance = float(args.get("importance", 0.5))
+        except (TypeError, ValueError):
+            importance = 0.5
+        importance = max(0.0, min(1.0, importance))
+
+        source_chat_id = (
+            self.default_source_chat_id
+            or str(args.get("source_chat_id") or "").strip()
+        )
+        if not source_chat_id:
+            return {
+                "role": "system",
+                "content": "ERROR: missing source_chat_id; call add_user_fact again.",
+            }
+
+        # Stage the users row before the memory row. Rollback reverses the
+        # order, so it deletes the memory first and only then removes a user
+        # row that this sleep session created (existing profiles are kept).
+        if ensure_user_exists(user_id):
+            stage_operation(
+                session_id=self.session_id,
+                operation_type="insert",
+                target_table="users",
+                target_id=user_id,
+                payload={"user_id": user_id},
+            )
 
         # Insert + embed + FAISS in one step; if the embedding backend is
         # down the row stays with faiss_id=NULL and is retried later.
@@ -745,11 +831,14 @@ async def process_user_fact_extraction(session_id: str) -> Tuple[bool, str]:
         chunks = get_recent_chunks(chat_id, limit=200)
 
         messages_text_lines = []
+        known_user_ids: set[str] = set()
         for chunk in chunks:
-            user_id = chunk.get("user_id", "unknown")[:8]
+            user_id = str(chunk.get("user_id") or "").strip()
+            if user_id:
+                known_user_ids.add(user_id)
             content = chunk.get("content", "")
             if content.strip():
-                messages_text_lines.append(f"[{user_id}...]: {content[:500]}")
+                messages_text_lines.append(f"[{user_id or 'unknown'}]: {content[:500]}")
 
         messages_text = "\n".join(messages_text_lines)
 
@@ -757,7 +846,12 @@ async def process_user_fact_extraction(session_id: str) -> Tuple[bool, str]:
             print("  → Skipped: no messages")
             continue
 
-        executor = StagingExecutor(session_id, "user_fact_extraction")
+        executor = StagingExecutor(
+            session_id,
+            "user_fact_extraction",
+            known_user_ids=known_user_ids,
+            default_source_chat_id=chat_id,
+        )
 
         system_prompt = f"""You are Mila's night reflection system (Process 3: User Fact Extraction).
 
@@ -776,7 +870,8 @@ Your task is to extract long-term facts about users from dialog messages.
    - Personality traits that are demonstrated
    - Important opinions or beliefs
 3. For each fact, use add_user_fact with:
-   - The correct user_id (from the [user_id...] prefix in messages)
+   - The exact full user_id from the [user_id] prefix in messages
+     (never truncate, shorten, or invent an id)
    - A specific, factual description
    - An appropriate importance level
 4. If no meaningful facts are found, use skip_user_fact_extraction.

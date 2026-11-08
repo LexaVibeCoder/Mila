@@ -4,6 +4,7 @@ core/sleep/manager.py — Mila's Sleep Manager (Orchestrator).
 
 import asyncio
 import json
+import sqlite3
 import time
 import os
 from datetime import datetime, timedelta, timezone
@@ -255,6 +256,32 @@ async def rollback_all(session_id: str = None):
                             "DELETE FROM memories WHERE mem_id=?",
                             (target_id,)
                         )
+
+                elif target_table == "users":
+                    # Fact extraction may have created a users row for a new
+                    # id. Remove it only if nothing else references it now;
+                    # profiles that existed before the session are untouched.
+                    if op_type == "insert":
+                        has_refs = False
+                        for table, col in (
+                            ("memories", "user_id"),
+                            ("chunks", "user_id"),
+                            ("chat_members", "user_id"),
+                            ("user_attitude_history", "user_id"),
+                            ("media_logs", "user_id"),
+                        ):
+                            try:
+                                if conn.execute(
+                                    f"SELECT 1 FROM {table} WHERE {col}=? LIMIT 1",
+                                    (target_id,),
+                                ).fetchone():
+                                    has_refs = True
+                                    break
+                            except sqlite3.OperationalError:
+                                continue
+                        if not has_refs:
+                            conn.execute(
+                                "DELETE FROM users WHERE user_id=?", (target_id,))
 
             except Exception as e:
                 print(f"[Rollback] Error processing op {op['id']}: {e}")

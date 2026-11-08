@@ -27,7 +27,11 @@ from Mila_observatory.models import (
     UserUpdateRequest,
 )
 from Mila_observatory.api.dashboard import add_event
-from core.db import get_conn as get_mila_conn, ensure_user_exists
+from core.db import (
+    get_conn as get_mila_conn,
+    ensure_user_exists,
+    get_bot_user_id,
+)
 from core.memory.indexer import get_indexer
 
 router = APIRouter(tags=["users"])
@@ -85,6 +89,22 @@ def closeness_of(sentiment: float) -> tuple[str, str]:
 
 def _display_name(row: dict) -> str:
     return row.get("preferred_name") or row.get("user_name") or f"user {str(row.get('user_id', ''))[:8]}"
+
+
+def _is_empty_profile(profile: dict, stats: dict) -> bool:
+    """True for rows with no data and no manually filled profile fields.
+
+    ``ensure_user_exists`` used to leave such rows behind when a staged
+    memory was rolled back. They are not users Mila has communicated with.
+    """
+    return (
+        stats.get("messages_count", 0) == 0
+        and stats.get("memories_count", 0) == 0
+        and stats.get("chats_count", 0) == 0
+        and not profile.get("preferred_name")
+        and not profile.get("user_name")
+        and not profile.get("appearance_description")
+    )
 
 
 def _user_item(row: dict, stats: dict) -> UserItem:
@@ -198,14 +218,19 @@ async def list_users(
     try:
         cur = conn.cursor()
         ids = _all_user_ids(cur)
+        own_id = get_bot_user_id()
         items: list[UserItem] = []
         for uid in ids:
+            if own_id and str(uid) == str(own_id):
+                continue
             profile = _get_profile(cur, uid)
             if profile is None:
                 profile = {"user_id": uid, "user_name": None, "preferred_name": None,
                            "relationship_type": "friend", "sentiment": 0.0,
                            "appearance_description": None}
             stats = _stats_for(cur, uid)
+            if _is_empty_profile(profile, stats):
+                continue
             items.append(_user_item(profile, stats))
     finally:
         conn.close()
@@ -228,6 +253,9 @@ async def list_users(
 
 
 def _user_detail(user_id: str) -> UserDetailResponse:
+    own_id = get_bot_user_id()
+    if own_id and str(user_id) == str(own_id):
+        raise HTTPException(status_code=404, detail="Mila's own account is not a user")
     conn = get_mila_conn()
     try:
         cur = conn.cursor()

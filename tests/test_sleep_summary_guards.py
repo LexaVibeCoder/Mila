@@ -11,6 +11,7 @@ import pytest
 
 import core.sleep.processes as sp
 from core import db as mila_db
+from core.context import buffer as context_buffer
 
 CHAT = "chat-1"
 USER = "user-1"
@@ -21,6 +22,34 @@ _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-
 
 def _has_cjk(text):
     return _CJK.search(text or "") is not None
+
+
+_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}(?: \u2014 \d{4}-\d{2}-\d{2})?\] ")
+
+
+def _expected_prefix(seeded_rows):
+    """Code-added period prefix for ``seeded_rows`` (spec 2), derived from their
+    own created_at via the same local rendering the prompt edge uses."""
+    dates = sorted({
+        context_buffer.format_created_at_local(r.get("created_at") or "")[:10]
+        for r in seeded_rows or []
+    })
+    dates = [d for d in dates if re.match(r"^\d{4}-\d{2}-\d{2}$", d or "")]
+    if not dates:
+        return ""
+    if dates[0] == dates[-1]:
+        return f"[{dates[0]}] "
+    return f"[{dates[0]} \u2014 {dates[-1]}] "
+
+
+def _assert_prefixed(stored, plain, seeded_rows):
+    """Stored text is ``<period prefix><plain>``: prefix matches the seeded
+    rows' local date span and the plain LLM body is preserved verbatim."""
+    prefix = _expected_prefix(seeded_rows)
+    assert prefix, "seeded rows must carry parseable dates for a prefix"
+    assert stored.startswith(prefix)
+    assert stored == prefix + plain
+    assert stored.endswith(plain)
 
 
 def _snapshot(rows):
@@ -122,15 +151,16 @@ async def test_executor_rejects_cjk_summary_without_staging_anything(sleep_env, 
 
 async def test_russian_summary_with_latin_handles_is_accepted(sleep_env):
     env = sleep_env
-    env.seed_messages(12)
+    seeded = env.seed_messages(12)
     session = env.begin_sleep()
+    plain = "user-1 обсудил alpha @alpha_example и релиз 2026."
 
-    result = await env.stage_summary(
-        session, text="user-1 обсудил alpha @alpha_example и релиз 2026.", claimed=12)
+    result = await env.stage_summary(session, text=plain, claimed=12)
 
     assert not result["content"].startswith("ERROR")
-    assert [s["content"] for s in env.summaries()] == [
-        "user-1 обсудил alpha @alpha_example и релиз 2026."]
+    stored = [s["content"] for s in env.summaries()]
+    assert len(stored) == 1
+    _assert_prefixed(stored[0], plain, seeded)
 
 
 async def test_cjk_summary_is_rewritten_in_russian_on_retry(sleep_env, monkeypatch):
@@ -153,7 +183,10 @@ async def test_cjk_summary_is_rewritten_in_russian_on_retry(sleep_env, monkeypat
     retry_messages = [m["content"] for m in night.calls[1]["messages"]]
     assert any("Russian" in m for m in retry_messages)
     summaries = env.summaries()
-    assert [s["content"] for s in summaries] == ["user-1 обсудил продвижение alpha."]
+    assert len(summaries) == 1
+    # CJK retry still stores the rewritten Russian body, now with the
+    # code-added period prefix (prefix is ASCII, so the CJK guard is unaffected).
+    _assert_prefixed(summaries[0]["content"], "user-1 обсудил продвижение alpha.", before)
     assert not any(_has_cjk(s["content"]) for s in summaries)
     assert env.messages() == []
     assert len(before) == 12
@@ -256,7 +289,7 @@ async def test_summary_for_foreign_chat_is_rejected_and_deletes_nothing(sleep_en
 
 async def test_summary_for_bound_chat_is_accepted(sleep_env):
     env = sleep_env
-    env.seed_messages(12, chat_id=CHAT)
+    seeded = env.seed_messages(12, chat_id=CHAT)
     session = env.begin_sleep()
 
     result = await _bound_executor(session).execute_tool_call(env.call(
@@ -264,7 +297,9 @@ async def test_summary_for_bound_chat_is_accepted(sleep_env):
         summary_text="alpha summary", message_count=12))
 
     assert not result["content"].startswith("ERROR")
-    assert [s["content"] for s in env.summaries(CHAT)] == ["alpha summary"]
+    stored = [s["content"] for s in env.summaries(CHAT)]
+    assert len(stored) == 1
+    _assert_prefixed(stored[0], "alpha summary", seeded)
     assert env.messages(CHAT) == []
     assert [r["messages_removed"] for r in env.summary_log(session)] == [12]
 

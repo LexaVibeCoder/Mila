@@ -5,6 +5,7 @@ not from the implementation. Hermetic: temp SQLite files, fake indexer, no LLM.
 """
 
 import glob
+import re
 import sqlite3
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 import core.sleep.manager as sm
 import core.sleep.processes as sp
 from core import db as mila_db
+from core.context import buffer as context_buffer
 from core.diary import manager as diary
 from core.memory import eternal
 from core.sleep.state import SleepState, get_state
@@ -39,7 +41,7 @@ async def test_successful_sleep_summarizes_extracts_backs_up_and_clears_diary(
         sleep_env, monkeypatch):
     env = sleep_env
     env.add_diary("alpha diary note")
-    env.seed_messages(12)
+    seeded = env.seed_messages(12)
     session = env.begin_sleep()
 
     async def work(sid):
@@ -51,7 +53,22 @@ async def test_successful_sleep_summarizes_extracts_backs_up_and_clears_diary(
     assert await sm.execute_sleep(session) is True
 
     # S2: after commit only the summary remains in the chat, no messages.
-    assert [s["content"] for s in env.summaries()] == ["alpha summary"]
+    # The stored text carries the code-added period prefix derived from the
+    # seeded rows' local dates; the plain LLM body is preserved after it.
+    summaries = [s["content"] for s in env.summaries()]
+    assert len(summaries) == 1
+    dates = sorted({
+        context_buffer.format_created_at_local(r.get("created_at") or "")[:10]
+        for r in seeded
+    })
+    dates = [d for d in dates if re.match(r"^\d{4}-\d{2}-\d{2}$", d or "")]
+    expected_prefix = (
+        f"[{dates[0]}] " if dates and dates[0] == dates[-1]
+        else f"[{dates[0]} \u2014 {dates[-1]}] " if dates else ""
+    )
+    assert expected_prefix, "seeded rows must carry parseable dates"
+    assert summaries[0] == expected_prefix + "alpha summary"
+    assert summaries[0].endswith("alpha summary")
     assert env.messages() == []
     assert env.memory_count("alpha fact") == 1
     # S1: diary archived (backup written) and then cleared.

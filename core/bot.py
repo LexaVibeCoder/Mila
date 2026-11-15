@@ -6,7 +6,9 @@ from core.context.buffer import (
     peek_oldest_messages_by_tokens, compress_messages_into_summary,
     get_total_entries, get_total_message_tokens
 )
-from core.llm.summary_guard import SUMMARY_LANGUAGE_RULES, contains_cjk
+from core.llm.summary_guard import (
+    SUMMARY_LANGUAGE_RULES, SUMMARY_STYLE_RULES, add_period_prefix, contains_cjk
+)
 from core.llm.embeddings import EmbeddingClient
 from core.memory.indexer import get_indexer
 from core.pipeline import ThinkPipeline
@@ -262,7 +264,8 @@ class MilaUserbot:
                     "Summarize the following conversation into a brief summary (2-3 sentences). "
                     "Only include facts: what was discussed, key topics. "
                     "Do not add interpretations.\n"
-                    f"{SUMMARY_LANGUAGE_RULES}\n\n"
+                    f"{SUMMARY_LANGUAGE_RULES}\n"
+                    f"{SUMMARY_STYLE_RULES}\n\n"
                     f"{texts_to_summarize}"
                 )
                 response = await self.summarizer_llm.generate(
@@ -287,6 +290,10 @@ class MilaUserbot:
         if not summary_text:
             print("[Context Compression] no Russian summary after retry — keeping original messages")
             return
+
+        # The stored summary carries the local date span of the messages it
+        # replaces; the LLM is told not to write one itself.
+        summary_text = add_period_prefix(summary_text, oldest_messages)
 
         # S8/M5: insert the summary and delete exactly those messages in ONE
         # transaction — a crash in between can no longer duplicate the summary

@@ -116,8 +116,11 @@ def get_dialog_summarization_tools() -> List[Dict]:
                         },
                         "summary_text": {
                             "type": "string",
-                            "description": "A concise summary of the dialog (2-4 sentences). "
-                                           "Include key topics, decisions, and emotional context."
+                            "description": "A concise summary of the dialog (2-4 sentences), "
+                                           "written as Mila in the first person: neutral and factual, "
+                                           "no slang or emotional embellishment. Include key topics and "
+                                           "decisions. Do not add a date or period prefix — the code "
+                                           "prepends it."
                         },
                         "message_count": {
                             "type": "integer",

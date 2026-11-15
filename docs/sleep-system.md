@@ -72,8 +72,12 @@ user_fact_extraction / verification / committing / completed / idle`.
 - Тулзы: `save_dialog_summary`, `skip_dialog`.
 - Промпт требует русский текст без китайских/английских слов, с глоссарием
   неоднозначных понятий (`promotion` → «продвижение»/«представление», не «сброс»);
-  имена и названия не переводятся. Те же правила (`SUMMARY_LANGUAGE_RULES` из
-  `core/llm/summary_guard.py`) использует дневной компрессор контекста.
+  имена и названия не переводятся. Те же правила (`SUMMARY_LANGUAGE_RULES` и
+  `SUMMARY_STYLE_RULES` из `core/llm/summary_guard.py`) использует дневной
+  компрессор контекста.
+- Стиль сводки (`SUMMARY_STYLE_RULES`): от лица Милы в первом лице, нейтрально
+  и фактично, без сленга, оценок и эмоциональной окраски. Модель не пишет
+  префикс периода — код добавляет его сам.
 - Executor привязан к чату (`StagingExecutor(..., expected_chat_id=chat_id)`):
   чужой `chat_id` в аргументах тула отклоняется с ERROR, ничего не
   стейджится и не удаляется (M3).
@@ -83,6 +87,10 @@ user_fact_extraction / verification / committing / completed / idle`.
 - `save_dialog_summary`:
   - `peek_oldest_messages_by_tokens(chat_id, 50000)` — старейшие сообщения
     читаются, но пока не удаляются;
+  - `summary_guard.add_period_prefix()` добавляет к тексту локальный период
+    `[YYYY-MM-DD — YYYY-MM-DD] ` (один день — `[YYYY-MM-DD] `); без
+    разбираемых дат текст не меняется, уже стоящий префикс не дублируется.
+    Этот же текст идёт и в `sleep_dialog_summary_log`;
   - staging-операция `context_buffer.chat_*` пишется **до** любых изменений и
     содержит `chat_id`, `summary_text`, `deleted_rows` (строки для восстановления),
     `media` (снимок медиа для quarantine) и позже `summary_entry_id`;
@@ -97,7 +105,10 @@ user_fact_extraction / verification / committing / completed / idle`.
   - пишет `sleep_dialog_summary_log`;
 - Даты в промпте (`[YYYY-MM-DD]`) конвертируются в локальную зону из UTC через
   `buffer.format_created_at_local()` (S12).
-- Верификация: approve/reject; при rejection результат помечается rejected.
+- Верификация: approve/reject; проверяются точность, краткость (2–4 предложения)
+  и нейтральное изложение от первого лица; префикс периода код добавляет сам,
+  поэтому верификатор не должен отклонять сводку из-за него. При rejection
+  результат помечается rejected.
 
 ### 3. Извлечение фактов (`process_user_fact_extraction`)
 

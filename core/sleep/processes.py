@@ -23,7 +23,9 @@ from core.context.buffer import (
     get_context, peek_oldest_messages_by_tokens, compress_messages_into_summary,
     format_created_at_local,
 )
-from core.llm.summary_guard import SUMMARY_LANGUAGE_RULES, contains_cjk
+from core.llm.summary_guard import (
+    SUMMARY_LANGUAGE_RULES, SUMMARY_STYLE_RULES, add_period_prefix, contains_cjk
+)
 from core.sleep.state import (
     SleepState, SleepStage, set_stage, stage_operation, get_current_state,
     get_active_dialogs_detail, log_dialog_summary, get_state,
@@ -509,6 +511,10 @@ class StagingExecutor:
         # peeked rows become the undo payload for rollback (S2).
         to_remove = peek_oldest_messages_by_tokens(chat_id, 50000)
 
+        # The stored summary carries the local date span of the messages it
+        # replaces; the model is told not to write one itself.
+        summary_text = add_period_prefix(summary_text, to_remove)
+
         payload = {
             "chat_id": chat_id,
             "summary_text": summary_text,
@@ -974,10 +980,11 @@ Your task is to analyze dialog messages and create a concise summary.
 3. The summary should be 2-4 sentences covering:
    - Key topics discussed
    - Any decisions or agreements made
-   - Emotional context and tone
+   - What Mila did, in the first person and without emotional colouring
 4. {SUMMARY_LANGUAGE_RULES}
-5. If the dialog doesn't have enough meaningful content, use skip_dialog.
-6. You MUST call either save_dialog_summary or skip_dialog.
+5. {SUMMARY_STYLE_RULES}
+6. If the dialog doesn't have enough meaningful content, use skip_dialog.
+7. You MUST call either save_dialog_summary or skip_dialog.
 """
 
         gen_messages = [{"role": "user", "content": f"Analyze dialog {chat_id[:12]}... and create summary or skip."}]
@@ -1049,7 +1056,9 @@ Your task is to analyze dialog messages and create a concise summary.
 Check:
 1. Does the summary accurately reflect the conversation?
 2. Is it concise (2-4 sentences)?
-3. Does it include key topics and emotional context?
+3. Is it written as Mila in the first person, neutral and factual (no slang, no evaluations)?
+A leading date prefix like "[YYYY-MM-DD]" or "[YYYY-MM-DD — YYYY-MM-DD]" is added
+by the code — do not reject a summary because of it.
 
 Call approve_changes if good, reject_changes if issues found.
 """

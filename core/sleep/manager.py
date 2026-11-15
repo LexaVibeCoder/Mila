@@ -14,11 +14,18 @@ from config import settings
 from core.sleep.state import (
     SleepState, SleepStage, get_state, get_current_state, set_state, set_stage,
     get_queued_messages, mark_messages_processed, queue_message,
-    get_staged_operations, mark_staged_applied, clear_staged_operations,
-    get_queue_count, _ensure_sleep_tables
+    get_staged_operations, stage_operation, mark_staged_applied,
+    clear_staged_operations, get_queue_count, gc_staged_operations,
+    mark_dialog_summaries_rolled_back, _ensure_sleep_tables
 )
-from core.diary.manager import clear_diary, save_diary_to_logs, get_diary_markdown
-from core.sleep.processes import run_all_processes
+from core.diary.manager import (
+    clear_diary, save_diary_to_logs, get_diary_markdown,
+    snapshot_diary_entries, restore_diary_entries,
+)
+from core.context.buffer import delete_entry, delete_summary_matching, restore_messages
+from core.sleep.processes import (
+    run_all_processes, restore_media_from_quarantine, purge_media_quarantine,
+)
 from core.needs.tracker import get_tracker as get_needs_tracker
 
 
@@ -108,7 +115,9 @@ async def _resume_sleep_until_deadline(session_id: str, deadline_iso: str):
         cur = get_current_state()
         if cur.get("state") == "sleeping" and cur.get("session_id") == session_id:
             print("[Recovery] Deadline reached → committing resumed sleep")
-            await commit_all(session_id)
+            if not await commit_all(session_id):
+                print("[Recovery] Commit failed → rolling back")
+                await rollback_all(session_id)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -168,7 +177,9 @@ async def recover_from_crash() -> bool:
         if dormant and secs_left is not None and secs_left <= 0:
             # Deadline passed while offline → finish the sleep.
             print("[Recovery] Deadline passed while offline → committing")
-            await commit_all(session_id)
+            if not await commit_all(session_id):
+                print("[Recovery] Commit failed → rolling back")
+                await rollback_all(session_id)
             return True
 
         print("[Recovery] Sleep was in progress → rolling back all changes")
@@ -198,6 +209,109 @@ async def recover_from_crash() -> bool:
     return True
 
 
+def _restore_diary_snapshot(snapshot: list, reason: str) -> int:
+    """Put diary rows back after an aborted commit (S1/S5/S6).
+
+    Idempotent: ``restore_diary_entries`` uses ``INSERT OR IGNORE`` by id, so a
+    table that was never cleared (or a second rollback) keeps its rows as-is.
+    """
+    if not snapshot:
+        return 0
+    try:
+        restored = restore_diary_entries(snapshot)
+        print(f"[Commit] Diary restored after {reason}: {restored} entr(y/ies)")
+        return restored
+    except Exception as e:
+        print(f"[Commit] ERROR: diary restore failed after {reason}: {e}")
+        return 0
+
+
+async def _rollback_context_summary(payload: dict) -> list:
+    """Undo one staged dialog compression: media, summary row, messages.
+
+    Idempotent: the payload is written before each destructive step, so a
+    crash at any point leaves undo instructions that are safe to re-apply.
+    Returns a list of failure descriptions; each guard is independent so one
+    broken step (e.g. a missing file) cannot skip the others (M1).
+    """
+    failures: list = []
+    chat_id = payload.get("chat_id")
+    if not chat_id:
+        print("[Rollback] context_buffer op without chat_id — skipped")
+        return ["context_buffer op without chat_id"]
+
+    media_entries = payload.get("media") or []
+    if media_entries:
+        restored = failed = 0
+        try:
+            restored, failed = restore_media_from_quarantine(media_entries)
+        except Exception as e:
+            failures.append(f"media files for {chat_id[:12]}: {e}")
+            failed = len(media_entries)
+            print(f"[Rollback] media file restore failed for {chat_id[:12]}...: {e}")
+
+        chunk_media = [
+            {"chunk_id": e.get("chunk_id"), "media_path": e.get("media_path")}
+            for e in media_entries
+        ]
+        media_rows = [r for e in media_entries for r in (e.get("media_logs") or [])]
+        refs = 0
+        try:
+            from core.db import restore_detached_media
+            refs = restore_detached_media(chunk_media, media_rows)
+        except Exception as e:
+            failures.append(f"media refs for {chat_id[:12]}: {e}")
+            print(f"[Rollback] media refs restore failed for {chat_id[:12]}...: {e}")
+        print(f"[Rollback] media for {chat_id[:12]}...: {restored} file(s) back, "
+              f"{failed} failed, {refs} DB ref(s) restored")
+        if failed:
+            failures.append(f"{failed} media file(s) not restored for {chat_id[:12]}")
+
+    try:
+        summary_id = payload.get("summary_entry_id")
+        if summary_id:
+            deleted = delete_entry(chat_id, summary_id)
+        elif payload.get("compressing"):
+            # Crash between the summary insert and the payload update: match by text.
+            deleted = delete_summary_matching(chat_id, payload.get("summary_text") or "")
+        else:
+            # The destructive step never started — nothing to delete.
+            deleted = 0
+        if deleted:
+            print(f"[Rollback] summary removed for {chat_id[:12]}...")
+    except Exception as e:
+        failures.append(f"summary delete for {chat_id[:12]}: {e}")
+        print(f"[Rollback] summary delete failed for {chat_id[:12]}...: {e}")
+
+    try:
+        restored = restore_messages(chat_id, payload.get("deleted_rows") or [])
+        if restored:
+            print(f"[Rollback] restored {restored} message(s) for {chat_id[:12]}...")
+    except Exception as e:
+        failures.append(f"messages for {chat_id[:12]}: {e}")
+        print(f"[Rollback] message restore failed for {chat_id[:12]}...: {e}")
+
+    return failures
+
+
+def _rollback_diary_snapshot(payload: dict) -> list:
+    """Restore the diary rows carried by a ``diary_entries`` staging row (M2).
+
+    The snapshot is persisted before the destructive clear, so a crash between
+    clear and mark can no longer lose entries that only a log file held.
+    """
+    rows = payload.get("rows") or []
+    if not rows:
+        return []
+    try:
+        restored = restore_diary_entries(rows)
+        print(f"[Rollback] diary restored from the staged snapshot: {restored} entr(y/ies)")
+        return []
+    except Exception as e:
+        print(f"[Rollback] ERROR: diary snapshot restore failed: {e}")
+        return [f"diary restore: {e}"]
+
+
 async def rollback_all(session_id: str = None):
     before_rollback = get_current_state()
     sleep_started = _parse_iso(before_rollback.get("started_at"))
@@ -220,10 +334,48 @@ async def rollback_all(session_id: str = None):
     staged = get_staged_operations(session_id)
 
     from core.db import get_conn
-    conn = get_conn()
+
     rolled_back_faiss_ids: list[int] = []
+    failures: list[str] = []
+    media_leftovers = False
+
+    # B1: undo the ops that use their *own* connections first — the context
+    # buffer (media refs go through a second mila.db connection) and the diary
+    # snapshot (context_buffer.db). Holding the outer mila.db write transaction
+    # while they run would block them for busy_timeout and silently drop the
+    # restored references.
+    own_conn_ops = [
+        op for op in staged
+        if str(op["target_table"]).startswith("context_buffer")
+        or op["target_table"] == "diary_entries"
+    ]
+    outer_ops = [
+        op for op in staged
+        if not (str(op["target_table"]).startswith("context_buffer")
+                or op["target_table"] == "diary_entries")
+    ]
+
+    for op in reversed(own_conn_ops):
+        payload = {}
+        try:
+            payload = json.loads(op["payload"] or "{}")
+            if op["target_table"] == "diary_entries":
+                failures.extend(_rollback_diary_snapshot(payload))
+            else:
+                failures.extend(await _rollback_context_summary(payload))
+        except Exception as e:
+            failures.append(f"op {op['id']} ({op['target_table']}): {e}")
+            print(f"[Rollback] Error processing op {op['id']}: {e}")
+        finally:
+            # M1: leftovers must be known even when the undo above raised.
+            for entry in payload.get("media") or []:
+                for f in entry.get("files") or []:
+                    if f.get("quarantine") and os.path.exists(f["quarantine"]):
+                        media_leftovers = True
+
+    conn = get_conn()
     try:
-        for op in reversed(staged):
+        for op in reversed(outer_ops):
             try:
                 payload = json.loads(op["payload"])
                 op_type = op["operation_type"]
@@ -284,6 +436,7 @@ async def rollback_all(session_id: str = None):
                                 "DELETE FROM users WHERE user_id=?", (target_id,))
 
             except Exception as e:
+                failures.append(f"op {op['id']} ({op['target_table']}): {e}")
                 print(f"[Rollback] Error processing op {op['id']}: {e}")
 
         conn.commit()
@@ -299,12 +452,39 @@ async def rollback_all(session_id: str = None):
         except Exception as e:
             print(f"[Rollback] FAISS cleanup failed: {e}")
 
+    # S4: the summary log rows survive for diagnostics but must not look applied.
+    try:
+        marked = mark_dialog_summaries_rolled_back(session_id)
+        if marked:
+            print(f"[Rollback] {marked} dialog summary log row(s) marked rolled_back")
+    except Exception as e:
+        print(f"[Rollback] summary log marking failed: {e}")
+
+    if failures or media_leftovers:
+        # M1: an incomplete undo must stay retryable. Keep the staging rows,
+        # keep the quarantined bytes, and park the state in sleep_error so
+        # recovery runs rollback again instead of pretending the night is over.
+        reason = "; ".join(failures) if failures else "media left in quarantine"
+        print(f"\n[Rollback] ❌ INCOMPLETE for session {session_id[:8]}...: {reason}")
+        print("[Rollback] Staging rows kept, quarantine kept — recovery will retry")
+        try:
+            set_state(SleepState.SLEEP_ERROR,
+                      error_message=f"rollback incomplete: {reason}"[:500])
+        except Exception as e:
+            print(f"[Rollback] ERROR: could not set sleep_error state: {e}")
+        return
+
     clear_staged_operations(session_id)
-    # Always back up before clearing — a crash must not silently drop the diary.
-    if save_diary_to_logs():
-        clear_diary()
-    else:
-        print("[Rollback] WARNING: diary backup failed — keeping entries")
+
+    # S13: files are already back (or were never moved). Only a fully restored
+    # quarantine dir is discarded, so a failed restore keeps its bytes.
+    purge_media_quarantine(session_id)
+
+    # S1: the diary is NOT cleared on rollback. The night analysis was not
+    # committed, so its source (the diary) must survive intact; commit_all is
+    # the only place that archives and clears it.
+    print("[Rollback] Diary kept (sleep was not committed)")
+
     set_state(SleepState.AWAKE)
     _presence_to_rest("sleep rollback")
     if was_sleeping:
@@ -325,22 +505,60 @@ async def commit_all(session_id: str) -> bool:
 
     set_state(SleepState.COMMITTING)
 
+    # S5/S6: backup comes first. The DB writes already happened during the
+    # night, so the diary is the only thing that can still fail — and if it
+    # does, staging MUST stay applied=0 so recovery rolls the session back.
+    if not save_diary_to_logs():
+        print("[Commit] ERROR: diary backup failed — aborting commit")
+        return False
+    print("[Commit] Diary saved to logs")
+
+    # S1/S5/M2: snapshot the rows once, then publish them as a staging undo row
+    # *before* the destructive clear. An in-memory snapshot dies with the
+    # process, so a crash between clear and mark would otherwise leave entries
+    # only in the log file; the staged row is restored by rollback/recovery.
+    diary_snapshot = snapshot_diary_entries()
+    if diary_snapshot:
+        stage_operation(
+            session_id=session_id,
+            operation_type="insert",
+            target_table="diary_entries",
+            target_id=session_id,
+            payload={"rows": diary_snapshot, "entry_count": len(diary_snapshot)},
+        )
+
     staged = get_staged_operations(session_id)
     staging_ids = [op["id"] for op in staged]
 
-    if staging_ids:
-        mark_staged_applied(staging_ids)
-        print(f"[Commit] {len(staging_ids)} operations marked as applied")
-
-    # Always back up before clearing. diary.save_processed is kept for API
-    # compatibility but no longer gates the backup — clearing without a
-    # backup is silent data loss.
-    if save_diary_to_logs():
-        print("[Commit] Diary saved to logs")
+    # S7: clearing without a verified backup is silent data loss, and a failed
+    # clear must not leave the session looking committed.
+    try:
         clear_diary()
         print("[Commit] Diary cleared")
-    else:
-        print("[Commit] WARNING: diary backup failed — keeping entries")
+    except Exception as e:
+        print(f"[Commit] ERROR: diary clear failed: {e}")
+        _restore_diary_snapshot(diary_snapshot, "clear failed")
+        return False
+
+    # S5: mark applied last. Before this point a crash makes recovery see
+    # applied=0 and roll back instead of trusting a half-done commit.
+    if staging_ids:
+        try:
+            mark_staged_applied(staging_ids)
+        except Exception as e:
+            print(f"[Commit] ERROR: failed to mark staged operations applied: {e}")
+            _restore_diary_snapshot(diary_snapshot, "mark applied failed")
+            return False
+        print(f"[Commit] {len(staging_ids)} operations marked as applied")
+
+    # S13: quarantined media is only discarded once everything above is durable.
+    purge_media_quarantine(session_id)
+
+    # S17: applied staging rows are diagnostics, not history — keep them bounded.
+    try:
+        gc_staged_operations()
+    except Exception as e:
+        print(f"[Commit] staging GC failed: {e}")
 
     set_state(SleepState.AWAKE)
     _presence_to_rest("sleep complete")

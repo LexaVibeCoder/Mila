@@ -19,16 +19,24 @@ CREATE TABLE [chat_{chat_id}] (
     token_count INTEGER DEFAULT 0,   -- tiktoken при вставке
     role TEXT NOT NULL DEFAULT '',   -- 'user' | 'assistant' ('' у старых summary)
     kind TEXT DEFAULT 'text',        -- text | photo | voice | ...
-    created_at TEXT DEFAULT (datetime('now'))  -- локальное время, см. LOCAL_TIMEZONE
+    created_at TEXT DEFAULT (datetime('now'))  -- см. «Метки времени» ниже
 );
 ```
 
 Нативные байты (image/audio) в буфере **не хранятся** — только плейсхолдеры;
 байты подкладываются в LLM в `ThinkPipeline._attach_media()`.
 
-Метки времени — **локальные** (`now_local()`, `strftime("%Y-%m-%d %H:%M:%S")`):
-`LOCAL_TIMEZONE` из config, иначе системная зона (Docker-safe через
-`/etc/localtime`).
+Метки времени:
+
+- `push_message()`, `push_summary()` и `compress_messages_into_summary()` пишут
+  **UTC** (`datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")`) — как
+  `sleep_state`, `memories` и `chunks` (S12);
+- локальное время получается только на границе отображения:
+  `format_created_at_local()` (используется при сборке `[время]` в истории и
+  `[дата]` в промптах суммаризации);
+- записи, созданные до перехода на UTC, хранят локальное время и отдельного
+  маркера не имеют: буфер ограничен `MAX_STM_MESSAGES` и суммаризацией, поэтому
+  такие строки быстро вытесняются.
 
 ## API
 
@@ -36,12 +44,17 @@ CREATE TABLE [chat_{chat_id}] (
 |---------|----------|
 | `ensure_chat_table(chat_id)` | Создать таблицу + ALTER-миграции `token_count/role/kind` |
 | `push_message(chat_id, content, source_chunk_id, role, kind)` | Добавить сообщение, авто-подсчёт токенов |
+| `format_created_at_local(raw)` | UTC из БД → локальная зона для промптов/UI (`""` для пустого) |
 | `push_summary(chat_id, summary_text)` | Добавить суммаризацию (`type='summary'`, `role=''`) |
 | `get_context(chat_id, limit)` | Последние N записей хронологически (`MAX_STM_MESSAGES` = 30) |
 | `get_total_entries(chat_id)` | Общее количество записей |
 | `get_total_message_tokens(chat_id)` | Сумма `token_count` только `type='message'` |
 | `get_context_within_token_limit(chat_id, max_tokens)` | Summary целиком + новейшие сообщения в лимите |
-| `peek_oldest_messages_by_tokens(chat_id, target_tokens)` | **Только чтение** старейших ~N токенов |
+| `peek_oldest_messages_by_tokens(chat_id, target_tokens)` | **Только чтение** старейших ~N токенов (включая `kind`) |
+| `compress_messages_into_summary(chat_id, text, ids)` | Summary + удаление сообщений **одной транзакцией**; возвращает `(summary_id, удалено строк)` |
+| `delete_entry(chat_id, entry_id)` | Удалить строку по `id` (rollback сводки) |
+| `delete_summary_matching(chat_id, text)` | Удалить новейшую сводку с точным текстом (fallback, если `id` неизвестен) |
+| `restore_messages(chat_id, rows)` | Вернуть удалённые строки с исходными `id` (`INSERT OR IGNORE`) |
 | `delete_messages_by_ids(chat_id, ids)` | Удалить строки по `id` |
 | `pop_oldest_messages_by_tokens(chat_id, target_tokens)` | Legacy: peek + delete атомарно |
 | `pop_oldest_messages(chat_id, count)` | Legacy: удалить N старейших |
@@ -57,9 +70,8 @@ CREATE TABLE [chat_{chat_id}] (
 total = get_total_message_tokens(chat_id)
 if total > settings.CONTEXT_MAX_TOKENS:                 # 30000
     oldest = peek_oldest_messages_by_tokens(chat_id, 5000)   # без удаления
-    summary = await summarizer.generate(...)                  # 2–3 предложения
-    push_summary(chat_id, summary)                            # сначала summary
-    delete_messages_by_ids(chat_id, [m["id"] for m in oldest])
+    summary = await summarizer.generate(...)                  # 2–3 предложения, Russian only
+    compress_messages_into_summary(chat_id, summary, [m["id"] for m in oldest])
 ```
 
 Порядок важен:
@@ -67,12 +79,17 @@ if total > settings.CONTEXT_MAX_TOKENS:                 # 30000
 1. Проверяется сумма токенов **только сообщений** (summary в лимит не входят).
 2. Старейшие сообщения **сначала читаются**, не удаляются.
 3. LLM-суммаризация через ленивый `_ensure_summarizer()` — обычный `LLMClient`
-   на `MAIN_LLM_MODEL` (отдельной «дешёвой» модели нет).
+   на `MAIN_LLM_MODEL` (отдельной «дешёвой» модели нет). Промпт получает те же
+   правила языка, что и ночной суммаризатор (`core/llm/summary_guard.py`):
+   Russian only, глоссарий, имена не переводятся.
 4. Если LLM упал или вернул пустой текст — исходные сообщения **остаются**,
    попытка повторится на следующем сообщении. Плейсхолдера-заглушки больше нет.
-5. `push_summary()` вызывается **до** удаления: падение между шагами даёт
-   дублирование контекста (безопасно), а не потерю.
-6. `delete_messages_by_ids()` удаляет ровно те строки, которые сжимались.
+5. CJK в сводке: ровно один повторный запрос; если снова китайский текст —
+   сводка **не сохраняется**, сообщения остаются на месте.
+6. Вставка сводки и удаление сообщений идут **одной транзакцией**
+   (`compress_messages_into_summary`) и в дневном компрессоре, и в sleep-цикле:
+   падение между шагами не оставляет ни дубля сводки, ни потерянных сообщений.
+   Счётчик удалённых строк — реальный `rowcount`.
 
 ## Построение истории
 
@@ -86,7 +103,7 @@ for entry in entries:
         block = "[Summary previous conversation:]\n{content}"
         → role="system" в обе истории
     else:
-        content = f"[{created_at}] {content}"   # префикс только у message
+        content = f"[{format_created_at_local(created_at)}] {content}"   # локальное время
         role = "assistant" if role == "assistant" else "user"
         → одинаковая запись в user_visible и agent_internal
 ```

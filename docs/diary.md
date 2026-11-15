@@ -38,6 +38,8 @@ CREATE TABLE diary_entries (
 | `get_diary_entry_count()` | Количество записей |
 | `get_today_diary_context(max_entries=30)` | Блок для system prompt |
 | `clear_diary()` | `DELETE FROM diary_entries` (файл не трогает) |
+| `snapshot_diary_entries()` | Полные строки дневника для восстановления прерванного commit |
+| `restore_diary_entries(rows)` | Вернуть строки с исходными `id` (`INSERT OR IGNORE`, идемпотентно) |
 | `save_diary_to_logs()` | Снапшот в `logs/diary_logs/diary_ГГГГММДД.md`; `bool` успеха |
 | `load_daily_report(date_str=None)` / `list_daily_reports()` | Чтение/список файлов |
 | `_sync_to_daily_file()` | Перегенерация сегодняшнего `ДД.ММ.ГГГГ.md` |
@@ -86,9 +88,18 @@ CREATE TABLE diary_entries (
   reports, а не SQLite.
 - Отдельной страницы дневника во фронтенде нет.
 - `runtime diary.save_processed` остаётся для совместимости API, но **больше не
-  управляет резервным копированием**: `commit_all()` и `rollback_all()` всегда
-  вызывают `save_diary_to_logs()`, а очищают таблицу только при успешном
-  бэкапе.
+  управляет резервным копированием**: `commit_all()` делает бэкап в
+  `logs/diary_logs/`, затем снимает `snapshot_diary_entries()` и публикует его
+  staging-записью `diary_entries` **до** очистки таблицы — падение процесса
+  между очисткой и пометкой staging больше не оставляет дневник только в
+  лог-файле (rollback/recovery вернёт строки из staging).
+- `rollback_all()` дневник не трогает вообще: незафиксированный анализ не должен
+  уносить источник. Если commit падает после очистки (например, на пометке
+  staging), строки сразу возвращаются из снимка `restore_diary_entries()`.
+- Остаточная гонка (m5): запись, добавленная в дневник между снятием снимка и
+  `clear_diary()`, не попадёт ни в снимок, ни в бэкап. Окно — миллисекунды, и
+  `clear_diary()`/`save_diary_to_logs()` намеренно остаются вызовами без
+  аргументов (их подменяют тесты).
 
 ## Путь к данным
 

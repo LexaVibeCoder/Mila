@@ -2,10 +2,11 @@ import asyncio
 from pytdbot import Client, types
 from config import settings
 from core.context.buffer import (
-    push_summary, get_context_within_token_limit,
-    peek_oldest_messages_by_tokens, delete_messages_by_ids,
+    get_context_within_token_limit, format_created_at_local,
+    peek_oldest_messages_by_tokens, compress_messages_into_summary,
     get_total_entries, get_total_message_tokens
 )
+from core.llm.summary_guard import SUMMARY_LANGUAGE_RULES, contains_cjk
 from core.llm.embeddings import EmbeddingClient
 from core.memory.indexer import get_indexer
 from core.pipeline import ThinkPipeline
@@ -240,9 +241,10 @@ class MilaUserbot:
         if not oldest_messages:
             return
 
-        # Format them for summarization
+        # Format them for summarization. Stored timestamps are UTC (S12), the
+        # model reasons about the user's local day — convert at the edge.
         texts_to_summarize = "\n".join(
-            f"[{m.get('created_at', '')[:10]}] {m['content'][:500]}"
+            f"[{format_created_at_local(m.get('created_at', ''))[:10]}] {m['content'][:500]}"
             for m in oldest_messages
             if (m.get('content') or '').strip()
         )
@@ -250,45 +252,55 @@ class MilaUserbot:
         if not texts_to_summarize.strip():
             return
 
-        # Generate summary using cheap LLM
+        # Generate summary using cheap LLM. Same language contract as the night
+        # summarizer (S10/S11): Russian only, glossary, no translated names.
         await self._ensure_summarizer()
-        try:
-            summary_prompt = (
-                "Summarize the following conversation into a brief summary (2-3 sentences). "
-                "Only include facts: what was discussed, key topics. "
-                "Do not add interpretations.\n\n"
-                f"{texts_to_summarize}"
-            )
-            response = await self.summarizer_llm.generate(
-                messages=[{"role": "user", "content": summary_prompt}],
-                max_tokens=300,
-                temperature=0.3,
-            )
-            summary_text = (response.get("thoughts", "") or "").strip()
-        except Exception as e:
-            print(f"[Context Compression Error] {e} — keeping original messages")
-            return
+        summary_text = ""
+        for _attempt in range(2):
+            try:
+                summary_prompt = (
+                    "Summarize the following conversation into a brief summary (2-3 sentences). "
+                    "Only include facts: what was discussed, key topics. "
+                    "Do not add interpretations.\n"
+                    f"{SUMMARY_LANGUAGE_RULES}\n\n"
+                    f"{texts_to_summarize}"
+                )
+                response = await self.summarizer_llm.generate(
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=300,
+                    temperature=0.3,
+                )
+                summary_text = (response.get("thoughts", "") or "").strip()
+            except Exception as e:
+                print(f"[Context Compression Error] {e} — keeping original messages")
+                return
 
+            if not summary_text:
+                print("[Context Compression] empty summary — keeping original messages")
+                return
+            if not contains_cjk(summary_text):
+                break
+            # S10: one rewrite request; a persistently Chinese summary is dropped
+            # so a Chinese blob never enters the context of a Russian dialog.
+            print("[Context Compression] summary contained CJK — asking for Russian")
+            summary_text = ""
         if not summary_text:
-            print("[Context Compression] empty summary — keeping original messages")
+            print("[Context Compression] no Russian summary after retry — keeping original messages")
             return
 
-        # Push the summary FIRST, then delete originals: a crash in between
-        # duplicates context (safe) instead of losing it.
+        # S8/M5: insert the summary and delete exactly those messages in ONE
+        # transaction — a crash in between can no longer duplicate the summary
+        # next to the messages it summarizes, nor lose messages.
         try:
-            push_summary(chat_id, summary_text)
+            _summary_id, removed = compress_messages_into_summary(
+                chat_id, summary_text, [m["id"] for m in oldest_messages])
         except Exception as e:
-            print(f"[Context Compression Error] push_summary failed: {e}")
-            return
-        try:
-            delete_messages_by_ids(chat_id, [m["id"] for m in oldest_messages])
-        except Exception as e:
-            print(f"[Context Compression Error] delete failed after summary: {e}")
+            print(f"[Context Compression Error] compress failed: {e} — keeping original messages")
             return
 
         # Log token-based stats
         remaining_tokens = get_total_message_tokens(chat_id)
-        print(f"[Context Compressed] {len(oldest_messages)} messages (~{chunk_tokens} tokens) → summary. "
+        print(f"[Context Compressed] {removed} messages (~{chunk_tokens} tokens) → summary. "
               f"Message tokens remaining: {remaining_tokens}/{max_tokens}. "
               f"Total entries: {get_total_entries(chat_id)}.")
 
@@ -314,7 +326,7 @@ class MilaUserbot:
 
         for entry in context_entries:
             content_raw = entry.get("content", "") or ""
-            ts = entry.get("created_at", "")
+            ts = format_created_at_local(entry.get("created_at", ""))
             time_prefix = ""
             if ts and entry["type"] != "summary":
                 time_prefix = f"[{ts}] "

@@ -107,11 +107,14 @@ class MemoryIndexer:
         source_chat_id: str | None = None,
         source_message_id: str | None = None,
         faiss_id: int | None = None,
+        mem_id: str | None = None,
     ) -> tuple[str, bool]:
         """Insert a memory and index it. Returns ``(mem_id, indexed)``.
 
         On embedding failure the row is still created (``indexed=False``,
         ``faiss_id=NULL``) and will be picked up by ``reindex_pending()``.
+        ``mem_id`` may be pre-generated so callers (sleep staging) can record
+        the undo entry before the insert.
         """
         content = (content or "").strip()
         if not content:
@@ -130,6 +133,7 @@ class MemoryIndexer:
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             faiss_id=faiss_id,
+            mem_id=mem_id,
         )
 
         if faiss_id is not None:

@@ -518,6 +518,97 @@ def detach_media_by_chunk_ids(chunk_ids: list[str]) -> list[str]:
     finally:
         conn.close()
 
+def get_media_paths_for_chunks(chunk_ids: list[str]) -> list[dict]:
+    """Rows ``{chunk_id, media_path}`` for the given chunks (rollback snapshot)."""
+    ids = [c for c in (chunk_ids or []) if c]
+    if not ids:
+        return []
+    conn = get_conn()
+    try:
+        try:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT chunk_id, media_path FROM chunks "
+                f"WHERE chunk_id IN ({placeholders}) "
+                f"AND media_path IS NOT NULL AND media_path != ''",
+                ids,
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+    finally:
+        conn.close()
+
+
+def get_media_log_rows_for_paths(paths: list[str]) -> list[dict]:
+    """``media_logs`` rows pointing at these files (rollback snapshot)."""
+    files = [p for p in (paths or []) if p]
+    if not files:
+        return []
+    conn = get_conn()
+    try:
+        try:
+            placeholders = ",".join("?" for _ in files)
+            rows = conn.execute(
+                f"SELECT media_id, file_path FROM media_logs "
+                f"WHERE file_path IN ({placeholders})",
+                files,
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+    finally:
+        conn.close()
+
+
+def restore_detached_media(chunk_media: list[dict], media_log_rows: list[dict]) -> int:
+    """Undo ``detach_media_by_chunk_ids``: put ``chunks``/``media_logs`` refs back.
+
+    Only fills values that are currently empty, so a repeated rollback (or a
+    snapshot that was staged but never applied) is harmless. Returns the number
+    of restored references.
+    """
+    restored = 0
+    conn = get_conn()
+    try:
+        try:
+            for row in chunk_media or []:
+                chunk_id = row.get("chunk_id")
+                media_path = row.get("media_path")
+                if not chunk_id or not media_path:
+                    continue
+                cur = conn.execute(
+                    "UPDATE chunks SET media_path=? WHERE chunk_id=? "
+                    "AND (media_path IS NULL OR media_path='')",
+                    (media_path, chunk_id),
+                )
+                restored += cur.rowcount or 0
+            for row in media_log_rows or []:
+                media_id = row.get("media_id")
+                file_path = row.get("file_path")
+                if not media_id or not file_path:
+                    continue
+                try:
+                    cur = conn.execute(
+                        "UPDATE media_logs SET file_path=?, detached_at=NULL "
+                        "WHERE media_id=? AND file_path IS NULL",
+                        (file_path, media_id),
+                    )
+                except sqlite3.OperationalError:
+                    cur = conn.execute(
+                        "UPDATE media_logs SET file_path=? "
+                        "WHERE media_id=? AND file_path IS NULL",
+                        (file_path, media_id),
+                    )
+                restored += cur.rowcount or 0
+            conn.commit()
+            return restored
+        except sqlite3.OperationalError as e:
+            print(f"[DB] media restore failed: {e}")
+            return restored
+    finally:
+        conn.close()
+
 def update_user_name(user_id: str, user_name: str):
     conn = get_conn()
     try:
@@ -526,15 +617,18 @@ def update_user_name(user_id: str, user_name: str):
     finally:
         conn.close()
 
-def add_memory(user_id: str, content: str, importance: float = 0.5, tags: list[str] = None, source_chat_id: str = None, source_message_id: str = None, faiss_id: int = None):
+def add_memory(user_id: str, content: str, importance: float = 0.5, tags: list[str] = None, source_chat_id: str = None, source_message_id: str = None, faiss_id: int = None, mem_id: str = None):
     """Insert a memory row.
 
     Low-level storage only: callers that need the row to be searchable must
     use ``core.memory.indexer.MemoryIndexer.add_memory()`` (insert + embed +
     FAISS + update ``faiss_id``) or call ``index_memory(mem_id)`` afterwards.
     A NULL ``faiss_id`` is the reindex queue.
+
+    ``mem_id`` lets the caller pre-generate the id and stage it *before* the
+    insert, so a crash in between still leaves an undo record (S15).
     """
-    mem_id = str(uuid.uuid4())
+    mem_id = mem_id or str(uuid.uuid4())
     time_now = datetime.now(timezone.utc).isoformat()
     tags_json = json.dumps(tags) if tags else '[]'
     conn = get_conn()

@@ -74,9 +74,17 @@ def _ensure_sleep_tables():
                 chat_id TEXT NOT NULL,
                 summary_text TEXT,
                 messages_removed INTEGER DEFAULT 0,
+                rolled_back INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now'))
             );
         """)
+        # Idempotent migration for DBs created before rollback tracking (S4).
+        try:
+            conn.execute(
+                "ALTER TABLE sleep_dialog_summary_log "
+                "ADD COLUMN rolled_back INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -289,6 +297,74 @@ def clear_staged_operations(session_id: str):
         conn.close()
 
 
+def discard_staged_operation(staging_id: int) -> bool:
+    """Drop an unapplied undo row that is no longer needed.
+
+    Used when a staged insert did not actually happen (e.g. a racing writer
+    created the ``users`` row first) — keeping it would let rollback delete
+    data this session never created (m9).
+    """
+    if not staging_id:
+        return False
+    _ensure_sleep_tables()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM sleep_transaction_staging WHERE id=? AND applied=0",
+            (staging_id,)
+        )
+        conn.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        conn.close()
+
+
+def update_staged_payload(staging_id: int, payload: dict) -> bool:
+    """Rewrite the payload of an unapplied staging row.
+
+    Needed when an undo record can only be completed after the destructive
+    step produced an id (summary row id, real deleted rowcount) — the record
+    itself is staged *before* that step so rollback always finds it.
+    """
+    if not staging_id:
+        return False
+    _ensure_sleep_tables()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE sleep_transaction_staging SET payload=? WHERE id=? AND applied=0",
+            (json.dumps(payload, ensure_ascii=False), staging_id)
+        )
+        conn.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        conn.close()
+
+
+def gc_staged_operations(retention_days: int = 30) -> int:
+    """Delete applied staging rows older than ``retention_days`` (S17).
+
+    Applied rows are kept for a while so a look at the staging table can still
+    explain a recent sleep, but they must not grow forever.
+    """
+    _ensure_sleep_tables()
+    days = max(1, int(retention_days))
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM sleep_transaction_staging "
+            "WHERE applied=1 AND created_at < datetime('now', ?)",
+            (f"-{days} days",)
+        )
+        conn.commit()
+        removed = cur.rowcount or 0
+        if removed:
+            print(f"[SleepStaging] GC removed {removed} applied row(s)")
+        return removed
+    finally:
+        conn.close()
+
+
 def log_dialog_summary(session_id: str, chat_id: str, summary_text: str, messages_removed: int):
     _ensure_sleep_tables()
     conn = get_conn()
@@ -300,6 +376,28 @@ def log_dialog_summary(session_id: str, chat_id: str, summary_text: str, message
             (session_id, chat_id, summary_text, messages_removed)
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_dialog_summaries_rolled_back(session_id: str) -> int:
+    """Flag this session's summary log rows as rolled back (S4).
+
+    Rows are marked rather than deleted: the log is the only evidence that a
+    summary was produced and then rejected by a failed sleep.
+    """
+    if not session_id:
+        return 0
+    _ensure_sleep_tables()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE sleep_dialog_summary_log SET rolled_back=1 "
+            "WHERE session_id=? AND rolled_back=0",
+            (session_id,)
+        )
+        conn.commit()
+        return cur.rowcount or 0
     finally:
         conn.close()
 

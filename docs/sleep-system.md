@@ -70,14 +70,33 @@ user_fact_extraction / verification / committing / completed / idle`.
 - Пропускает чат, если сообщений меньше `SUMMARIZE_MIN_MESSAGES = 10` или
   контекст пуст.
 - Тулзы: `save_dialog_summary`, `skip_dialog`.
+- Промпт требует русский текст без китайских/английских слов, с глоссарием
+  неоднозначных понятий (`promotion` → «продвижение»/«представление», не «сброс»);
+  имена и названия не переводятся. Те же правила (`SUMMARY_LANGUAGE_RULES` из
+  `core/llm/summary_guard.py`) использует дневной компрессор контекста.
+- Executor привязан к чату (`StagingExecutor(..., expected_chat_id=chat_id)`):
+  чужой `chat_id` в аргументах тула отклоняется с ERROR, ничего не
+  стейджится и не удаляется (M3).
+- Проверка CJK: если модель вернула китайский текст, тул не выполняется —
+  делается ровно один повторный запрос; если снова CJK, диалог пропускается
+  с записью причины (`summary in Chinese`), ничего не сохраняется.
 - `save_dialog_summary`:
-  - `push_summary(chat_id, summary)`;
-  - `pop_oldest_messages_by_tokens(chat_id, 50000)`;
-  - `detach_media_by_chunk_ids()` для summarized-away сообщений — очищает
-    `chunks.media_path` и удаляет файлы (включая `.wav`), чтобы старые
-    фото/аудио не подтягивались в будущие ходы;
+  - `peek_oldest_messages_by_tokens(chat_id, 50000)` — старейшие сообщения
+    читаются, но пока не удаляются;
+  - staging-операция `context_buffer.chat_*` пишется **до** любых изменений и
+    содержит `chat_id`, `summary_text`, `deleted_rows` (строки для восстановления),
+    `media` (снимок медиа для quarantine) и позже `summary_entry_id`;
+  - `compress_messages_into_summary()` вставляет сводку и удаляет сообщения
+    **одной транзакцией** (падение между шагами не даёт ни дубля сводки, ни
+    потери сообщений); `messages_removed` = реальный `rowcount` удаления;
+  - медиа summarized-away сообщений переносится в
+    `data/media/quarantine/{session_id}/` (файлы не удаляются до commit):
+    `media_path` в `chunks`/`media_logs` очищается, пути восстанавливаются
+    на rollback, quarantine удаляется на commit; каталог создаётся с правами
+    `0700`, а `session_id` валидируется как UUID (иначе — sanitized-токен);
   - пишет `sleep_dialog_summary_log`;
-  - ставит staging-операцию для `context_buffer.chat_*`.
+- Даты в промпте (`[YYYY-MM-DD]`) конвертируются в локальную зону из UTC через
+  `buffer.format_created_at_local()` (S12).
 - Верификация: approve/reject; при rejection результат помечается rejected.
 
 ### 3. Извлечение фактов (`process_user_fact_extraction`)
@@ -107,15 +126,38 @@ applied}`:
 
 - `insert/update/delete` по `mila_memory_chunks`;
 - `insert` по `memories`;
-- `insert` summary в `context_buffer.chat_*`.
+- `insert` по `users`;
+- `insert` summary в `context_buffer.chat_*`;
+- `insert` по `diary_entries` — снимок дневника перед очисткой в commit (M2).
+
+Порядок важен: id (`chunk_id`, `mem_id`) и undo-payload генерируются **до**
+изменения БД, staging-строка пишется первой, затем выполняется insert с этим
+id. Так падение между staging и insert оставляет безвредную no-op запись, а не
+неучтённую строку в целевой таблице. Payload сводки дописывается
+(`update_staged_payload`) после появления `summary_entry_id` и реального
+`messages_removed`.
 
 ### Commit (`commit_all`)
 
 1. `state = committing`;
-2. все staging-операции помечаются `applied=1`;
-3. дневник сохраняется в `logs/diary_logs/`; при успехе — очищается;
-4. `state = awake`, presence → `rest`;
-5. в журнал пишется пробуждение с реальной длительностью сна
+2. дневник сохраняется в `logs/diary_logs/`; если бэкап не удался —
+   `commit_all` возвращает `False`, staging **не** помечается applied,
+   `execute_sleep` уходит в rollback;
+3. `snapshot_diary_entries()` — строки дневника читаются **до** очистки и сразу
+   публикуются staging-записью `target_table='diary_entries'` (payload `rows`).
+   Снимок в памяти умирает вместе с процессом, staging-запись — нет: крах между
+   очисткой и пометкой больше не оставляет дневник только в лог-файле (M2);
+4. `clear_diary()` под try/except: ошибка очистки — тоже `False` без пометки
+   applied (иначе записи остались бы, а сон выглядел бы завершённым), снимок
+   возвращается через `restore_diary_entries()`;
+5. все staging-операции (включая запись дневника) помечаются `applied=1` —
+   **последним** шагом: до него recovery видит `applied=0` и откатывает сессию;
+   если пометка упала, снимок дневника восстанавливается в БД
+   (`INSERT OR IGNORE` по `id`) — незавершённый commit не уносит дневник с собой;
+6. удаляется `data/media/quarantine/{session_id}/`;
+7. `gc_staged_operations()` — applied-записи старше 30 дней удаляются;
+8. `state = awake`, presence → `rest`;
+9. в журнал пишется пробуждение с реальной длительностью сна
    (`now - started_at`).
 
 Сами данные уже лежат в целевых таблицах; commit фиксирует их и убирает
@@ -123,17 +165,29 @@ applied}`:
 
 ### Rollback (`rollback_all`)
 
-1. Идёт по staging в обратном порядке:
+1. Сначала откатываются операции, которым нужны **свои** соединения:
+   `context_buffer.chat_*` (ссылки медиа пишутся вторым соединением в
+   `mila.db`) и `diary_entries` (context_buffer.db). Раньше внешняя
+   write-транзакция `mila.db` блокировала их на `busy_timeout`, а ошибка
+   проглатывалась — теперь они идут до открытия внешнего соединения (B1).
+2. Затем — операции по `mila.db` в одном соединении, в обратном порядке:
    - `insert` chunk → удалить строку;
    - `delete` chunk → `is_active=1`;
    - `insert` memory → удалить `mem_id`;
-   - `update` chunk **не откатывается автоматически** (пишется предупреждение);
-2. очищает staging сессии;
-3. всегда пытается сохранить дневник в `logs/diary_logs/`; очищает таблицу
-   только при успешном бэкапе;
-4. `state = awake`, presence → `rest` (`journal=False`, чтобы не дублировать
-   событие);
-5. в журнал пишется пробуждение с реальной длительностью сна.
+   - `update` chunk **не откатывается автоматически** (пишется предупреждение).
+3. Undo сводки (`context_buffer.chat_*`): вернуть файлы из quarantine и ссылки
+   `chunks.media_path`/`media_logs`, удалить сводку (`summary_entry_id`, при
+   его отсутствии — по точному тексту), восстановить `deleted_rows` с их
+   исходными `id`. Каждый шаг под своим try/except, чтобы одна ошибка не
+   отменяла остальные (M1).
+4. Если хоть один шаг упал или в quarantine остались файлы: staging-записи
+   **сохраняются**, quarantine **не** удаляется, `state = sleep_error` с
+   `error_message` — recovery повторит rollback. `rolled_back=1` в
+   `sleep_dialog_summary_log` ставится в любом случае.
+5. Успешный rollback: очищает staging сессии, удаляет quarantine-каталог,
+   **дневник не трогает** (анализ не был зафиксирован; архивирует и очищает его
+   только commit), `state = awake`, presence → `rest` (`journal=False`), в
+   журнал пишется пробуждение с реальной длительностью сна.
 
 ## Crash Recovery
 
@@ -147,8 +201,11 @@ applied}`:
   - иначе — `rollback_all()` (сон прервался во время обработки);
 - `committing`:
   - staging пуст → всё применено → `awake` (+ событие пробуждения в журнал);
-  - иначе → rollback (+ событие пробуждения в журнал);
-- `sleep_error` → rollback.
+  - иначе → rollback (+ событие пробуждения в журнал) — в том числе когда крах
+    случился между `clear_diary()` и пометкой staging: дневник вернётся из
+    staging-записи `diary_entries` (M2);
+- `sleep_error` → rollback (в том числе повторный rollback после незавершённой
+  попытки, см. M1).
 
 Wall-clock дедлайн из БД авторитетнее in-memory таймера: после рестарта сон
 продолжается до `scheduled_end_at`, а не засыпает заново.

@@ -4,6 +4,10 @@ core/sleep/processes.py — The three parallel sleep processes.
 
 import asyncio
 import json
+import os
+import re
+import shutil
+import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -15,10 +19,15 @@ from core.memory.eternal import (
     get_all_chunks_markdown, get_chunks_metadata, get_all_active_chunks,
     add_chunk, update_chunk, deactivate_chunk
 )
-from core.context.buffer import push_summary, get_context, pop_oldest_messages_by_tokens
+from core.context.buffer import (
+    get_context, peek_oldest_messages_by_tokens, compress_messages_into_summary,
+    format_created_at_local,
+)
+from core.llm.summary_guard import SUMMARY_LANGUAGE_RULES, contains_cjk
 from core.sleep.state import (
     SleepState, SleepStage, set_stage, stage_operation, get_current_state,
-    get_active_dialogs_detail, log_dialog_summary, get_state
+    get_active_dialogs_detail, log_dialog_summary, get_state,
+    update_staged_payload,
 )
 from core.sleep.tools import (
     get_diary_analysis_tools, get_diary_analysis_tool_names,
@@ -31,6 +40,158 @@ from core.sleep.tools import (
 MAX_GENERATION_ITERATIONS = 3
 MAX_VERIFICATION_RETRIES = 3
 SUMMARIZE_MIN_MESSAGES = 10
+
+
+def _contains_cjk(text: str) -> bool:
+    """True when ``text`` contains CJK/Kana/Hangul characters (S10)."""
+    return contains_cjk(text)
+
+
+def _tool_calls_have_cjk_summary(tool_calls) -> bool:
+    """True when a ``save_dialog_summary`` call carries CJK text."""
+    for tc in tool_calls or []:
+        try:
+            if tc.function.name != "save_dialog_summary":
+                continue
+            args = json.loads(tc.function.arguments or "{}")
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            continue
+        if _contains_cjk(str(args.get("summary_text") or "")):
+            return True
+    return False
+
+
+def _quarantine_dir(session_id: str) -> str:
+    """Per-session quarantine dir, derived from a *validated* session id.
+
+    m4: the id ends up in a filesystem path. Accept only UUIDs; anything else is
+    sanitized into a deterministic token so ``..`` or absolute paths can never
+    escape ``MEDIA_DIR/quarantine``.
+    """
+    raw = str(session_id or "")
+    try:
+        token = str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        token = re.sub(r"[^A-Za-z0-9_-]", "_", raw)[:64] or "unknown"
+        print(f"  [Sleep] WARNING: non-UUID session id {raw[:16]!r} used for quarantine")
+    return os.path.join(str(settings.MEDIA_DIR), "quarantine", token)
+
+
+def snapshot_media_for_quarantine(session_id: str, chunk_ids: List[str]) -> List[Dict]:
+    """Precompute quarantine moves + DB refs for media of summarized messages.
+
+    Must run BEFORE ``detach_media_by_chunk_ids`` and before the files move
+    (S13): the staged payload then describes the undo both for the DB refs and
+    for the bytes, so rollback applies it idempotently at any crash point.
+    """
+    ids = [c for c in (chunk_ids or []) if c]
+    if not ids:
+        return []
+    from core.db import get_media_paths_for_chunks, get_media_log_rows_for_paths
+
+    try:
+        rows = get_media_paths_for_chunks(ids)
+    except Exception as e:
+        print(f"  [Sleep] media snapshot failed: {e}")
+        return []
+    if not rows:
+        return []
+
+    all_paths: List[str] = []
+    for row in rows:
+        path = row.get("media_path") or ""
+        if not path:
+            continue
+        all_paths.append(path)
+        twin = os.path.splitext(path)[0] + ".wav"
+        if twin != path:
+            all_paths.append(twin)
+    try:
+        media_logs = get_media_log_rows_for_paths(all_paths)
+    except Exception:
+        media_logs = []
+
+    qdir = _quarantine_dir(session_id)
+    entries: List[Dict] = []
+    for idx, row in enumerate(rows):
+        path = row.get("media_path") or ""
+        if not path:
+            continue
+        files = [{
+            "path": path,
+            "quarantine": os.path.join(qdir, f"{idx}_{os.path.basename(path)}"),
+        }]
+        twin = os.path.splitext(path)[0] + ".wav"
+        if twin != path:
+            # Converted twin belongs to the same audio and dies with it.
+            files.append({
+                "path": twin,
+                "quarantine": os.path.join(qdir, f"{idx}_{os.path.basename(twin)}"),
+            })
+        entry_paths = {f["path"] for f in files}
+        entries.append({
+            "chunk_id": row.get("chunk_id"),
+            "media_path": path,
+            "files": files,
+            "media_logs": [
+                {"media_id": m.get("media_id"), "file_path": m.get("file_path")}
+                for m in media_logs
+                if (m.get("file_path") or "") in entry_paths
+            ],
+        })
+    return entries
+
+
+def move_media_to_quarantine(entries: List[Dict]) -> Tuple[int, int]:
+    """Move snapped files into ``data/media/quarantine/{session_id}/``.
+
+    Bytes are never unlinked before commit (S13). Returns ``(moved, failed)``.
+    """
+    moved = failed = 0
+    for entry in entries or []:
+        for f in entry.get("files") or []:
+            src, dst = f.get("path"), f.get("quarantine")
+            if not src or not dst or not os.path.isfile(src):
+                continue
+            try:
+                # m4: quarantine holds user media — keep it owner-only.
+                os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+                os.replace(src, dst)
+                moved += 1
+            except OSError as e:
+                failed += 1
+                print(f"  [Sleep] media quarantine failed for {src}: {e}")
+    return moved, failed
+
+
+def restore_media_from_quarantine(entries: List[Dict]) -> Tuple[int, int]:
+    """Move quarantined files back to their original paths (rollback, S13)."""
+    restored = failed = 0
+    for entry in entries or []:
+        for f in entry.get("files") or []:
+            src, dst = f.get("quarantine"), f.get("path")
+            if not src or not dst or not os.path.isfile(src):
+                continue
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.replace(src, dst)
+                restored += 1
+            except OSError as e:
+                failed += 1
+                print(f"  [Rollback] media restore failed for {dst}: {e}")
+    return restored, failed
+
+
+def purge_media_quarantine(session_id: str) -> int:
+    """Drop this session's quarantine dir (after commit / complete rollback)."""
+    if not session_id:
+        return 0
+    path = _quarantine_dir(session_id)
+    if not os.path.isdir(path):
+        return 0
+    shutil.rmtree(path, ignore_errors=True)
+    print(f"  [Sleep] quarantine purged for {str(session_id)[:8]}...")
+    return 1
 
 
 def _get_night_tool_choice() -> str:
@@ -138,6 +299,7 @@ class StagingExecutor:
         process_type: str,
         known_user_ids: Optional[set[str]] = None,
         default_source_chat_id: Optional[str] = None,
+        expected_chat_id: Optional[str] = None,
     ):
         self.session_id = session_id
         self.process_type = process_type
@@ -147,6 +309,11 @@ class StagingExecutor:
         # Unknown/truncated ids are rejected instead of creating ghost users.
         self.known_user_ids = {str(uid) for uid in (known_user_ids or set()) if uid}
         self.default_source_chat_id = str(default_source_chat_id or "") or None
+        # M3: a summarization executor is bound to exactly one dialog. The model
+        # can hallucinate another chat_id and otherwise compact an unrelated
+        # conversation (its messages really do get deleted). ``None`` keeps the
+        # old permissive behavior for non-summary process types.
+        self.expected_chat_id = str(expected_chat_id or "") or None
 
     async def execute_tool_call(self, tool_call) -> Dict[str, Any]:
         import json
@@ -207,25 +374,31 @@ class StagingExecutor:
         }
 
     async def _stage_add_chunk(self, args: Dict) -> Dict:
-        chunk_id = add_chunk(
-            title=args["title"],
-            content_md=args["content_md"],
-            importance=args.get("importance", 0.5)
-        )
-
+        # S16: pre-generate the id and stage the undo record first. A crash
+        # between staging and insert then leaves a no-op rollback instead of an
+        # untracked chunk.
+        chunk_id = str(uuid.uuid4())
+        payload = {
+            "chunk_id": chunk_id,
+            "title": args["title"],
+            "content_md": args["content_md"],
+            "importance": args.get("importance", 0.5),
+        }
         sid = stage_operation(
             session_id=self.session_id,
             operation_type="insert",
             target_table="mila_memory_chunks",
             target_id=chunk_id,
-            payload={
-                "chunk_id": chunk_id,
-                "title": args["title"],
-                "content_md": args["content_md"],
-                "importance": args.get("importance", 0.5)
-            }
+            payload=payload,
         )
         self.staged_ids.append(sid)
+
+        chunk_id = add_chunk(
+            title=args["title"],
+            content_md=args["content_md"],
+            importance=args.get("importance", 0.5),
+            chunk_id=chunk_id,
+        )
 
         return {
             "role": "system",
@@ -297,60 +470,124 @@ class StagingExecutor:
         }
 
     async def _stage_dialog_summary(self, args: Dict) -> Dict:
-        chat_id = args["chat_id"]
-        summary_text = args["summary_text"]
+        chat_id = str(args.get("chat_id") or "").strip()
+        summary_text = str(args.get("summary_text") or "").strip()
         message_count = args.get("message_count", 0)
 
-        push_summary(chat_id, summary_text)
+        # M3: never compact a chat this executor was not created for. The model
+        # can copy a chat_id from the prompt of another dialog; honoring it
+        # would delete real messages of an unrelated conversation.
+        if self.expected_chat_id and chat_id != self.expected_chat_id:
+            print(f"  [Sleep] summary chat mismatch: model={chat_id[:12]}... "
+                  f"expected={self.expected_chat_id[:12]}... — rejected")
+            return {
+                "role": "system",
+                "content": (
+                    f"ERROR: chat_id {chat_id!r} is not the dialog under review. "
+                    f"Use chat_id {self.expected_chat_id!r} (or call skip_dialog)."
+                ),
+            }
+        if not chat_id:
+            return {
+                "role": "system",
+                "content": "ERROR: missing chat_id; call save_dialog_summary again."
+            }
+        if not summary_text:
+            return {
+                "role": "system",
+                "content": "ERROR: empty summary; call save_dialog_summary again."
+            }
+        if _contains_cjk(summary_text):
+            return {
+                "role": "system",
+                "content": "ERROR: the summary contains Chinese characters. "
+                           "Rewrite it in Russian only and call save_dialog_summary again."
+            }
 
-        removed = pop_oldest_messages_by_tokens(chat_id, 50000)
-        messages_removed = len(removed) if removed else message_count
+        # S8/S9: peek first — the messages are removed only together with the
+        # summary insert (one transaction inside the context buffer), and the
+        # peeked rows become the undo payload for rollback (S2).
+        to_remove = peek_oldest_messages_by_tokens(chat_id, 50000)
 
-        # Detach bytes of summarized-away media: text placeholders and the
-        # summary stay, but files are deleted and chunks.media_path cleared
-        # so later turns don't re-attach stale photos/audios as fresh info.
-        try:
-            chunk_ids = [(m.get("source_chunk_id") or "") for m in (removed or [])]
-            chunk_ids = [c for c in chunk_ids if c]
-            if chunk_ids:
-                from core.db import detach_media_by_chunk_ids
-                detached = detach_media_by_chunk_ids(chunk_ids)
-                if detached:
-                    import os as _os
-                    n_files = 0
-                    for _p in detached:
-                        for _cand in (_p, _os.path.splitext(_p)[0] + ".wav"):
-                            try:
-                                if _cand and _os.path.isfile(_cand):
-                                    _os.unlink(_cand)
-                                    n_files += 1
-                            except OSError:
-                                pass
-                    print(f"  [Sleep] media detached for {chat_id[:12]}...: "
-                          f"{len(detached)} chunk(s), {n_files} file(s) removed")
-        except Exception as e:
-            print(f"  [Sleep] media detach failed for {chat_id[:12]}...: {e}")
-
-        log_dialog_summary(self.session_id, chat_id, summary_text, messages_removed)
-
+        payload = {
+            "chat_id": chat_id,
+            "summary_text": summary_text,
+            "messages_removed": 0,
+            "type": "summary",
+            "summary_entry_id": None,
+            "deleted_rows": to_remove,
+            "media": [],
+        }
+        # S14: the staging row is written before any destructive step so a
+        # crash can never leave a summary or deleted messages without an undo.
         sid = stage_operation(
             session_id=self.session_id,
             operation_type="insert",
             target_table=f"context_buffer.chat_{chat_id}",
             target_id=None,
-            payload={
-                "chat_id": chat_id,
-                "summary_text": summary_text,
-                "messages_removed": messages_removed,
-                "type": "summary"
-            }
+            payload=payload,
         )
         self.staged_ids.append(sid)
+
+        # S13: snapshot media refs and precompute quarantine targets before
+        # detaching anything, so rollback can undo a partially applied step.
+        chunk_ids = [str(m.get("source_chunk_id") or "") for m in to_remove]
+        chunk_ids = [c for c in chunk_ids if c]
+        media_entries = snapshot_media_for_quarantine(self.session_id, chunk_ids)
+        if media_entries:
+            payload["media"] = media_entries
+            self._persist_payload(sid, payload)
+
+        # Mark the destructive step as *started*: if the process dies inside
+        # compress, rollback knows the summary may exist even without its id.
+        payload["compressing"] = True
+        self._persist_payload(sid, payload)
+
+        try:
+            summary_id, messages_removed = compress_messages_into_summary(
+                chat_id, summary_text, [m["id"] for m in to_remove])
+        except Exception:
+            # m1: the compress transaction rolled back, so no summary exists.
+            # Clearing the flag keeps rollback from text-matching (and possibly
+            # deleting) an older committed summary with identical text.
+            payload.pop("compressing", None)
+            self._persist_payload(sid, payload)
+            raise
+
+        payload["summary_entry_id"] = summary_id
+        payload["messages_removed"] = messages_removed
+        payload.pop("compressing", None)
+        self._persist_payload(sid, payload)
+
+        if media_entries:
+            try:
+                from core.db import detach_media_by_chunk_ids
+                detached = detach_media_by_chunk_ids(
+                    [e["chunk_id"] for e in media_entries if e.get("chunk_id")])
+                moved, failed = move_media_to_quarantine(media_entries)
+                print(f"  [Sleep] media quarantined for {chat_id[:12]}...: "
+                      f"{len(detached)} chunk(s), {moved} file(s) moved, {failed} failed")
+            except Exception as e:
+                print(f"  [Sleep] media detach failed for {chat_id[:12]}...: {e}")
+
+        if message_count and messages_removed != message_count:
+            print(f"  [Sleep] summary for {chat_id[:12]}...: model reported "
+                  f"{message_count} messages, actually removed {messages_removed}")
+
+        log_dialog_summary(self.session_id, chat_id, summary_text, messages_removed)
 
         return {
             "role": "system",
             "content": f"✅ Summary saved for chat {chat_id[:8]}... ({messages_removed} messages compressed)"
         }
+
+    def _persist_payload(self, staging_id: int, payload: Dict) -> bool:
+        """Rewrite the staged undo payload; a silent failure would break rollback."""
+        ok = update_staged_payload(staging_id, payload)
+        if not ok:
+            print(f"  [Sleep] WARNING: staging payload {staging_id} not updated "
+                  f"(row missing or already applied)")
+        return ok
 
     async def _stage_user_fact(self, args: Dict) -> Dict:
         from core.db import ensure_user_exists
@@ -393,26 +630,29 @@ class StagingExecutor:
         # Stage the users row before the memory row. Rollback reverses the
         # order, so it deletes the memory first and only then removes a user
         # row that this sleep session created (existing profiles are kept).
-        if ensure_user_exists(user_id):
-            stage_operation(
+        # Read-then-stage-then-insert closes the untracked-insert window (S15):
+        # rollback only deletes users without remaining references anyway.
+        from core.db import ensure_user_exists, get_user_info
+        from core.sleep.state import discard_staged_operation
+        staged_user_id = None
+        if get_user_info(user_id) is None:
+            staged_user_id = stage_operation(
                 session_id=self.session_id,
                 operation_type="insert",
                 target_table="users",
                 target_id=user_id,
                 payload={"user_id": user_id},
             )
+        # m9: the insert return value is the only authoritative "we created it".
+        # If a racing writer got there first, drop our staged users row so
+        # rollback can never delete a profile this session did not create.
+        if ensure_user_exists(user_id) is False and staged_user_id:
+            discard_staged_operation(staged_user_id)
 
-        # Insert + embed + FAISS in one step; if the embedding backend is
-        # down the row stays with faiss_id=NULL and is retried later.
-        mem_id, indexed = await get_indexer().add_memory(
-            user_id=user_id,
-            content=content,
-            importance=importance,
-            source_chat_id=source_chat_id
-        )
-        if not indexed:
-            print(f"  [Sleep] memory {mem_id[:8]}... queued for reindex")
-
+        # S15: pre-generate the id and stage the undo record BEFORE inserting.
+        # Insert + embed + FAISS in one step; if the embedding backend is down
+        # the row stays with faiss_id=NULL and is retried later.
+        mem_id = str(uuid.uuid4())
         sid = stage_operation(
             session_id=self.session_id,
             operation_type="insert",
@@ -427,6 +667,28 @@ class StagingExecutor:
             }
         )
         self.staged_ids.append(sid)
+
+        actual_id, indexed = await get_indexer().add_memory(
+            mem_id=mem_id,
+            user_id=user_id,
+            content=content,
+            importance=importance,
+            source_chat_id=source_chat_id
+        )
+        if not indexed:
+            print(f"  [Sleep] memory {actual_id[:8]}... queued for reindex")
+        if actual_id != mem_id:
+            # Non-conforming indexer ignored the pre-generated id; keep the
+            # rollback pointed at the row that actually exists.
+            sid = stage_operation(
+                session_id=self.session_id,
+                operation_type="insert",
+                target_table="memories",
+                target_id=actual_id,
+                payload={"mem_id": actual_id, "user_id": user_id},
+            )
+            self.staged_ids.append(sid)
+            mem_id = actual_id
 
         return {
             "role": "system",
@@ -678,8 +940,10 @@ async def process_dialog_summarization(session_id: str) -> Tuple[bool, str]:
 
         from core.context.buffer import get_context
         context = get_context(chat_id, limit=200)
+        # Stored timestamps are UTC (S12); the model reasons about dates in the
+        # user's local day, so the prompt gets the converted date.
         messages_text = "\n".join(
-            f"[{m.get('created_at', '')[:10]}] {m['content'][:500]}"
+            f"[{format_created_at_local(m.get('created_at', ''))[:10]}] {m['content'][:500]}"
             for m in context
             if m['type'] == 'message' and m['content'].strip()
         )
@@ -689,7 +953,10 @@ async def process_dialog_summarization(session_id: str) -> Tuple[bool, str]:
             results.append({"chat_id": chat_id, "action": "skipped", "reason": "empty context"})
             continue
 
-        executor = StagingExecutor(session_id, "dialog_summarization")
+        # M3: bind the executor to this dialog — a hallucinated chat_id must not
+        # compact another conversation.
+        executor = StagingExecutor(
+            session_id, "dialog_summarization", expected_chat_id=chat_id)
 
         system_prompt = f"""You are Mila's night reflection system (Process 2: Dialog Summarization).
 
@@ -702,19 +969,23 @@ Your task is to analyze dialog messages and create a concise summary.
 ## Instructions
 
 1. Read the dialog messages.
-2. If the conversation has enough substance, create a summary using save_dialog_summary.
+2. If the conversation has enough substance, create a summary using save_dialog_summary
+   with chat_id "{chat_id}" — the chat under review, never another one.
 3. The summary should be 2-4 sentences covering:
    - Key topics discussed
    - Any decisions or agreements made
    - Emotional context and tone
-4. If the dialog doesn't have enough meaningful content, use skip_dialog.
-5. You MUST call either save_dialog_summary or skip_dialog.
+4. {SUMMARY_LANGUAGE_RULES}
+5. If the dialog doesn't have enough meaningful content, use skip_dialog.
+6. You MUST call either save_dialog_summary or skip_dialog.
 """
 
         gen_messages = [{"role": "user", "content": f"Analyze dialog {chat_id[:12]}... and create summary or skip."}]
         tools = get_dialog_summarization_tools()
 
         generation_success = False
+        cjk_retried = False
+        cjk_skipped = False
         for gen_iter in range(MAX_GENERATION_ITERATIONS):
             try:
                 response = await llm.generate(
@@ -737,11 +1008,32 @@ Your task is to analyze dialog messages and create a concise summary.
                 })
                 continue
 
+            # S10: reject CJK output and ask for a Russian rewrite exactly once.
+            if _tool_calls_have_cjk_summary(tool_calls):
+                if not cjk_retried:
+                    cjk_retried = True
+                    print("  [Gen] Summary contained CJK characters — asking for a Russian rewrite")
+                    gen_messages.append({
+                        "role": "system",
+                        "content": "ERROR: the summary contained Chinese characters. "
+                                   "Rewrite it in Russian only (no Chinese/English words) "
+                                   "and call save_dialog_summary again."
+                    })
+                    continue
+                print(f"  → Skipped {chat_id[:12]}...: summary still contains CJK")
+                results.append({"chat_id": chat_id, "action": "skipped",
+                                "reason": "summary in Chinese"})
+                cjk_skipped = True
+                break
+
             for tc in tool_calls:
                 await executor.execute_tool_call(tc)
 
             generation_success = True
             break
+
+        if cjk_skipped:
+            continue
 
         if not generation_success:
             results.append({"chat_id": chat_id, "action": "error", "reason": "generation failed"})

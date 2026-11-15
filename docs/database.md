@@ -168,7 +168,9 @@ CREATE TABLE media_logs (
 (отдельного captioner-а нет, описание даёт main LLM нативно). При ночной
 суммаризации `detach_media_by_chunk_ids()` очищает `chunks.media_path` и
 `media_logs.file_path`, выставляет `detached_at`, чтобы не оставалось путей к
-удалённым файлам.
+удалённым файлам. Сами файлы до commit не удаляются, а переносятся в
+`data/media/quarantine/{session_id}/`; rollback возвращает их и
+`restore_detached_media()` восстанавливает ссылки, commit удаляет quarantine.
 
 ### presence_state
 
@@ -282,9 +284,9 @@ CREATE TABLE sleep_transaction_staging (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
     operation_type TEXT NOT NULL,  -- insert|update|delete
-    target_table TEXT NOT NULL,    -- mila_memory_chunks | memories | context_buffer.chat_...
+    target_table TEXT NOT NULL,    -- mila_memory_chunks | memories | users | context_buffer.chat_... | diary_entries
     target_id TEXT,
-    payload TEXT NOT NULL,         -- JSON с данными операции
+    payload TEXT NOT NULL,         -- JSON с данными операции (для diary_entries — rows снимка дневника)
     created_at TEXT DEFAULT (datetime('now')),
     applied INTEGER DEFAULT 0
 );
@@ -294,7 +296,8 @@ CREATE TABLE sleep_dialog_summary_log (
     session_id TEXT NOT NULL,
     chat_id TEXT NOT NULL,
     summary_text TEXT,
-    messages_removed INTEGER DEFAULT 0,
+    messages_removed INTEGER DEFAULT 0,  -- реальный rowcount удаления, не слова модели
+    rolled_back INTEGER DEFAULT 0,       -- 1 после rollback сессии (строка остаётся для диагностики)
     created_at TEXT DEFAULT (datetime('now'))
 );
 ```
@@ -318,7 +321,7 @@ CREATE TABLE [chat_{chat_id}] (
     token_count INTEGER DEFAULT 0,
     role TEXT NOT NULL DEFAULT '',  -- 'user' | 'assistant' | ''
     kind TEXT DEFAULT 'text',
-    created_at TEXT DEFAULT (datetime('now'))  -- локальное время
+    created_at TEXT DEFAULT (datetime('now'))  -- UTC (message и summary), см. context-buffer.md
 );
 ```
 

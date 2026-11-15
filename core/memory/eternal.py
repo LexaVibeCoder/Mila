@@ -30,9 +30,11 @@ def _ensure_table():
         conn.close()
 
 
-def add_chunk(title: str, content_md: str, importance: float = 0.5) -> str:
+def add_chunk(title: str, content_md: str, importance: float = 0.5,
+              chunk_id: str | None = None) -> str:
     _ensure_table()
-    chunk_id = str(uuid.uuid4())
+    # Callers that stage the undo record first pass a pre-generated id (S16).
+    chunk_id = chunk_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
     try:

@@ -4,8 +4,8 @@ core/context/buffer.py — Context Buffer for Mila's working memory.
 
 import os
 import sqlite3
-from datetime import datetime
-from typing import List, Dict
+from datetime import datetime, timezone
+from typing import List, Dict, Tuple
 from zoneinfo import ZoneInfo
 
 from config import settings
@@ -82,11 +82,36 @@ def ensure_chat_table(chat_id: str):
         conn.close()
 
 
+def format_created_at_local(raw) -> str:
+    """Render a stored UTC timestamp in the configured local zone (display only).
+
+    Context rows are stored in UTC (S12); prompts, panel output and anything
+    comparing them to "now" must convert at the edge. Rows written before the
+    UTC switch were local wall-clock — they age out of the buffer quickly
+    (``MAX_STM_MESSAGES`` + summarization), so no per-row marker is kept.
+    """
+    if not raw:
+        return ""
+    text = str(raw)
+    try:
+        if "T" in text:
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return text
+    return dt.astimezone(_local_zone()).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def push_message(chat_id: str, content: str, source_chunk_id: str = None, role: str = "user", kind: str = "text"):
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     token_count = count_tokens(content)
-    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    # Storage is UTC (S12); local time is produced only at display/prompt edges
+    # via ``format_created_at_local``.
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     try:
         try:
@@ -109,7 +134,9 @@ def push_summary(chat_id: str, summary_text: str):
     ensure_chat_table(chat_id)
     table = _table_name(chat_id)
     token_count = count_tokens(summary_text)
-    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    # Storage is UTC (S12): every other subsystem (sleep_state, memories)
+    # stores UTC, so summaries must not drift by the local offset.
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     try:
         conn.execute(
@@ -117,6 +144,120 @@ def push_summary(chat_id: str, summary_text: str):
             (summary_text, token_count, ts)
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def compress_messages_into_summary(
+    chat_id: str, summary_text: str, message_ids: List[int]
+) -> Tuple[int | None, int]:
+    """Insert the summary and delete the summarized messages in one transaction.
+
+    Returns ``(summary_entry_id, deleted_rowcount)``. Removing the messages and
+    adding the summary must never be split (S8): a crash in between would leave
+    both the summary and the messages (duplicate on retry) or only the summary.
+    The rowcount is the real number of deleted rows (S9), never a model claim.
+    """
+    ensure_chat_table(chat_id)
+    table = _table_name(chat_id)
+    token_count = count_tokens(summary_text)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _get_conn()
+    try:
+        try:
+            cur = conn.execute(
+                f"INSERT INTO [{table}] (content, type, token_count, created_at) VALUES (?, 'summary', ?, ?)",
+                (summary_text, token_count, ts)
+            )
+            summary_id = cur.lastrowid
+            removed = 0
+            ids = [int(i) for i in (message_ids or [])]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                del_cur = conn.execute(
+                    f"DELETE FROM [{table}] WHERE id IN ({placeholders}) AND type='message'",
+                    ids
+                )
+                removed = del_cur.rowcount or 0
+            conn.commit()
+            return summary_id, removed
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        # Callers rely on "exception ⇒ nothing was written". A close error after
+        # commit would break that invariant, so it must never propagate.
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def delete_entry(chat_id: str, entry_id: int) -> int:
+    """Delete one context row by id. Used by rollback to drop a staged summary."""
+    ensure_chat_table(chat_id)
+    table = _table_name(chat_id)
+    conn = _get_conn()
+    try:
+        cur = conn.execute(f"DELETE FROM [{table}] WHERE id=?", (int(entry_id),))
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def delete_summary_matching(chat_id: str, summary_text: str) -> int:
+    """Delete the newest summary row with exactly this text (rollback fallback).
+
+    Only needed when the staged payload has no summary row id — a crash between
+    the insert and the payload update. Exact text match keeps the blast radius
+    to the summary this session produced.
+    """
+    ensure_chat_table(chat_id)
+    table = _table_name(chat_id)
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            f"SELECT id FROM [{table}] WHERE type='summary' AND content=? "
+            f"ORDER BY id DESC LIMIT 1",
+            (summary_text,)
+        ).fetchone()
+        if not row:
+            return 0
+        cur = conn.execute(f"DELETE FROM [{table}] WHERE id=?", (row["id"],))
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def restore_messages(chat_id: str, rows: List[Dict]) -> int:
+    """Re-insert context rows deleted by a summary, keeping their original ids.
+
+    Undo path for ``compress_messages_into_summary`` (S2). ``INSERT OR IGNORE``
+    makes a repeated rollback harmless.
+    """
+    if not rows:
+        return 0
+    ensure_chat_table(chat_id)
+    table = _table_name(chat_id)
+    conn = _get_conn()
+    try:
+        restored = 0
+        for r in rows:
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO [{table}] "
+                f"(id, content, type, source_chunk_id, token_count, role, kind, created_at) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    r.get("id"), r.get("content") or "", r.get("type") or "message",
+                    r.get("source_chunk_id"), r.get("token_count") or 0,
+                    r.get("role") or "", r.get("kind") or "text", r.get("created_at"),
+                )
+            )
+            restored += cur.rowcount or 0
+        conn.commit()
+        return restored
     finally:
         conn.close()
 
@@ -217,7 +358,7 @@ def peek_oldest_messages_by_tokens(chat_id: str, target_tokens: int) -> List[Dic
     conn = _get_conn()
     try:
         cur = conn.execute(
-            f"SELECT id, content, type, source_chunk_id, token_count, role, created_at FROM [{table}] WHERE type='message' ORDER BY id ASC"
+            f"SELECT id, content, type, source_chunk_id, token_count, role, kind, created_at FROM [{table}] WHERE type='message' ORDER BY id ASC"
         )
         all_messages = [dict(r) for r in cur.fetchall()]
 

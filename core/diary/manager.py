@@ -227,6 +227,47 @@ def clear_diary():
         conn.close()
 
 
+def snapshot_diary_entries() -> List[Dict]:
+    """Full diary rows, taken before ``clear_diary()`` in the sleep commit.
+
+    The commit clears the table after the log backup; if a later step fails,
+    the entries must come back into the DB rather than surviving only as a
+    file in ``logs/diary_logs/``.
+    """
+    return get_all_diary_entries()
+
+
+def restore_diary_entries(rows: List[Dict]) -> int:
+    """Re-insert snapshot rows with their original ids (``INSERT OR IGNORE``).
+
+    Idempotent: a repeated restore, or a restore when the table was never
+    cleared, keeps the existing rows untouched. Returns the number of inserted
+    rows.
+    """
+    if not rows:
+        return 0
+    _ensure_diary_table()
+    conn = _get_context_conn()
+    try:
+        restored = 0
+        for r in rows:
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO {DIARY_TABLE} "
+                f"(id, entry_number, content_md, category, created_at, updated_at) "
+                f"VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    r.get("id"), r.get("entry_number"), r.get("content_md") or "",
+                    r.get("category") or "day_entries",
+                    r.get("created_at"), r.get("updated_at"),
+                )
+            )
+            restored += cur.rowcount or 0
+        conn.commit()
+        return restored
+    finally:
+        conn.close()
+
+
 def save_diary_to_logs() -> bool:
     """Backup today's diary to logs/diary_logs/. Returns True when safe to clear.
 

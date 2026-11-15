@@ -49,8 +49,9 @@ state_agent/__pycache__/
 Mila_observatory/frontend/*.log
 npm-debug.log*
 
-# IDE
+# IDE / agent specific files
 .vscode/
+.opencode/
 
 #Telegram (TDLib / pytdbot)
 data/tdlib/

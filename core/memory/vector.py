@@ -127,6 +127,14 @@ class VectorMemory:
                 return set()
             return _index_ids(self.index)
 
+    @contextmanager
+    def locked_index(self):
+        """Reload and lock the shared index for a synchronous compound mutation."""
+        with self._lock:
+            with _file_lock(self._lock_path):
+                self._load_locked()
+                yield
+
     def add(self, vectors: np.ndarray, ids: Sequence[int], persist: bool = True):
         """Add/replace vectors by id.
 

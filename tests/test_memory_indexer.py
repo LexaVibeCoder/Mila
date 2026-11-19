@@ -341,3 +341,53 @@ def test_faiss_id_indexes_exist(memory_env):
         conn.close()
     assert "idx_memories_faiss" in names
     assert "idx_chunks_faiss" in names
+
+
+@pytest.mark.parametrize("kind", ["memory", "chunk"])
+async def test_rebuild_retries_when_another_indexer_adds_during_embedding(memory_env, kind):
+    """A03: a rebuild cannot replace a concurrently committed vector."""
+    import asyncio
+    from core.memory.indexer import MemoryIndexer
+    from core.memory.vector import VectorMemory
+
+    started = asyncio.Event()
+    resume = asyncio.Event()
+
+    class PausedEmbedder(FakeEmbedder):
+        async def embed(self, texts):
+            if not started.is_set():
+                started.set()
+                await resume.wait()
+            return await super().embed(texts)
+
+    rebuild_indexer = MemoryIndexer(
+        vector=VectorMemory(memory_env["text_path"], dim=8),
+        chunk_vector=VectorMemory(memory_env["chunk_path"], dim=8),
+        embedder=PausedEmbedder(),
+    )
+    writer = memory_env["indexer"]
+    if kind == "memory":
+        first = core_db.add_memory(user_id="u1", content="alpha fact")
+        task = asyncio.create_task(rebuild_indexer.rebuild())
+    else:
+        first = core_db.add_chunk("c1", "u1", "alpha chunk")
+        task = asyncio.create_task(rebuild_indexer.rebuild_chunks())
+    await asyncio.wait_for(started.wait(), 5)
+    try:
+        if kind == "memory":
+            second, indexed = await writer.add_memory("u1", "beta fact")
+            assert indexed
+        else:
+            second = core_db.add_chunk("c1", "u1", "beta chunk")
+            assert await writer.index_chunk(second)
+    finally:
+        resume.set()
+    result = await asyncio.wait_for(task, 5)
+    assert result["count"] == 2
+    get_row = core_db.get_memory if kind == "memory" else core_db.get_chunk
+    path = memory_env["text_path"] if kind == "memory" else memory_env["chunk_path"]
+    final = VectorMemory(path, dim=8)
+    ids = {get_row(item)["faiss_id"] for item in (first, second)}
+    assert None not in ids
+    assert len(ids) == 2
+    assert final.ids() == ids

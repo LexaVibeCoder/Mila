@@ -22,7 +22,6 @@ import os
 import threading
 from typing import Any, List
 
-import faiss
 import numpy as np
 
 from config import settings
@@ -140,7 +139,12 @@ class MemoryIndexer:
             async with self._mutation_lock:
                 try:
                     vec = await self._embed_one(content)
-                    self.vector.add(np.asarray([vec]), [int(faiss_id)])
+                    with self.vector.locked_index():
+                        row = get_memory(mem_id)
+                        if not row:
+                            return mem_id, False
+                        self.vector.add(np.asarray([vec]), [int(row["faiss_id"])], persist=False)
+                        self.vector._write_locked()
                     return mem_id, True
                 except Exception as e:
                     print(f"[MemoryIndexer] memory {mem_id[:8]}... index failed: {e}")
@@ -171,9 +175,17 @@ class MemoryIndexer:
                 vec = await self._embed_one(content)
                 # min_id keeps the new id above anything already claimed in
                 # SQLite, even if that row failed to reach the index earlier.
-                new_ids = self.vector.add_new(
-                    np.asarray([vec]), min_id=max_memory_faiss_id() + 1)
-                update_memory_faiss_id(mem_id, new_ids[0])
+                with self.vector.locked_index():
+                    current = get_memory(mem_id)
+                    if not current or current.get("content") != row.get("content"):
+                        return False
+                    current_id = current.get("faiss_id")
+                    if not force and current_id is not None and int(current_id) in self.vector.ids():
+                        return True
+                    new_ids = self.vector.add_new(
+                        np.asarray([vec]), min_id=max_memory_faiss_id() + 1, persist=False)
+                    self.vector._write_locked()
+                    update_memory_faiss_id(mem_id, new_ids[0])
                 return True
             except Exception as e:
                 print(f"[MemoryIndexer] memory {mem_id[:8]}... index failed: {e}")
@@ -252,9 +264,17 @@ class MemoryIndexer:
 
             try:
                 vec = await self._embed_one(content)
-                new_ids = self.chunk_vector.add_new(
-                    np.asarray([vec]), min_id=max_chunk_faiss_id() + 1)
-                update_chunk_faiss_id(chunk_id, new_ids[0])
+                with self.chunk_vector.locked_index():
+                    current = get_chunk(chunk_id)
+                    if not current or current.get("content") != row.get("content") or (current.get("kind") or "text").lower() == "silence":
+                        return False
+                    current_id = current.get("faiss_id")
+                    if not force and current_id is not None and int(current_id) in self.chunk_vector.ids():
+                        return True
+                    new_ids = self.chunk_vector.add_new(
+                        np.asarray([vec]), min_id=max_chunk_faiss_id() + 1, persist=False)
+                    self.chunk_vector._write_locked()
+                    update_chunk_faiss_id(chunk_id, new_ids[0])
                 return True
             except Exception as e:
                 print(f"[MemoryIndexer] chunk {chunk_id[:8]}... index failed: {e}")
@@ -340,59 +360,67 @@ class MemoryIndexer:
 
     # ── full rebuild ─────────────────────────────────────────────────
 
-    async def _rebuild(self, rows: List[dict], id_key: str, text_key: str,
+    async def _rebuild(self, rows_getter, id_key: str, text_key: str,
                        max_id_getter, db_id_getter,
                        vector: VectorMemory, label: str) -> dict:
-        if not rows:
-            vector.replace_index(_new_index(vector.dim), persist=True)
-            return {"success": True, "message": f"No {label} to index", "count": 0}
-
-        texts = [r[text_key] for r in rows]
+        # Embeddings may take seconds: do not hold a file lock across an await.
+        # Validate the snapshot under the same lock used by index writers.
         async with self._mutation_lock:
-            vectors = await self._embed_many(texts)
+            while True:
+                with vector.locked_index():
+                    rows = rows_getter()
+                    snapshot = [(r[id_key], r[text_key], r.get("faiss_id")) for r in rows]
+                    signature = vector._file_signature()
+                vectors = await self._embed_many([r[text_key] for r in rows])
+                with vector.locked_index():
+                    current = rows_getter()
+                    current_snapshot = [(r[id_key], r[text_key], r.get("faiss_id")) for r in current]
+                    if snapshot != current_snapshot or signature != vector._file_signature():
+                        continue
 
-        used: set[int] = set()
-        occupied = set(db_id_getter()) | set(vector.ids())
-        next_id = max([max_id_getter(), *occupied], default=0) + 1
-        ids: List[int] = []
-        updates: dict[str, int] = {}
-        for row, vec in zip(rows, vectors):
-            old = row.get("faiss_id")
-            if old is not None and int(old) not in used:
-                assigned = int(old)
-            else:
-                assigned = next_id
-                next_id += 1
-            used.add(assigned)
-            ids.append(assigned)
-            if old != assigned:
-                updates[row[id_key]] = assigned
+                    used: set[int] = set()
+                    occupied = set(db_id_getter()) | set(vector.ids())
+                    next_id = max([max_id_getter(), *occupied], default=0) + 1
+                    ids: List[int] = []
+                    updates: dict[str, int] = {}
+                    for row in rows:
+                        old = row.get("faiss_id")
+                        if old is not None and int(old) not in used:
+                            assigned = int(old)
+                        else:
+                            assigned = next_id
+                            next_id += 1
+                        used.add(assigned)
+                        ids.append(assigned)
+                        if old != assigned:
+                            updates[row[id_key]] = assigned
 
-        new_index = faiss.IndexIDMap(faiss.IndexFlatL2(vector.dim))
-        new_index.add_with_ids(
-            np.asarray(vectors, dtype=np.float32),
-            np.asarray(ids, dtype=np.int64),
-        )
-        vector.replace_index(new_index, persist=True)
-        # Persist the id mapping after the index write. If this fails, the
-        # next startup health check sees index/db mismatch and re-queues them.
-        if id_key == "mem_id":
-            set_memory_faiss_ids(updates)
-        else:
-            set_chunk_faiss_ids(updates)
+                    new_index = _new_index(vector.dim)
+                    if ids:
+                        new_index.add_with_ids(
+                            np.asarray(vectors, dtype=np.float32),
+                            np.asarray(ids, dtype=np.int64),
+                        )
+                    vector.replace_index(new_index, persist=False)
+                    vector._write_locked()
+                    if id_key == "mem_id":
+                        set_memory_faiss_ids(updates)
+                    else:
+                        set_chunk_faiss_ids(updates)
+                    break
         print(f"[MemoryIndexer] rebuilt {label}: {len(ids)} vectors")
         return {"success": True, "message": f"{label} FAISS index rebuilt",
                 "count": len(ids)}
 
     async def rebuild(self) -> dict:
         return await self._rebuild(
-            get_indexable_memories(), "mem_id", "content",
+            get_indexable_memories, "mem_id", "content",
             max_memory_faiss_id, get_all_memory_faiss_ids,
             self.vector, "memories")
 
     async def rebuild_chunks(self) -> dict:
         return await self._rebuild(
-            get_indexable_chunks(), "chunk_id", "content",
+            get_indexable_chunks, "chunk_id", "content",
             max_chunk_faiss_id, get_all_chunk_faiss_ids,
             self.chunk_vector, "chunks")
 

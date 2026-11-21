@@ -912,10 +912,18 @@ class ThinkPipeline:
                             "и передай полный объединённый текст. Сохрани важные детали обеих версий и учти поправки. "
                             f"Текст существующей записи в JSON: {json.dumps(existing_diary_text, ensure_ascii=False)}."
                         )
+                    elif status == "review_uncertain":
+                        feedback = (
+                            f"Черновик пока не сохранён. Сравни его с записью ID {executed['entry_id']}. "
+                            "Если смысл уже есть, пропусти. Если это существенное дополнение к этой записи, "
+                            "вызови update_diary с этим ID и полным объединённым текстом. "
+                            "Если это самостоятельная запись, уточни в черновике, чем событие или мысль отличаются. "
+                            f"Текст возможного совпадения в JSON: {json.dumps(existing_diary_text, ensure_ascii=False)}."
+                        )
                     elif status in ("duplicate", "unchanged"):
                         feedback = f"{executed['message']} Пропусти этот черновик."
-                    elif status == "limit_reached":
-                        feedback = executed["error"]
+                        if executed.get("daily_file_synced") is False:
+                            feedback += " Не удалось обновить файл отчёта."
                     else:
                         feedback = f"Не удалось записать дневник: {executed.get('error', status)}."
                     messages.append({"role": "system", "content": feedback + " Не упоминай дневник в ответе."})

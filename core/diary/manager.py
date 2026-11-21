@@ -20,7 +20,6 @@ DIARY_CATEGORY_LABELS = {
 }
 DIARY_CATEGORIES = tuple(DIARY_CATEGORY_LABELS)
 MAX_ENTRY_LENGTH = 1200
-DAILY_CATEGORY_LIMIT = 3
 DAILY_REPORTS_DIR = project_path(settings.DAILY_REPORTS)
 REPORT_DATE_FORMAT = "%d.%m.%Y"
 _ENTRY_HEADING = re.compile(r"^## (?:Entry|Запись) #\d+\b", re.MULTILINE)
@@ -239,22 +238,13 @@ def _review_stale() -> dict:
     return {"status": "review_stale", "error": "Дневник изменился во время смысловой проверки."}
 
 
-def _category_limit(conn, day: date, category: str) -> dict | None:
-    entries = _entries(conn, category, day, include_archived=True)
-    if len(entries) < DAILY_CATEGORY_LIMIT:
-        return None
-    return {
-        "status": "limit_reached",
-        "error": f"Daily limit of {DAILY_CATEGORY_LIMIT} entries in {category} reached.",
-    }
-
-
 def _replace_entry(conn, entry, text: str, category: str) -> dict:
-    if text != entry["content_md"] or category != entry["category"]:
-        conn.execute(
-            f"UPDATE {DIARY_TABLE} SET content_md=?, category=?, updated_at=datetime('now') WHERE id=?",
-            (text, category, entry["id"]),
-        )
+    if text == entry["content_md"] and category == entry["category"]:
+        return _result(entry, "unchanged", message="Текст записи уже сохранён.")
+    conn.execute(
+        f"UPDATE {DIARY_TABLE} SET content_md=?, category=?, updated_at=datetime('now') WHERE id=?",
+        (text, category, entry["id"]),
+    )
     return _result(entry, "updated", category=category)
 
 
@@ -282,6 +272,8 @@ def add_diary_entry(
                 return _review_stale()
             if status == "duplicate":
                 return _result(current, status, message="Смысл черновика уже есть в дневнике.")
+            if status == "review_uncertain":
+                return _result(current, status, existing_entry=current["content_md"])
             if status == "update_suggested":
                 return _result(current, status, update_entry_id=current["id"],
                                existing_entry=current["content_md"])
@@ -290,8 +282,6 @@ def add_diary_entry(
         else:
             if candidates is not None and candidates != _recent_candidates(conn, category, None):
                 return _review_stale()
-            if limit := _category_limit(conn, day, category):
-                return limit
 
             number = conn.execute(
                 f"SELECT COALESCE(MAX(entry_number), 0) + 1 FROM {DIARY_TABLE}"
@@ -333,18 +323,13 @@ def update_diary_entry(
             return _duplicate_result(duplicate)
         target_category = entry["category"] if category is None else normalize_category(category)
         if match is not None:
-            status, candidate = match
-            if status == "unchanged":
-                return _result(entry, status, message="Смысл записи не изменился.")
+            _, candidate = match
             current = _current_candidate(conn, target_category, candidate)
             if current is None:
                 return _review_stale()
             return _result(current, "duplicate", message="Смысл черновика уже есть в другой записи дневника.")
         if candidates is not None and candidates != _recent_candidates(conn, target_category, entry_id):
             return _review_stale()
-        if target_category != entry["category"]:
-            if limit := _category_limit(conn, day, target_category):
-                return limit
         result = _replace_entry(conn, entry, text, target_category)
     return {**result, "daily_file_synced": _sync_to_daily_file(day)}
 

@@ -742,9 +742,7 @@ class ToolExecutor:
             return {"type": "update_diary", "status": "ignored"}
 
         from core.diary.decision import decision_configured, review_draft
-        from core.diary.manager import (
-            diary_review_context, normalize_category, update_diary_entry, validate_entry_text,
-        )
+        from core.diary.manager import diary_review_context, update_diary_entry, validate_entry_text
 
         try:
             numeric_id = int(entry_id)
@@ -764,9 +762,7 @@ class ToolExecutor:
             context = await asyncio.to_thread(diary_review_context, entry, category, entry_id=numeric_id)
             if context is not None:
                 target, candidates = context
-                category_changed = category is not None and normalize_category(category) != target["category"]
-                review = await review_draft(entry, candidates, target=target,
-                                            category_changed=category_changed, diagnostics=decision_trace)
+                review = await review_draft(entry, candidates, target=target, diagnostics=decision_trace)
         result = await asyncio.to_thread(
             update_diary_entry, numeric_id, entry, category, expected=target,
             match=review.match if review else None, candidates=candidates if review else None,

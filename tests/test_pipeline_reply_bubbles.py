@@ -216,24 +216,29 @@ async def test_invalid_tool_args_prompt_correction_without_delivering_draft(
                and "JSON-объектом" in m["content"] for m in fake.calls[1]["messages"])
 
 
-async def test_diary_match_suggests_updating_existing_id(make_pipeline, monkeypatch):
+@pytest.mark.parametrize("status", ["update_suggested", "review_uncertain"])
+async def test_diary_match_suggests_updating_existing_id(make_pipeline, monkeypatch, status):
     pipeline, fake = make_pipeline([
         _tool("write_diary", '{"entry":"alpha draft"}', "call-1"),
         _reply("alpha reply"),
     ])
-    execute = AsyncMock(return_value={
-        "type": "write_diary", "status": "update_suggested", "entry_id": 3,
-        "update_entry_id": 3, "existing_entry": "alpha original",
-        "decision_review": {"status": "reviewed", "accepted_match": {"kind": "update_suggested", "entry_id": 3}},
-    })
+    outcome = {
+        "type": "write_diary", "status": status, "entry_id": 3,
+        "existing_entry": "alpha original", "decision_review": {"status": "reviewed"},
+    }
+    if status == "update_suggested":
+        outcome["update_entry_id"] = 3
+    execute = AsyncMock(return_value=outcome)
     monkeypatch.setattr(pipeline, "_execute_single_action", execute)
 
     result = await pipeline.process_message("hi", [], [], sandbox=True)
 
     assert result["reply_texts"] == ["alpha reply"]
-    assert any("update_diary с ID 3" in message["content"]
-               and "полный объединённый текст" in message["content"]
-               and '"alpha original"' in message["content"] for message in fake.calls[1]["messages"])
+    feedback = next(m["content"] for m in fake.calls[1]["messages"] if '"alpha original"' in m["content"])
+    assert "update_diary" in feedback and "ID 3" in feedback
+    assert "объединённ" in feedback
+    if status == "review_uncertain":
+        assert "Черновик пока не сохранён" in feedback
     assert "existing_entry" not in result["actions"][0]
     assert result["actions"][0]["tool_call_id"] == "call-1"
     assert result["actions"][0]["decision_review"]["status"] == "reviewed"

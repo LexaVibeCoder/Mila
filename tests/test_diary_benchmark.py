@@ -24,9 +24,12 @@ _CASES = [
     ("Мне по-прежнему страшно у доски, но сегодня помогло заранее написать план.", "update_suggested", 1),
     ("На звёзды теперь хочется смотреть вместе с кем-нибудь, одной стало скучно.", "update_suggested", 4),
     ("После неудачи бумажного моста я нашла ошибку: опоры стояли слишком далеко.", "update_suggested", 3),
+    ("Я расстроилась, когда эксперимент с бумажным мостом не удался. "
+     "Позже заметила, что опоры стояли слишком далеко.", "update_suggested", 3),
     ("Я нервничаю, когда впервые иду по незнакомому маршруту.", "new", None),
     ("Теперь мне проще сосредоточиться на дыхании во время тренировки.", "new", None),
     ("Меня радует, когда после ремонта часы снова начинают тикать.", "new", None),
+    ("На выставке я впервые увидела мост из бумаги, который выдерживал стопку книг.", "new", None),
 ]
 
 
@@ -60,7 +63,8 @@ async def test_openrouter_diary_benchmark(monkeypatch):
     predictions = []
     correct_decisions = 0
     for draft, expected, expected_id in _CASES:
-        review = await review_draft(draft, _REFLECTIONS)
+        trace = {}
+        review = await review_draft(draft, _REFLECTIONS, diagnostics=trace)
         if review is None:
             pytest.fail("OpenRouter decision response unavailable or invalid", pytrace=False)
         actual, candidate = review.match or ("new", None)
@@ -69,6 +73,14 @@ async def test_openrouter_diary_benchmark(monkeypatch):
         actual_id = candidate["id"] if candidate else None
         predictions.append(actual)
         correct_decisions += (actual, actual_id) == (expected, expected_id)
+        print(f"expected={(expected, expected_id)} actual={(actual, actual_id)} "
+              f"relation={trace.get('relation')} change={trace.get('change')}")
+
+    target = _REFLECTIONS[1]
+    edit = target["content_md"] + " Даже тихий вентилятор меня отвлекает."
+    edit_review = await review_draft(edit, [row for row in _REFLECTIONS if row != target], target=target)
+    assert edit_review is not None, "OpenRouter decision response unavailable or invalid"
+    assert edit_review.match is None, "Explicit edit was treated as a duplicate of another entry"
 
     for name, results in (("decision", predictions), ("embeddings", baseline)):
         missed_duplicates = sum(
@@ -79,5 +91,8 @@ async def test_openrouter_diary_benchmark(monkeypatch):
             expected == "new" and actual != "new"
             for (_, expected, _), actual in zip(_CASES, results)
         )
-        print(f"{name}: missed_duplicates={missed_duplicates}/3, new_entries_blocked={new_entries_blocked}/3")
+        duplicate_count = sum(expected == "duplicate" for _, expected, _ in _CASES)
+        new_count = sum(expected == "new" for _, expected, _ in _CASES)
+        print(f"{name}: missed_duplicates={missed_duplicates}/{duplicate_count}, "
+              f"new_entries_blocked={new_entries_blocked}/{new_count}")
     print(f"decision: correct_label_and_id={correct_decisions}/{len(_CASES)}")

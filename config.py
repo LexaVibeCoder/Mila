@@ -1,9 +1,20 @@
 import os
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
 load_dotenv()
+
+PROJECT_DIR = Path(__file__).resolve().parent
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_DECISION_API_BASE = "https://openrouter.ai/api/alpha"
+
+
+def project_path(path: str) -> str:
+    """Resolve a configured path relative to the project directory."""
+    return str(PROJECT_DIR / path)
 
 
 def normalize_api_base(url: str) -> str:
@@ -48,6 +59,11 @@ class Settings(BaseSettings):
     MAIN_LLM_MAX_TOKENS: int = 2048
     MAIN_LLM_TEMPERATURE: float = 0.7
 
+    # Optional model for decision requests.
+    DECISION_API_BASE: str = OPENROUTER_DECISION_API_BASE
+    DECISION_API_KEY: str = ""
+    DECISION_MODEL: str = ""
+
     # Embeddings
     EMBED_API_BASE: str
     EMBED_API_KEY: str
@@ -89,6 +105,11 @@ class Settings(BaseSettings):
     SIMILARITY_THRESHOLD_IMAGE: float = 0.85
     MAIN_LLM_THOUGHT_SENTENCES: int = 3
     LOG_DIR: str = "logs"
+
+    @field_validator("LOG_DIR")
+    @classmethod
+    def resolve_log_dir(cls, path: str) -> str:
+        return project_path(path)
 
     # Context buffer
     CONTEXT_DB_PATH: str = "data/context_buffer.db"

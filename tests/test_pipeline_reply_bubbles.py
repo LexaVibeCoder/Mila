@@ -202,7 +202,7 @@ async def test_invalid_tool_args_prompt_correction_without_delivering_draft(
         _tool("write_diary", '{"text":"alpha entry"}', "call-2"),
         _reply("alpha reply"),
     ])
-    execute = AsyncMock(return_value={"type": "write_diary", "status": "written"})
+    execute = AsyncMock(return_value={"type": "write_diary", "status": "written", "entry_id": 1})
     monkeypatch.setattr(pipeline, "_execute_single_action", execute)
 
     result = await pipeline.process_message("hi", [], [], sandbox=True)
@@ -213,6 +213,26 @@ async def test_invalid_tool_args_prompt_correction_without_delivering_draft(
     assert result["reply_texts"] == ["alpha reply"]
     assert any("write_diary не выполнен" in m["content"]
                and "JSON-объектом" in m["content"] for m in fake.calls[1]["messages"])
+
+
+async def test_diary_match_suggests_updating_existing_id(make_pipeline, monkeypatch):
+    pipeline, fake = make_pipeline([
+        _tool("write_diary", '{"entry":"alpha draft"}', "call-1"),
+        _reply("alpha reply"),
+    ])
+    execute = AsyncMock(return_value={
+        "type": "write_diary", "status": "update_suggested", "entry_id": 3,
+        "update_entry_id": 3, "existing_entry": "alpha original",
+    })
+    monkeypatch.setattr(pipeline, "_execute_single_action", execute)
+
+    result = await pipeline.process_message("hi", [], [], sandbox=True)
+
+    assert result["reply_texts"] == ["alpha reply"]
+    assert any("update_diary с ID 3" in message["content"]
+               and "полный объединённый текст" in message["content"]
+               and '"alpha original"' in message["content"] for message in fake.calls[1]["messages"])
+    assert "existing_entry" not in result["actions"][0]
 
 
 async def test_duplicate_enter_dialog_switches_once_per_turn(make_pipeline, monkeypatch):

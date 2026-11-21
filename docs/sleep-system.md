@@ -151,24 +151,19 @@ id. Так падение между staging и insert оставляет без
 ### Commit (`commit_all`)
 
 1. `state = committing`;
-2. дневник сохраняется в `logs/diary_logs/`; если бэкап не удался —
-   `commit_all` возвращает `False`, staging **не** помечается applied,
-   `execute_sleep` уходит в rollback;
-3. `snapshot_diary_entries()` — строки дневника читаются **до** очистки и сразу
-   публикуются staging-записью `target_table='diary_entries'` (payload `rows`).
-   Снимок в памяти умирает вместе с процессом, staging-запись — нет: крах между
-   очисткой и пометкой больше не оставляет дневник только в лог-файле (M2);
-4. `clear_diary()` под try/except: ошибка очистки — тоже `False` без пометки
-   applied (иначе записи остались бы, а сон выглядел бы завершённым), снимок
-   возвращается через `restore_diary_entries()`;
-5. все staging-операции (включая запись дневника) помечаются `applied=1` —
-   **последним** шагом: до него recovery видит `applied=0` и откатывает сессию;
-   если пометка упала, снимок дневника восстанавливается в БД
-   (`INSERT OR IGNORE` по `id`) — незавершённый commit не уносит дневник с собой;
-6. удаляется `data/media/quarantine/{session_id}/`;
-7. `gc_staged_operations()` — applied-записи старше 30 дней удаляются;
-8. `state = awake`, presence → `rest`;
-9. в журнал пишется пробуждение с реальной длительностью сна
+2. `snapshot_diary_entries()` читает активные записи и сохраняет их в staging
+   (`target_table='diary_entries'`, payload `rows`) для восстановления после сбоя;
+3. `clear_diary(diary_snapshot)` сохраняет отдельную копию снимка в
+   `LOG_DIR/diary_logs/`, сравнивает его с текущими строками и архивирует их
+   в SQLite. Если бэкап не удался или строки изменились, `commit_all`
+   возвращает `False` и `execute_sleep` запускает rollback;
+4. все staging-операции (включая снимок дневника) помечаются `applied=1`.
+   Если архивирование или пометка завершились ошибкой, снимок восстанавливается
+   через `restore_diary_entries()`. После падения процесса то же делает recovery;
+5. удаляется `data/media/quarantine/{session_id}/`;
+6. `gc_staged_operations()` — applied-записи старше 30 дней удаляются;
+7. `state = awake`, presence → `rest`;
+8. в журнал пишется пробуждение с реальной длительностью сна
    (`now - started_at`).
 
 Сами данные уже лежат в целевых таблицах; commit фиксирует их и убирает

@@ -14,13 +14,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 from core.diary.manager import (
     load_daily_report,
     list_daily_reports,
-    get_diary_markdown,
-    get_diary_entry_count,
+    count_report_entries,
+    daily_report_path,
+    parse_report_date,
+    today_report_date,
 )
 
 router = APIRouter(tags=["diary"])
@@ -48,8 +49,7 @@ async def get_all_diaries():
     result = []
     for date_str in dates:
         content = load_daily_report(date_str)
-        # Count entries in the markdown (lines starting with "## Запись #")
-        entry_count = content.count("## Запись #") if content else 0
+        entry_count = count_report_entries(content)
         # Get first 200 chars as preview
         preview_lines = content.split("\n") if content else []
         preview = ""
@@ -73,18 +73,19 @@ async def get_all_diaries():
 @router.get("/api/diary/today")
 async def get_today_diary():
     """Get today's diary content."""
-    content = load_daily_report()  # No date = today
+    date_str = today_report_date()
+    content = load_daily_report(date_str)
     if not content:
         return {
-            "date": "today",
+            "date": date_str,
             "content": "",
             "entry_count": 0,
             "message": "За сегодня записей в дневнике нет"
         }
     
-    entry_count = content.count("## Запись #")
+    entry_count = count_report_entries(content)
     return {
-        "date": "today",
+        "date": date_str,
         "content": content,
         "entry_count": entry_count
     }
@@ -97,9 +98,9 @@ async def get_diary_by_date(date: str):
     
     Date format: DD.MM.YYYY (e.g., 17.07.2026)
     """
-    # Validate date format
-    import re
-    if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", date):
+    try:
+        parse_report_date(date)
+    except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"Неверный формат даты: '{date}'. Используйте ДД.ММ.ГГГГ (например, 17.07.2026)"
@@ -112,10 +113,9 @@ async def get_diary_by_date(date: str):
             detail=f"Дневник за {date} не найден"
         )
     
-    from core.diary.manager import DAILY_REPORTS_DIR
-    filepath = os.path.join(DAILY_REPORTS_DIR, f"{date}.md")
+    filepath = daily_report_path(date)
     file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
-    entry_count = content.count("## Запись #")
+    entry_count = count_report_entries(content)
     
     return {
         "date": date,

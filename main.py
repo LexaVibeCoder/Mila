@@ -2,8 +2,9 @@ import asyncio
 import logging
 import os
 import signal
-from config import settings
+from config import project_path, settings
 from core.db import init_db
+from core.diary.manager import init_diary
 from core.bot import MilaUserbot
 
 
@@ -22,10 +23,11 @@ async def main():
     _setup_logging()
     os.makedirs(settings.PHOTOS_DIR, exist_ok=True)
     os.makedirs(getattr(settings, "MEDIA_DIR", "data/media"), exist_ok=True)
-    os.makedirs(settings.DAILY_REPORTS, exist_ok=True)
+    os.makedirs(project_path(settings.DAILY_REPORTS), exist_ok=True)
     os.makedirs(settings.LOG_DIR, exist_ok=True)
 
     init_db()
+    init_diary()
     bot = MilaUserbot()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

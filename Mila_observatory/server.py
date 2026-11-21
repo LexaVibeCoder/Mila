@@ -25,6 +25,7 @@ from Mila_observatory.auth import is_auth_enabled, require_auth, resolve_host
 from Mila_observatory.runtime import RUNTIME_CONFIG_PATH
 from config import settings
 from core.db import init_db
+from core.diary.manager import init_diary
 from Mila_observatory.api.dashboard import router as dashboard_router
 from Mila_observatory.api.model import router as model_router
 from Mila_observatory.api.memory import router as memory_router
@@ -51,6 +52,7 @@ async def lifespan(app: FastAPI):
     # shared schema (and the faiss_id indexes/migrations) exists.
     try:
         init_db()
+        init_diary()
     except Exception as e:
         print(f"[Observatory] DB init failed: {e}")
     yield

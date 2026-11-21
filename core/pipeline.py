@@ -665,14 +665,16 @@ class ThinkPipeline:
                         action_kwargs["sandbox"] = True
                         action_kwargs["sandbox_context"] = sandbox_context
                     executed = await self._execute_single_action(action, **action_kwargs)
-                if executed.get("status") != "error" and not sandbox:
+                atype = executed.get("type")
+                status = executed.get("status")
+                diary_action = atype in ("write_diary", "update_diary")
+                existing_diary_text = executed.pop("existing_entry", None) if diary_action else None
+                action_succeeded = status in ("written", "updated") if diary_action else status != "error"
+                if action_succeeded and not sandbox:
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
                 if turn is not None and executed.get("status") == "switched" and executed.get("presence"):
                     turn.set_presence(executed["presence"])
                 yield {"kind": "action", "action": executed}
-
-                atype = executed.get("type")
-                status = executed.get("status")
 
                 if atype in ("enter_dialog", "send_message") and status == "error":
                     messages.append({"role": "system", "content": (
@@ -766,16 +768,29 @@ class ThinkPipeline:
                         print("  [Search error → re-calling anyway]")
                     continue
 
-                if atype in ("write_diary", "update_diary"):
+                if diary_action:
                     if status in ("written", "updated"):
-                        messages.append({"role": "system", "content": (
-                            f"Diary {atype} done ({status}). Answer now."
-                        )})
+                        feedback = f"Запись дневника сохранена (ID: {executed['entry_id']})."
+                        if executed.get("daily_file_synced") is False:
+                            feedback += " Не удалось обновить файл отчёта. Повтор записи сохранит тот же ID."
+                        if executed.get("grammar_issue"):
+                            feedback += (
+                                " Проверь грамматику записи и при явной ошибке исправь её "
+                                f"через update_diary с ID {executed['entry_id']}."
+                            )
+                    elif status == "update_suggested":
+                        feedback = (
+                            f"Черновик дополняет запись дневника. Вызови update_diary с ID {executed['update_entry_id']} "
+                            "и передай полный объединённый текст. Сохрани важные детали обеих версий и учти поправки. "
+                            f"Текст существующей записи в JSON: {json.dumps(existing_diary_text, ensure_ascii=False)}."
+                        )
+                    elif status in ("duplicate", "unchanged"):
+                        feedback = f"{executed['message']} Пропусти этот черновик."
+                    elif status == "limit_reached":
+                        feedback = executed["error"]
                     else:
-                        messages.append({"role": "system", "content": (
-                            f"Diary {atype} failed ({executed.get('error', status)}). "
-                            f"Answer from context or skip."
-                        )})
+                        feedback = f"Не удалось записать дневник: {executed.get('error', status)}."
+                    messages.append({"role": "system", "content": feedback + " Не упоминай дневник в ответе."})
                     continue
 
                 if atype == "peek_recent_chats":

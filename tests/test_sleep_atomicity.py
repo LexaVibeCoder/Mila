@@ -178,7 +178,7 @@ async def test_backup_failure_leaves_staging_unapplied_and_recovery_rolls_back(
     session = env.begin_sleep()
     await env.stage_summary(session, claimed=12)
     await env.stage_fact(session)
-    monkeypatch.setattr(sm, "save_diary_to_logs", lambda: False)
+    monkeypatch.setattr(diary, "save_diary_to_logs", lambda entries: False)
 
     # S6: a failed backup makes the commit fail.
     assert await sm.commit_all(session) is False
@@ -206,23 +206,23 @@ async def test_commit_backs_up_diary_before_marking_staging_applied(sleep_env, m
     await env.stage_summary(session, claimed=12)
 
     order = []
-    real_save = sm.save_diary_to_logs
+    real_save = diary.save_diary_to_logs
     real_clear = sm.clear_diary
     real_mark = sm.mark_staged_applied
 
-    def save():
+    def save(entries):
         order.append("backup")
-        return real_save()
+        return real_save(entries)
 
-    def clear():
+    def clear(entries):
         order.append("clear")
-        return real_clear()
+        return real_clear(entries)
 
     def mark(ids):
         order.append("mark")
         return real_mark(ids)
 
-    monkeypatch.setattr(sm, "save_diary_to_logs", save)
+    monkeypatch.setattr(diary, "save_diary_to_logs", save)
     monkeypatch.setattr(sm, "clear_diary", clear)
     monkeypatch.setattr(sm, "mark_staged_applied", mark)
 
@@ -248,7 +248,7 @@ async def test_execute_sleep_rolls_back_when_diary_backup_fails(sleep_env, monke
         await env.stage_fact(sid)
 
     env.use_processes(monkeypatch, work, ok=True)
-    monkeypatch.setattr(sm, "save_diary_to_logs", lambda: False)
+    monkeypatch.setattr(diary, "save_diary_to_logs", lambda entries: False)
 
     assert await sm.execute_sleep(session) is False
 
@@ -272,7 +272,7 @@ async def test_commit_failure_inside_execute_sleep_takes_rollback_branch(
 
     env.use_processes(monkeypatch, work, ok=True)
 
-    def broken_clear():
+    def broken_clear(entries):
         raise OSError("simulated clear failure")
 
     monkeypatch.setattr(sm, "clear_diary", broken_clear)
@@ -302,7 +302,7 @@ async def test_clear_failure_is_not_committed_and_retry_does_not_duplicate(
 
     real_clear = sm.clear_diary
 
-    def broken_clear():
+    def broken_clear(entries):
         raise OSError("simulated clear failure")
 
     monkeypatch.setattr(sm, "clear_diary", broken_clear)

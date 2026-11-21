@@ -43,6 +43,18 @@ runtime_config.json (значение не null)  →  побеждает  →  
 | `MAIN_LLM_MAX_TOKENS` | `2048` |
 | `MAIN_LLM_TEMPERATURE` | `0.7` |
 
+### Decision-модель
+
+| Поле | Описание |
+|------|----------|
+| `DECISION_API_BASE` | Базовый URL без `/decisions`. По умолчанию `https://openrouter.ai/api/alpha` |
+| `DECISION_API_KEY` | Ключ выбранного API |
+| `DECISION_MODEL` | ID модели из каталога OpenRouter Decisions, например `typesafe/jev-1.14` |
+
+Запросы включаются при заполнении ключа и ID модели. Клиент добавляет
+`/decisions` к базовому URL. Ранее указанный `https://openrouter.ai/api/v1`
+автоматически направляется на Decisions API. Текущий сценарий описан в [дневнике](diary.md).
+
 ### Эмбеддинги
 
 | Поле | По умолчанию |
@@ -75,12 +87,12 @@ runtime_config.json (значение не null)  →  побеждает  →  
 | `PHOTOS_DIR` | `data/photos` | Legacy-каталог |
 | `MEDIA_DIR` | `data/media` | Персистентные фото/войсы для истории |
 | `MAX_MEDIA_MB` | `20` | Лимит скачивания одного файла |
-| `DAILY_REPORTS` | `data/daily reports` | **Пробел в пути — квотировать** |
+| `DAILY_REPORTS` | `data/daily reports` | Относительно корня проекта. Путь с пробелом нужно квотировать |
 | `MAX_CONTEXT_TOKENS` | `10000` | Сидирует `pipeline.max_context_tokens` |
 | `MAX_STM_MESSAGES` | `30` | Лимит `get_context()` по умолчанию |
 | `SIMILARITY_THRESHOLD_IMAGE` | `0.85` | Legacy |
 | `MAIN_LLM_THOUGHT_SENTENCES` | `3` | Legacy |
-| `LOG_DIR` | `logs` | Pipeline- и diary-логи |
+| `LOG_DIR` | `logs` | Pipeline- и diary-логи. Относительно корня проекта |
 | `CONTEXT_DB_PATH` | `data/context_buffer.db` | |
 | `CONTEXT_MAX_TOKENS` | `30000` | Лимит токенов сообщений (без summary) |
 | `CONTEXT_SUMMARIZE_CHUNK_TOKENS` | `5000` | Сколько сжимать за раз |

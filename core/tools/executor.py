@@ -98,11 +98,11 @@ def get_tool_definitions(presence_state: str = "rest",
                 "type": "function",
                 "function": {
                     "name": "update_diary",
-                    "description": "Extend an existing diary entry (ID from the diary block).",
+                    "description": "Replace the text of an existing diary entry with its full revised version.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "entry": {"type": "string", "description": "New text"},
+                            "entry": {"type": "string", "description": "Full revised text, including details to keep"},
                             "entry_id": {"type": "string", "description": "Entry ID, e.g. '2'"},
                             "category": {
                                 "type": "string",
@@ -639,9 +639,9 @@ class ToolExecutor:
         """Diary text may be passed as 'entry' or 'text' — accept both to avoid
         model mistakes between the send_message ('text') and diary ('entry') params."""
         entry = params.get("entry", "")
-        if not entry or not entry.strip():
+        if not isinstance(entry, str) or not entry.strip():
             entry = params.get("text", "")
-        return (entry or "").strip()
+        return entry.strip() if isinstance(entry, str) else ""
 
     async def _handle_write_diary(self, params: Dict) -> Dict:
         entry = self._extract_entry_text(params)
@@ -672,17 +672,30 @@ class ToolExecutor:
             # No session context: never fall through to the real diary.
             return {"type": "write_diary", "status": "ignored"}
 
-        from core.diary.manager import add_diary_entry
-        category = params.get("category", "day_entries")
-        result = add_diary_entry(entry.strip(), category=category)
-        print(f"[ToolExecutor] Diary entry #{result['entry_number']} (ID: {result['entry_id']}, {result['category']}) written")
-        return {
-            "type": "write_diary",
-            "entry_number": result["entry_number"],
-            "entry_id": result["entry_id"],
-            "category": result["category"],
-            "status": "written"
-        }
+        from core.diary.decision import decision_configured, review_draft
+        from core.diary.manager import (
+            add_diary_entry, diary_review_context, normalize_category, validate_entry_text,
+        )
+
+        category = normalize_category(params.get("category", "day_entries"))
+        if error := validate_entry_text(entry):
+            return {"type": "write_diary", "status": "error", "error": error}
+
+        candidates = None
+        review = None
+        if decision_configured():
+            context = await asyncio.to_thread(diary_review_context, entry, category)
+            if context is not None:
+                _, candidates = context
+                review = await review_draft(entry, candidates)
+
+        result = await asyncio.to_thread(
+            add_diary_entry, entry, category,
+            match=review.match if review else None, candidates=candidates if review else None,
+        )
+        if review and review.grammar_issue and result["status"] in ("written", "updated"):
+            result["grammar_issue"] = True
+        return {"type": "write_diary", **result}
 
     async def _handle_update_diary(self, params: Dict) -> Dict:
         entry = self._extract_entry_text(params)
@@ -725,22 +738,37 @@ class ToolExecutor:
         if self.sandbox:
             return {"type": "update_diary", "status": "ignored"}
 
-        from core.diary.manager import update_diary_entry
+        from core.diary.decision import decision_configured, review_draft
+        from core.diary.manager import (
+            diary_review_context, normalize_category, update_diary_entry, validate_entry_text,
+        )
+
+        try:
+            numeric_id = int(entry_id)
+        except (TypeError, ValueError):
+            numeric_id = 0
+        if not 0 < numeric_id <= 2**63 - 1:
+            return {"type": "update_diary", "status": "error", "error": "Invalid diary entry ID."}
+        if error := validate_entry_text(entry):
+            return {"type": "update_diary", "status": "error", "error": error}
+
         category = params.get("category")
-        updated = update_diary_entry(int(entry_id), entry.strip(), category=category)
-        if not updated:
-            return {
-                "type": "update_diary",
-                "entry_id": entry_id,
-                "status": "not_found",
-                "error": f"Diary entry ID {entry_id} not found"
-            }
-        print(f"[ToolExecutor] Diary entry ID {entry_id} updated")
-        return {
-            "type": "update_diary",
-            "entry_id": entry_id,
-            "status": "updated"
-        }
+        target = None
+        candidates = None
+        review = None
+        if decision_configured():
+            context = await asyncio.to_thread(diary_review_context, entry, category, entry_id=numeric_id)
+            if context is not None:
+                target, candidates = context
+                category_changed = category is not None and normalize_category(category) != target["category"]
+                review = await review_draft(entry, candidates, target=target, category_changed=category_changed)
+        result = await asyncio.to_thread(
+            update_diary_entry, numeric_id, entry, category, expected=target,
+            match=review.match if review else None, candidates=candidates if review else None,
+        )
+        if review and review.grammar_issue and result["status"] == "updated":
+            result["grammar_issue"] = True
+        return {"type": "update_diary", **result}
 
     # ------------------------------------------------------------------
     # Presence tools — Mila switches her own state.

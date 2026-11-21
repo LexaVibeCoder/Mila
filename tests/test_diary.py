@@ -1,0 +1,330 @@
+"""Local-day exports, diary limits, decision model requests and safe clearing."""
+
+import asyncio
+import json
+import sqlite3
+from datetime import date, datetime
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from config import settings
+from core.context import buffer
+from core.diary import decision, manager as diary
+from core.tools.executor import ToolExecutor
+from Mila_observatory.api import diary as api
+
+
+@pytest.fixture(autouse=True)
+def diary_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(buffer, "CONTEXT_DB_PATH", str(tmp_path / "context.db"))
+    monkeypatch.setattr(diary, "DAILY_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(settings, "LOCAL_TIMEZONE", "Asia/Yekaterinburg")
+    monkeypatch.setattr(settings, "DECISION_API_KEY", "")
+    monkeypatch.setattr(settings, "DECISION_MODEL", "")
+
+
+def freeze(monkeypatch, timestamp):
+    instant = datetime.fromisoformat(timestamp)
+    monkeypatch.setattr(buffer, "now_local", lambda: instant)
+
+
+def test_exact_duplicates_and_update(monkeypatch):
+    first = diary.add_diary_entry("alpha")
+    second = diary.add_diary_entry("beta")
+    repeat = diary.add_diary_entry(" alpha ", "reflection_entries")
+    assert repeat["status"] == "duplicate"
+    assert repeat["entry_id"] == first["entry_id"]
+    assert "update_entry_id" not in repeat
+
+    rejected = diary.update_diary_entry(second["entry_id"], "alpha")
+    assert rejected["status"] == "duplicate"
+    assert rejected["entry_id"] == first["entry_id"]
+    assert diary.update_diary_entry(second["entry_id"], "beta")["status"] == "updated"
+    assert diary.update_diary_entry(1234, "gamma")["status"] == "not_found"
+    assert diary.get_diary_entry_count() == 2
+
+
+async def test_concurrent_write_allocates_once():
+    left, right = await asyncio.gather(
+        asyncio.to_thread(diary.add_diary_entry, "alpha"),
+        asyncio.to_thread(diary.add_diary_entry, "alpha"),
+    )
+    assert {left["status"], right["status"]} == {"written", "duplicate"}
+    assert left["entry_id"] == right["entry_id"]
+
+
+async def test_local_midnight_reports_and_context(monkeypatch):
+    freeze(monkeypatch, "2025-12-31T23:45:00+05:00")
+    old = diary.add_diary_entry("alpha yesterday")
+    freeze(monkeypatch, "2026-01-01T00:30:00+05:00")
+    diary.add_diary_entry("beta reflection", "reflection_entries")
+    freeze(monkeypatch, "2026-01-01T00:31:00+05:00")
+    diary.add_diary_entry("gamma event")
+
+    rows = diary.get_all_diary_entries(local_day=date(2026, 1, 1))
+    assert [row["created_at"] for row in rows] == ["2025-12-31 19:30:00", "2025-12-31 19:31:00"]
+    context = diary.get_today_diary_context()
+    assert "alpha" not in context
+    assert "beta" in context and "gamma" in context
+
+    assert diary.update_diary_entry(old["entry_id"], "delta yesterday")["daily_file_synced"]
+    assert "delta yesterday" in diary.load_daily_report("31.12.2025")
+    report = await api.get_today_diary()
+    assert report["date"] == "01.01.2026"
+    assert report["entry_count"] == 2
+    content = report["content"]
+    assert "delta" not in content
+    assert content.index("reflection_entries — 2026-01-01 00:30") < content.index("day_entries — 2026-01-01 00:31")
+    assert [row["date"] for row in (await api.get_all_diaries())["reports"]] == ["01.01.2026", "31.12.2025"]
+    Path(diary.DAILY_REPORTS_DIR, "31.02.2026.md").touch()
+    assert "31.02.2026" not in diary.list_daily_reports()
+    with pytest.raises(HTTPException) as error:
+        await api.get_diary_by_date("31.02.2026")
+    assert error.value.status_code == 400
+
+
+def test_dst_day_bounds(monkeypatch):
+    monkeypatch.setattr(settings, "LOCAL_TIMEZONE", "Europe/Berlin")
+    assert diary._utc_day_bounds(date(2026, 3, 29)) == ("2026-03-28 23:00:00", "2026-03-29 22:00:00")
+
+
+def test_entry_and_category_limits(monkeypatch):
+    freeze(monkeypatch, "2026-04-01T12:00:00+05:00")
+    reflections = diary.add_diary_entry("reflection", "reflection_entries")
+    valid = diary.add_diary_entry("x" * diary.MAX_ENTRY_LENGTH)
+    diary.add_diary_entry("alpha")
+    diary.add_diary_entry("beta")
+    result = diary.add_diary_entry("gamma")
+    assert result["status"] == "limit_reached"
+    assert "update_entry_id" not in result
+    assert diary.update_diary_entry(reflections["entry_id"], "updated", "day_entries")["status"] == "limit_reached"
+    too_long = "я" * (diary.MAX_ENTRY_LENGTH + 1)
+    assert diary.add_diary_entry(too_long)["status"] == "error"
+    assert diary.update_diary_entry(valid["entry_id"], too_long)["status"] == "error"
+    freeze(monkeypatch, "2026-04-02T00:30:00+05:00")
+    assert diary.add_diary_entry("gamma")["status"] == "written"
+
+
+def test_export_failure_reports_commit_and_retry_repairs_file(monkeypatch):
+    original = diary._atomic_write
+
+    def fail(path, markdown):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(diary, "_atomic_write", fail)
+    first = diary.add_diary_entry("alpha")
+    assert first["status"] == "written"
+    assert not first["daily_file_synced"]
+    assert diary.get_diary_entry_count() == 1
+    monkeypatch.setattr(diary, "_atomic_write", original)
+    retry = diary.add_diary_entry("alpha")
+    assert retry["daily_file_synced"] and retry["entry_id"] == first["entry_id"]
+    assert "alpha" in diary.load_daily_report()
+
+
+def test_distinct_backups_and_clear_keeps_full_daily_report(monkeypatch, tmp_path):
+    freeze(monkeypatch, "2026-04-01T12:00:00+05:00")
+    diary.add_diary_entry("alpha")
+    assert diary.save_diary_to_logs()
+    diary.clear_diary()
+    assert diary.get_diary_entry_count() == 0
+    backups = list((tmp_path / "logs" / "diary_logs").glob("diary_20260401_*.md"))
+    assert len(backups) == 2
+    assert all("alpha" in path.read_text() for path in backups)
+    diary.add_diary_entry("beta")
+    assert diary.count_report_entries(diary.load_daily_report()) == 2
+
+
+def test_clear_refuses_failed_backup_or_changed_snapshot(monkeypatch):
+    diary.add_diary_entry("alpha")
+    old_snapshot = diary.snapshot_diary_entries()
+    diary.add_diary_entry("beta")
+    with pytest.raises(RuntimeError, match="changed"):
+        diary.clear_diary(old_snapshot)
+    with monkeypatch.context() as patch:
+        patch.setattr(diary, "save_diary_to_logs", lambda entries: False)
+        with pytest.raises(OSError, match="backup failed"):
+            diary.clear_diary()
+    assert diary.get_diary_entry_count() == 2
+
+
+def test_legacy_schema_migrates_at_initialization():
+    with sqlite3.connect(buffer.CONTEXT_DB_PATH) as conn:
+        conn.executescript("""
+            CREATE TABLE diary_entries (
+                id INTEGER PRIMARY KEY, entry_number INTEGER, content_md TEXT, created_at TEXT
+            );
+            INSERT INTO diary_entries VALUES (1, 1, 'alpha', '2025-05-04 08:00:00');
+        """)
+    diary.init_diary()
+    diary.init_diary()
+    entry, = diary.get_all_diary_entries()
+    assert entry["category"] == "day_entries"
+    assert entry["updated_at"] == entry["created_at"]
+    assert diary.update_diary_entry(entry["id"], "beta")["status"] == "updated"
+
+
+def test_backup_path_uses_project_root(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "LOG_DIR", "test-logs")
+    # Point the project root to a temp directory to check path resolution safely.
+    monkeypatch.setattr("config.PROJECT_DIR", tmp_path / "project")
+    diary.add_diary_entry("alpha")
+    assert diary.save_diary_to_logs()
+    assert len(list((tmp_path / "project" / "test-logs" / "diary_logs").glob("*.md"))) == 1
+    assert not (tmp_path / "test-logs").exists()
+
+
+@pytest.mark.parametrize(("model_decision", "expected_status"), [
+    ("duplicate", "duplicate"), ("update", "update_suggested"),
+    ("replace", "updated"), ("uncertain-replace", "update_suggested"),
+    ("new", "written"), ("low-confidence", "written"),
+    ("invalid-id", "written"), ("failed-request", "written"),
+])
+@pytest.mark.parametrize(("api_base", "expected_url"), [
+    ("", "https://openrouter.ai/api/alpha/decisions"),
+    ("https://openrouter.ai/api/v1/", "https://openrouter.ai/api/alpha/decisions"),
+    ("https://provider.example/api/alpha/ ", "https://provider.example/api/alpha/decisions"),
+])
+@pytest.mark.parametrize("category", diary.DIARY_CATEGORIES)
+async def test_executor_decision_request(monkeypatch, model_decision, expected_status, api_base, expected_url, category):
+    existing = diary.add_diary_entry("alpha entry", category)
+    other_category = next(value for value in diary.DIARY_CATEGORIES if value != category)
+    diary.add_diary_entry("gamma entry", other_category)
+    entry_id = existing["entry_id"]
+    monkeypatch.setattr(settings, "DECISION_API_BASE", api_base)
+    monkeypatch.setattr(settings, "DECISION_API_KEY", "synthetic-key")
+    monkeypatch.setattr(settings, "DECISION_MODEL", "provider/model")
+    observed = []
+
+    def handler(request):
+        assert str(request.url) == expected_url
+        assert request.headers["Authorization"] == "Bearer synthetic-key"
+        body = json.loads(request.content)
+        assert body["model"] == "provider/model"
+        assert body["questions"]["relation"]["type"] == "choice"
+        assert set(body["questions"]["relation"]["criteria"]) == {
+            "new", f"duplicate_{entry_id}", f"update_{entry_id}", f"replace_{entry_id}",
+        }
+        assert body["questions"]["grammar"]["type"] == "noul"
+        observed.append(body["state"])
+        if model_decision == "failed-request":
+            return httpx.Response(503, text="unavailable")
+        choices = {
+            "new": "new", "invalid-id": "duplicate_999", "low-confidence": f"duplicate_{entry_id}",
+            "uncertain-replace": f"replace_{entry_id}",
+        }
+        choice = choices.get(model_decision, f"{model_decision}_{entry_id}")
+        probability = {"low-confidence": 0.5, "uncertain-replace": 0.75}.get(model_decision, 0.95)
+        return httpx.Response(200, json={"answers": {
+            "relation": {"type": "choice", "choice": choice, "probabilities": {choice: probability}},
+            "grammar": {"type": "noul", "noul": 0.95},
+        }})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(decision.httpx, "AsyncClient",
+                        lambda: original(transport=httpx.MockTransport(handler)))
+    executor = ToolExecutor(None, None, "user-1", "chat-1")
+    repeat = await executor.execute_action({
+        "action_type": "write_diary", "params": {"entry": "alpha entry", "category": category},
+    })
+    assert repeat["status"] == "duplicate"
+    assert not observed
+    result = await executor.execute_action({
+        "action_type": "write_diary", "params": {"entry": "beta draft", "category": category},
+    })
+    assert result["status"] == expected_status
+    assert observed == [{"draft": "beta draft", "candidates": [{"id": entry_id, "content_md": "alpha entry"}]}]
+    rows = diary.get_all_diary_entries(category)
+    if expected_status in ("written", "updated"):
+        assert result.get("grammar_issue", False) is (model_decision not in ("invalid-id", "failed-request"))
+        assert result["daily_file_synced"]
+        assert [row["content_md"] for row in rows] == (
+            ["alpha entry", "beta draft"] if expected_status == "written" else ["beta draft"]
+        )
+        if expected_status == "updated":
+            assert result["entry_id"] == entry_id
+    else:
+        assert result["entry_id"] == entry_id
+        assert [row["content_md"] for row in rows] == ["alpha entry"]
+        if expected_status == "update_suggested":
+            assert result["update_entry_id"] == entry_id
+            assert result["existing_entry"] == "alpha entry"
+        else:
+            assert "update_entry_id" not in result
+
+
+@pytest.mark.parametrize("model_decision", ["unchanged", "duplicate", "new", "category-change"])
+async def test_executor_reviews_explicit_update(monkeypatch, model_decision):
+    entry_id = diary.add_diary_entry("alpha entry")["entry_id"]
+    other_id = diary.add_diary_entry("beta entry")["entry_id"]
+    reflection_id = diary.add_diary_entry("gamma entry", "reflection_entries")["entry_id"]
+    monkeypatch.setattr(settings, "DECISION_API_KEY", "synthetic-key")
+    monkeypatch.setattr(settings, "DECISION_MODEL", "provider/model")
+    switched_category = model_decision == "category-change"
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        assert body["state"]["target"]["id"] == entry_id
+        assert body["state"]["target"]["content_md"] == "alpha entry"
+        candidate_id = reflection_id if switched_category else other_id
+        assert [entry["id"] for entry in body["state"]["candidates"]] == [candidate_id]
+        choices = {"new", f"duplicate_{candidate_id}"}
+        if not switched_category:
+            choices.add("unchanged")
+        assert set(body["questions"]["relation"]["criteria"]) == choices
+        choice = {"duplicate": f"duplicate_{other_id}", "category-change": "new"}.get(model_decision, model_decision)
+        return httpx.Response(200, json={"answers": {
+            "relation": {"type": "choice", "choice": choice, "probabilities": {choice: 0.95}},
+        }})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(decision.httpx, "AsyncClient",
+                        lambda: original(transport=httpx.MockTransport(handler)))
+    executor = ToolExecutor(None, None, "user-1", "chat-1")
+    params = {"entry_id": str(entry_id), "entry": "delta draft"}
+    if switched_category:
+        params.update(entry="alpha entry", category="reflection_entries")
+    result = await executor.execute_action({"action_type": "update_diary", "params": params})
+    assert len(calls) == 1
+    target = next(row for row in diary.get_all_diary_entries() if row["id"] == entry_id)
+    if model_decision in ("unchanged", "duplicate"):
+        assert result["status"] == model_decision
+        assert target["content_md"] == "alpha entry"
+    else:
+        assert result["status"] == "updated"
+        assert target["content_md"] == params["entry"]
+        assert target["category"] == params.get("category", "day_entries")
+
+
+def test_semantic_replacement_uses_original_day_and_refuses_stale_target(monkeypatch):
+    freeze(monkeypatch, "2026-04-01T12:00:00+05:00")
+    entry_id = diary.add_diary_entry("alpha")["entry_id"]
+    freeze(monkeypatch, "2026-04-02T12:00:00+05:00")
+    for text in ("beta", "gamma", "delta"):
+        diary.add_diary_entry(text)
+    _, candidates = diary.diary_review_context("alpha revised", "day_entries")
+    original = next(row for row in candidates if row["id"] == entry_id)
+
+    result = diary.add_diary_entry("alpha revised", match=("replace", original))
+    assert result["status"] == "updated"
+    assert result["entry_id"] == entry_id
+    assert "alpha revised" in diary.load_daily_report("01.04.2026")
+    assert "alpha revised" not in diary.load_daily_report("02.04.2026")
+    assert diary.add_diary_entry("alpha stale", match=("replace", original))["status"] == "review_stale"
+    assert diary.get_diary_entry_count() == 4
+
+
+def test_new_draft_refuses_stale_comparison_after_concurrent_write():
+    _, candidates = diary.diary_review_context("alpha draft", "day_entries")
+    first = diary.add_diary_entry("beta draft", candidates=candidates)
+    second = diary.add_diary_entry("alpha draft", candidates=candidates)
+    assert first["status"] == "written"
+    assert second["status"] == "review_stale"
+    assert diary.get_diary_entry_count() == 1

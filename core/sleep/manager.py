@@ -19,8 +19,7 @@ from core.sleep.state import (
     mark_dialog_summaries_rolled_back, _ensure_sleep_tables
 )
 from core.diary.manager import (
-    clear_diary, save_diary_to_logs, get_diary_markdown,
-    snapshot_diary_entries, restore_diary_entries,
+    clear_diary, snapshot_diary_entries, restore_diary_entries,
 )
 from core.context.buffer import delete_entry, delete_summary_matching, restore_messages
 from core.sleep.processes import (
@@ -505,14 +504,6 @@ async def commit_all(session_id: str) -> bool:
 
     set_state(SleepState.COMMITTING)
 
-    # S5/S6: backup comes first. The DB writes already happened during the
-    # night, so the diary is the only thing that can still fail — and if it
-    # does, staging MUST stay applied=0 so recovery rolls the session back.
-    if not save_diary_to_logs():
-        print("[Commit] ERROR: diary backup failed — aborting commit")
-        return False
-    print("[Commit] Diary saved to logs")
-
     # S1/S5/M2: snapshot the rows once, then publish them as a staging undo row
     # *before* the destructive clear. An in-memory snapshot dies with the
     # process, so a crash between clear and mark would otherwise leave entries
@@ -533,7 +524,7 @@ async def commit_all(session_id: str) -> bool:
     # S7: clearing without a verified backup is silent data loss, and a failed
     # clear must not leave the session looking committed.
     try:
-        clear_diary()
+        clear_diary(diary_snapshot)
         print("[Commit] Diary cleared")
     except Exception as e:
         print(f"[Commit] ERROR: diary clear failed: {e}")

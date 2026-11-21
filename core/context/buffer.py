@@ -5,6 +5,7 @@ core/context/buffer.py — Context Buffer for Mila's working memory.
 import os
 import sqlite3
 from datetime import datetime, timezone
+from time import sleep
 from typing import List, Dict, Tuple
 from zoneinfo import ZoneInfo
 
@@ -16,18 +17,18 @@ CONTEXT_DB_PATH = settings.CONTEXT_DB_PATH
 
 
 def _local_zone():
-    """Return the configured IANA timezone, falling back to the OS local zone."""
+    """Return the configured IANA zone, or None for OS-local conversion."""
     if getattr(settings, "LOCAL_TIMEZONE", ""):
         try:
             return ZoneInfo(settings.LOCAL_TIMEZONE)
         except Exception:
             pass
-    return datetime.now().astimezone().tzinfo
+    return None
 
 
 def now_local() -> datetime:
     """Current datetime in the local timezone (config-aware, Docker-safe)."""
-    return datetime.now(_local_zone())
+    return datetime.now(timezone.utc).astimezone(_local_zone())
 
 
 def _get_conn():
@@ -38,9 +39,22 @@ def _get_conn():
     # processes — wait instead of failing with "database is locked".
     conn = sqlite3.connect(CONTEXT_DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        # A second process opening a fresh database can contend with the
+        # journal-mode switch before SQLite starts honoring its busy timeout.
+        for attempt in range(5):
+            try:
+                conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                break
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY or attempt == 4:
+                    raise
+                sleep(0.02 * (attempt + 1))
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.Error:
+        conn.close()
+        raise
     return conn
 
 

@@ -175,11 +175,13 @@ class SleepEnv:
             conn.close()
 
     # ---- sleep helpers ---------------------------------------------------
-    def begin_sleep(self, session_id=None):
+    def begin_sleep(self, session_id=None, duration_minutes=-1):
         from core.sleep.state import SleepState, set_state
 
         session_id = session_id or str(uuid.uuid4())
-        set_state(SleepState.SLEEPING, session_id=session_id, triggered_by="test")
+        # Default to an elapsed deadline so execution tests do not wait after reflection.
+        set_state(SleepState.SLEEPING, session_id=session_id, triggered_by="test",
+                  duration_minutes=duration_minutes)
         return session_id
 
     def call(self, name, **args):

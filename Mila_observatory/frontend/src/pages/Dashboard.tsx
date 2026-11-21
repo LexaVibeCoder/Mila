@@ -25,21 +25,29 @@ export default function Dashboard() {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    let active = true;
+    let timer: number;
     const fetchData = async () => {
       try {
         const [d, s] = await Promise.all([
           getDashboard(),
           getSleepStatus().catch(() => null),
         ]);
+        if (!active) return;
+        setError('');
         setData(d);
         setSleepStatus(s);
       } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : 'Failed to load');
+        if (active) setError(e instanceof Error ? e.message : 'Failed to load');
+      } finally {
+        if (active) timer = window.setTimeout(fetchData, 5000);
       }
     };
     fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   if (error) return <div style={{ color: 'var(--error)' }}>Error: {error}</div>;
@@ -50,30 +58,33 @@ export default function Dashboard() {
     ? `${Math.floor(status.uptime / 3600)}h ${Math.floor((status.uptime % 3600) / 60)}m`
     : 'N/A';
 
-  // Sleep is shown only here, in Mila's card (single source of truth).
-  const sleepState = sleepStatus?.state;
-  const sleepActive = sleepState === 'sleeping' || sleepState === 'committing';
-
   const presence: PresenceInfo | null | undefined = status.presence;
-  const pState = presence?.state || 'rest';
-  const sleeping = sleepActive || pState === 'sleep';
+  const pState = presence?.state === 'sleep' ? 'rest' : presence?.state || 'rest';
+  const sleepStage = sleepStatus?.current_stage;
+  const sleepError = sleepStatus?.state === 'sleep_error';
+  const sleepActive = sleepStatus?.state === 'sleeping' || sleepStatus?.state === 'committing';
+  const sleepUnknown = !sleepStatus && (status.sleep_mode || presence?.state === 'sleep');
   const pFocus = presence?.focus_user_name || (presence?.focus_chat_id ? `чат ${presence.focus_chat_id.slice(0, 12)}` : '');
-  const sleepRemaining = sleepStatus?.remaining_seconds != null
-    ? `осталось ${Math.floor(sleepStatus.remaining_seconds / 3600)}ч ${Math.floor((sleepStatus.remaining_seconds % 3600) / 60)}м`
-    : sleepStatus?.scheduled_end_at
-      ? `до ${new Date(sleepStatus.scheduled_end_at).toLocaleString()}`
-      : '';
-  const sleepStage = sleepStatus?.current_stage && sleepStatus.current_stage !== 'idle'
-    ? ` • этап: ${sleepStatus.current_stage} (${(sleepStatus.progress_pct || 0).toFixed(0)}%)`
-    : '';
+  const tasks = Object.values(sleepStatus?.processes ?? {});
+  const remaining = sleepStatus?.remaining_seconds;
   const presenceBadge =
-    sleeping ? '💤 Спит' :
+    sleepStage === 'rolling_back' ? 'Откат изменений' :
+    sleepError ? 'Ошибка сна' :
+    sleepStage === 'committing' ? 'Сохраняет результаты' :
+    sleepStage === 'reflection' ? 'Рефлексия' :
+    sleepStage === 'dormant' ? '💤 Спит' :
+    sleepUnknown ? 'Статус сна недоступен' :
     pState === 'dialog' ? '💬 Диалог' :
     pState === 'working' ? '✍️ Занята' : '😌 Отдыхает';
   const presenceSub =
-    sleeping ? `спит${sleepStage}${sleepRemaining ? ` • ${sleepRemaining}` : ''}` :
+    sleepStatus?.wake_requested ? 'Пробуждение запрошено' :
+    sleepError ? sleepStatus?.error_message :
+    sleepStage === 'reflection' && tasks.length ? `Завершено задач: ${tasks.filter(phase => phase === 'completed').length} из ${tasks.length}` :
+    sleepStage === 'dormant' ? (remaining == null ? 'Рефлексия завершена. Ждёт пробуждения.' :
+      `Рефлексия завершена. Осталось ${Math.ceil(remaining / 60)} мин.`) :
+    sleepActive || sleepUnknown ? null :
     pState === 'dialog' && pFocus ? `с ${pFocus}` :
-    presence?.note ? presence.note :
+    presence?.state !== 'sleep' && presence?.note ? presence.note :
     pState === 'dialog' ? 'диалог' :
     pState === 'working' ? 'свои дела' : 'состояние по умолчанию';
 
@@ -97,13 +108,13 @@ export default function Dashboard() {
           <div>
             <span style={{
               ...styles.badge,
-              background: sleeping ? 'rgba(108, 92, 231, 0.2)' : pState === 'dialog' ? 'rgba(116, 185, 255, 0.2)' : pState === 'working' ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
-              color: sleeping ? '#a29bfe' : pState === 'dialog' ? '#74b9ff' : pState === 'working' ? '#fdcb6e' : 'var(--success)',
+              background: sleepError ? 'rgba(225,112,85,0.2)' : sleepActive ? 'rgba(108, 92, 231, 0.2)' : pState === 'dialog' ? 'rgba(116, 185, 255, 0.2)' : pState === 'working' ? 'rgba(253, 203, 110, 0.2)' : 'rgba(0,184,148,0.2)',
+              color: sleepError ? 'var(--error)' : sleepActive ? '#a29bfe' : pState === 'dialog' ? '#74b9ff' : pState === 'working' ? '#fdcb6e' : 'var(--success)',
             }}>
               {presenceBadge}
             </span>
           </div>
-          <div style={styles.cardSub}>{presenceSub}</div>
+          {presenceSub && <div style={styles.cardSub}>{presenceSub}</div>}
         </div>
 
         <div style={styles.card}>

@@ -5,18 +5,20 @@ core/sleep/manager.py — Mila's Sleep Manager (Orchestrator).
 import asyncio
 import json
 import sqlite3
+import math
 import time
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import List, Dict, Any
 
 from config import settings
 from core.sleep.state import (
-    SleepState, SleepStage, get_state, get_current_state, set_state, set_stage,
+    SleepState, SleepStage, get_state, get_current_state, set_state,
+    get_sleep_stage, finish_reflection, request_wake, begin_rollback,
     get_queued_messages, mark_messages_processed, queue_message,
     get_staged_operations, stage_operation, mark_staged_applied,
     clear_staged_operations, get_queue_count, gc_staged_operations,
-    mark_dialog_summaries_rolled_back, _ensure_sleep_tables
+    mark_dialog_summaries_rolled_back
 )
 from core.diary.manager import (
     clear_diary, snapshot_diary_entries, restore_diary_entries,
@@ -28,11 +30,8 @@ from core.sleep.processes import (
 from core.needs.tracker import get_tracker as get_needs_tracker
 
 
-_sleep_in_progress = False
-_current_session_id = None
-_sleep_start_time = None
-_sleep_duration = None
 _auto_sleep_task = None
+_WAKE_POLL_SECONDS = 1.0
 
 
 def _parse_iso(raw) -> datetime | None:
@@ -102,88 +101,58 @@ def _record_sleep_wake(started_at: datetime | None, source: str) -> None:
         print(f"[Sleep] journal wake failed: {e}")
 
 
-async def _resume_sleep_until_deadline(session_id: str, deadline_iso: str):
-    """Crash-resume for the dormant phase: processes already done → wait
-    wall-clock until the deadline, then commit. No timer to freeze: the
-    deadline lives in the DB."""
+async def _finish_sleep(session_id: str) -> bool:
+    """Commit completed reflection, falling back to recovery on commit failure."""
     try:
-        secs = _seconds_until_deadline(deadline_iso)
-        if secs is not None and secs > 0:
-            print(f"[Recovery] Resuming sleep until {deadline_iso} ({secs:.0f}s left)")
-            await asyncio.sleep(secs)
-        cur = get_current_state()
-        if cur.get("state") == "sleeping" and cur.get("session_id") == session_id:
-            print("[Recovery] Deadline reached → committing resumed sleep")
-            if not await commit_all(session_id):
-                print("[Recovery] Commit failed → rolling back")
-                await rollback_all(session_id)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        print(f"[Recovery] resume error: {e}")
+        if await commit_all(session_id):
+            return True
+    except Exception as exc:
+        print(f"[Sleep] Commit failed: {exc}")
+    await rollback_all(session_id)
+    return False
+
+
+async def _wait_for_wake(session_id: str) -> bool:
+    """Wait for the persisted deadline or an Observatory wake request."""
+    while True:
+        current = get_current_state()
+        if current.get("session_id") != session_id or get_sleep_stage(current) != SleepStage.DORMANT:
+            return False
+        remaining = _seconds_until_deadline(current.get("scheduled_end_at"))
+        if current.get("wake_requested") or (remaining is not None and remaining <= 0):
+            return await _finish_sleep(session_id)
+        delay = _WAKE_POLL_SECONDS if remaining is None else min(_WAKE_POLL_SECONDS, remaining)
+        await asyncio.sleep(delay)
 
 
 async def recover_from_crash() -> bool:
-    global _current_session_id, _sleep_in_progress, _sleep_start_time, _sleep_duration
-    _ensure_sleep_tables()
+    """Resume dormant sleep or recover a previously interrupted transaction."""
     current = get_current_state()
     state = current.get("state", "awake")
     session_id = current.get("session_id")
 
     if state == "awake":
+        _presence_to_rest("sleep complete")
         return False
 
-    print(f"\n{'='*60}")
-    print(f"  CRASH RECOVERY DETECTED")
-    print(f"  Previous state: {state}")
-    print(f"  Session: {session_id}")
-    print(f"{'='*60}\n")
+    print(f"[Recovery] Session {session_id} in state {state}")
+    stage = get_sleep_stage(current)
+    if stage == SleepStage.ROLLING_BACK:
+        await rollback_all(session_id)
+        return True
 
     if state == "sleeping":
-        # Wall-clock deadline from the DB is authoritative, not the
-        # in-memory asyncio timer (which dies with the process).
-        # Dormant phase marker: execute_sleep sets stage idle/90% right
-        # before the long wait; anything else means the crash hit mid
-        # processing → roll back (safe), otherwise resume waiting.
-        stage = current.get("current_stage", "")
-        try:
-            progress = float(current.get("progress_pct") or 0.0)
-        except (TypeError, ValueError):
-            progress = 0.0
-        dormant = (stage == SleepStage.IDLE.value) and progress >= 89.0
-        scheduled_end = current.get("scheduled_end_at")
-        secs_left = _seconds_until_deadline(scheduled_end)
-
-        if dormant and (secs_left is None or secs_left > 0):
-            # Processes already done → keep staged ops, wait for deadline.
-            _current_session_id = session_id
-            _sleep_in_progress = True
-            started = _parse_iso(current.get("started_at"))
-            _sleep_start_time = started.timestamp() if started else time.time()
-            end = _parse_iso(scheduled_end)
-            if started is not None and end is not None:
-                _sleep_duration = max(0.0, (end - started).total_seconds() / 60.0)
+        if stage == SleepStage.DORMANT and session_id:
+            remaining = _seconds_until_deadline(current.get("scheduled_end_at"))
+            if current.get("wake_requested") or (remaining is not None and remaining <= 0):
+                await _finish_sleep(session_id)
             else:
-                _sleep_duration = None
-            _ensure_presence_sleep(f"resumed {(session_id or '')[:8]}")
-            if secs_left is not None:
-                asyncio.create_task(_resume_sleep_until_deadline(session_id, scheduled_end))
-                print(f"[Recovery] Dormant sleep resumed ({secs_left:.0f}s until deadline)")
-            else:
-                print("[Recovery] Indefinite sleep resumed (until manual wake)")
-            return True
-
-        if dormant and secs_left is not None and secs_left <= 0:
-            # Deadline passed while offline → finish the sleep.
-            print("[Recovery] Deadline passed while offline → committing")
-            if not await commit_all(session_id):
-                print("[Recovery] Commit failed → rolling back")
-                await rollback_all(session_id)
+                _ensure_presence_sleep(f"resumed {session_id[:8]}")
+                asyncio.create_task(_wait_for_wake(session_id))
             return True
 
         print("[Recovery] Sleep was in progress → rolling back all changes")
         await rollback_all(session_id)
-        print("[Recovery] Rollback complete. System is now AWAKE.")
         return True
 
     elif state == "committing":
@@ -192,6 +161,7 @@ async def recover_from_crash() -> bool:
         if not staged:
             print("[Recovery] All changes were committed. Resuming normal operation.")
             set_state(SleepState.AWAKE)
+            _presence_to_rest("sleep complete")
             _record_sleep_wake(_parse_iso(current.get("started_at")), "recovery")
             return True
         else:
@@ -328,6 +298,7 @@ async def rollback_all(session_id: str = None):
             _record_sleep_wake(sleep_started, "rollback")
         return
 
+    begin_rollback(session_id)
     print(f"[Rollback] Rolling back session {session_id[:8]}...")
 
     staged = get_staged_operations(session_id)
@@ -492,17 +463,19 @@ async def rollback_all(session_id: str = None):
 
 
 async def commit_all(session_id: str) -> bool:
+    """Finalize this session once, even if multiple waiters reach wake."""
+    before_commit = get_current_state()
+    if not set_state(SleepState.COMMITTING, session_id=session_id):
+        # A stale waiter must not commit or roll back a session it did not claim.
+        return True
+
     print(f"\n{'='*60}")
     print(f"  COMMITTING SLEEP CHANGES")
     print(f"{'='*60}\n")
 
     # Capture the session start before COMMITTING overwrites the state: the
     # wake event needs the real wall-clock duration.
-    before_commit = get_current_state()
     sleep_started = _parse_iso(before_commit.get("started_at"))
-    was_sleeping = before_commit.get("state") in ("sleeping", "committing")
-
-    set_state(SleepState.COMMITTING)
 
     # S1/S5/M2: snapshot the rows once, then publish them as a staging undo row
     # *before* the destructive clear. An in-memory snapshot dies with the
@@ -551,93 +524,55 @@ async def commit_all(session_id: str) -> bool:
     except Exception as e:
         print(f"[Commit] staging GC failed: {e}")
 
-    set_state(SleepState.AWAKE)
     _presence_to_rest("sleep complete")
-    if was_sleeping:
-        _record_sleep_wake(sleep_started, "commit")
+    set_state(SleepState.AWAKE)
+    _record_sleep_wake(sleep_started, "commit")
 
     print(f"[Commit] Sleep session {session_id[:8]}... committed successfully")
     return True
 
 
 async def execute_sleep(session_id: str, duration_minutes: int = None) -> bool:
-    global _sleep_in_progress
-
+    """Run the reflection workers and own all wake and rollback transitions."""
+    reflection = asyncio.create_task(run_all_processes(session_id))
+    timeout = time.monotonic() + duration_minutes * 60 + 300 if duration_minutes else None
     try:
-        _sleep_in_progress = True
+        try:
+            while not reflection.done():
+                current = get_current_state()
+                if current.get("session_id") != session_id:
+                    return False
+                if current.get("wake_requested") or (timeout is not None and time.monotonic() >= timeout):
+                    break
+                await asyncio.wait({reflection}, timeout=_WAKE_POLL_SECONDS)
 
-        all_success, message, process_results = await run_all_processes(session_id)
+            all_success = False
+            if reflection.done():
+                all_success, _, process_results = reflection.result()
+                for result in process_results:
+                    print(f"[Sleep] {result}")
+        finally:
+            if not reflection.done():
+                reflection.cancel()
+            await asyncio.gather(reflection, return_exceptions=True)
 
-        if all_success and duration_minutes:
-            remaining = max(0, duration_minutes * 60 - (time.time() - _sleep_start_time))
-            # Wall-clock deadline from the DB is authoritative (survives restarts).
-            try:
-                db_left = _seconds_until_deadline(
-                    get_current_state().get("scheduled_end_at"))
-                if db_left is not None:
-                    remaining = max(0.0, db_left)
-            except Exception:
-                pass
-            if remaining > 0:
-                set_stage(SleepStage.IDLE, progress_pct=90.0)
-                print(f"[Sleep] Processing done, staying asleep for {remaining:.0f}s more...")
-                await asyncio.sleep(remaining)
-
-        print(f"\n{'='*60}")
-        print(f"  SLEEP RESULTS")
-        for pr in process_results:
-            print(f"  • {pr}")
-        print(f"  Overall: {'✅ SUCCESS' if all_success else '❌ FAILURE'}")
-        print(f"{'='*60}\n")
-
-        if all_success:
-            commit_success = await commit_all(session_id)
-            if commit_success:
-                print("[Sleep] ✅ Sleep completed successfully")
-                return True
-            else:
-                print("[Sleep] ❌ Commit failed — rolling back")
-                await rollback_all(session_id)
-                return False
-        else:
-            print("[Sleep] ❌ Some processes failed — rolling back")
-            await rollback_all(session_id)
-            return False
-
-    except Exception as e:
-        print(f"[Sleep] ❌ Critical error during sleep: {e}")
-        import traceback
-        traceback.print_exc()
-        set_state(SleepState.SLEEP_ERROR, error_message=str(e))
+        if all_success and finish_reflection(session_id):
+            return await _wait_for_wake(session_id)
         await rollback_all(session_id)
         return False
 
-    finally:
-        _sleep_in_progress = False
+    except Exception as exc:
+        print(f"[Sleep] Critical error during sleep: {exc}")
+        set_state(SleepState.SLEEP_ERROR, error_message=str(exc))
+        await rollback_all(session_id)
+        return False
 
 
 async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual",
                       note: str = "") -> Dict[str, Any]:
-    global _sleep_in_progress, _current_session_id, _sleep_start_time, _sleep_duration
-
     # Snapshot BEFORE presence is switched to sleep: the journal needs to know
     # where Mila was (rest/working/dialog) and for how long.
     prev_presence = _presence_snapshot()
-    current_state = get_state()
-    if current_state == SleepState.SLEEPING:
-        return {
-            "success": False,
-            "message": "Mila is already sleeping",
-            "session_id": _current_session_id
-        }
-
-    if current_state == SleepState.COMMITTING:
-        return {
-            "success": False,
-            "message": "Mila is currently committing changes, cannot start sleep",
-            "session_id": None
-        }
-
     try:
         from Mila_observatory.runtime import runtime_config
         forced_awake = runtime_config.get("sleep.forced_awake", False)
@@ -651,18 +586,11 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
             "session_id": None
         }
 
-    if triggered_by == "manual" and _auto_sleep_task and not _auto_sleep_task.done():
-        _auto_sleep_task.cancel()
-        print("[Sleep] Manual sleep triggered, cancelling pending auto-sleep")
-
     import uuid
     session_id = str(uuid.uuid4())
-    _current_session_id = session_id
-    _sleep_start_time = time.time()
-    _sleep_duration = duration_minutes
-
-    set_state(SleepState.SLEEPING, session_id=session_id, triggered_by=triggered_by,
-              duration_minutes=duration_minutes)
+    if not set_state(SleepState.SLEEPING, session_id=session_id, triggered_by=triggered_by,
+                     duration_minutes=duration_minutes):
+        return {"success": False, "message": "A sleep session is already active or needs recovery"}
     # Single source of truth for "Mila sleeps": sleep_state row + presence.
     # Centralized here so manual (/sleep API), auto and tool paths agree.
     _ensure_presence_sleep(
@@ -694,7 +622,7 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
     except ImportError:
         pass
 
-    asyncio.create_task(_run_sleep_with_timeout(session_id, duration_minutes))
+    asyncio.create_task(execute_sleep(session_id, duration_minutes))
 
     return {
         "success": True,
@@ -704,75 +632,26 @@ async def start_sleep(duration_minutes: int = None, triggered_by: str = "manual"
     }
 
 
-async def _run_sleep_with_timeout(session_id: str, duration_minutes: int = None):
-    try:
-        if duration_minutes:
-            sleep_task = asyncio.create_task(execute_sleep(session_id, duration_minutes))
+async def wake_up(session_id: str = None, mode: str = None) -> Dict[str, Any]:
+    """Request safe completion or interruption for the current sleep session."""
+    current = get_current_state()
+    if session_id is not None and session_id != current.get("session_id"):
+        return {"success": False, "message": "Сеанс сна сменился. Проверьте статус и повторите действие."}
+    if current.get("state") == SleepState.AWAKE:
+        return {"success": True, "message": "Мила уже проснулась"}
 
-            try:
-                await asyncio.wait_for(
-                    sleep_task,
-                    timeout=duration_minutes * 60 + 300
-                )
-            except asyncio.TimeoutError:
-                current = get_current_state()
-                if current.get("state") == "committing":
-                    print("[Sleep] Timeout reached during commit — waiting for commit to finish")
-                    await sleep_task
-                else:
-                    print("[Sleep] Timeout reached — force waking up")
-                    await wake_up()
-        else:
-            await execute_sleep(session_id)
-
-    except asyncio.CancelledError:
-        print("[Sleep] Sleep task cancelled")
-        current = get_current_state()
-        if current.get("state") != "committing":
-            await rollback_all(session_id)
-
-    except Exception as e:
-        print(f"[Sleep] Error in sleep task: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-async def wake_up() -> Dict[str, Any]:
-    global _sleep_in_progress, _current_session_id
-
-    current_state = get_state()
-    session_id = _current_session_id
-    if not session_id:
-        try:
-            session_id = get_current_state().get("session_id")
-            _current_session_id = session_id
-        except Exception:
-            session_id = None
-
-    if current_state == SleepState.AWAKE:
-        return {"success": True, "message": "Mila is already awake"}
-
-    if current_state == SleepState.COMMITTING:
-        return {"success": False, "message": "Mila is committing changes, cannot wake until commit completes"}
-
-    if current_state == SleepState.SLEEPING:
-        print(f"\n{'='*60}")
-        print(f"  ⏰ MILA IS BEING WOKEN UP")
-        print(f"{'='*60}\n")
-
-        await rollback_all(session_id)
-        _sleep_in_progress = False
-        _current_session_id = None
-
-        try:
-            from Mila_observatory.api.dashboard import add_event
-            add_event("wake", "Mila was woken up manually")
-        except ImportError:
-            pass
-
-        return {"success": True, "message": "Mila woke up"}
-
-    return {"success": False, "message": f"Unknown state: {current_state}"}
+    stage = get_sleep_stage(current)
+    expected_mode = {
+        SleepStage.DORMANT: "keep",
+        SleepStage.REFLECTION: "rollback",
+    }.get(stage)
+    if not expected_mode or not current.get("session_id"):
+        return {"success": False, "message": "Пробуждение в этой фазе недоступно"}
+    if mode is not None and mode != expected_mode:
+        return {"success": False, "message": "Фаза сна изменилась. Проверьте статус и повторите действие."}
+    if not request_wake(current["session_id"], current["current_stage"]):
+        return {"success": False, "message": "Фаза сна изменилась. Проверьте статус и повторите действие."}
+    return {"success": True, "message": "Запрос на пробуждение принят"}
 
 
 def is_sleeping() -> bool:
@@ -784,38 +663,31 @@ def is_committing() -> bool:
 
 
 def get_sleep_status() -> Dict[str, Any]:
+    """Report persisted phases and workers identically from either process."""
     state_data = get_current_state()
-    queue_count = get_queue_count()
-
-    # Wall-clock first (survives restarts); in-memory only as fallback.
-    elapsed = None
-    remaining = None
-    if state_data.get("state") == "sleeping":
-        started = _parse_iso(state_data.get("started_at"))
-        if started is not None:
-            elapsed = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
-        elif _sleep_start_time:
-            elapsed = time.time() - _sleep_start_time
-        db_left = _seconds_until_deadline(state_data.get("scheduled_end_at"))
-        if db_left is not None:
-            remaining = max(0.0, db_left)
-        elif _sleep_duration and elapsed is not None:
-            remaining = max(0, _sleep_duration * 60 - elapsed)
+    stage = get_sleep_stage(state_data)
+    active = state_data.get("state") in (SleepState.SLEEPING, SleepState.COMMITTING)
+    started = _parse_iso(state_data.get("started_at")) if active else None
+    remaining = _seconds_until_deadline(state_data.get("scheduled_end_at")) if active else None
+    processes = json.loads(state_data.get("processes_json") or "{}")
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds() if started else None
+    if stage in (SleepStage.DORMANT, SleepStage.COMMITTING):
+        progress = 100.0
+    elif processes:
+        progress = 100 * sum(value == "completed" for value in processes.values()) / len(processes)
+    else:
+        progress = 0.0
 
     return {
-        "state": state_data.get("state", "awake"),
-        "session_id": state_data.get("session_id"),
-        "current_stage": state_data.get("current_stage", "idle"),
-        "progress_pct": state_data.get("progress_pct", 0.0),
-        "started_at": state_data.get("started_at"),
-        "scheduled_end_at": state_data.get("scheduled_end_at"),
-        "completed_at": state_data.get("completed_at"),
-        "triggered_by": state_data.get("triggered_by", "manual"),
-        "error_message": state_data.get("error_message"),
-        "queue_count": queue_count,
-        "elapsed_seconds": elapsed,
-        "remaining_seconds": remaining,
-        "in_progress": _sleep_in_progress
+        **state_data,
+        "current_stage": stage,
+        "progress_pct": progress,
+        "processes": processes,
+        "wake_requested": bool(state_data.get("wake_requested")),
+        "queue_count": get_queue_count(),
+        "elapsed_seconds": max(0.0, elapsed) if elapsed is not None else None,
+        "remaining_seconds": max(0.0, remaining) if remaining is not None else None,
+        "in_progress": stage in (SleepStage.REFLECTION, SleepStage.COMMITTING, SleepStage.ROLLING_BACK),
     }
 
 
@@ -845,22 +717,22 @@ async def _check_auto_sleep():
     if start_hour is None or end_hour is None:
         return
 
-    now = datetime.now()
-    current_hour = now.hour
+    now = datetime.now().astimezone()
+    start = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    if start > now:
+        start -= timedelta(days=1)
+    end = start.replace(hour=end_hour)
+    if end < start:
+        end += timedelta(days=1)
+    if not start <= now < end:
+        return
 
-    should_sleep = False
-    if start_hour <= end_hour:
-        if start_hour <= current_hour < end_hour:
-            should_sleep = True
-    else:
-        if current_hour >= start_hour or current_hour < end_hour:
-            should_sleep = True
-
-    if should_sleep:
-        current_state = get_state()
-        if current_state == SleepState.AWAKE:
-            print(f"[AutoSleep] Time to sleep (hour {current_hour})")
-            await start_sleep(duration_minutes=None, triggered_by="automatic")
+    current = get_current_state()
+    completed = _parse_iso(current.get("completed_at"))
+    if current.get("state") == SleepState.AWAKE and (completed is None or completed < start):
+        minutes = math.ceil((end - now).total_seconds() / 60)
+        print(f"[AutoSleep] Time to sleep (hour {now.hour})")
+        await start_sleep(duration_minutes=minutes, triggered_by="automatic")
 
 
 def start_auto_sleep_scheduler():
@@ -870,24 +742,11 @@ def start_auto_sleep_scheduler():
 
 
 def queue_incoming_message(chat_id: str, user_id: str, content: str):
-    global _current_session_id
-    if not _current_session_id:
-        # After a restart in-memory session is None while DB still says
-        # sleeping — recover it instead of silently dropping the message.
-        try:
-            current = get_current_state()
-            recovered = current.get("session_id")
-            if recovered:
-                _current_session_id = recovered
-                print(f"[SleepQueue] Recovered session {recovered[:8]}... after restart")
-        except Exception:
-            pass
-    if not _current_session_id:
+    session_id = get_current_state().get("session_id")
+    if session_id:
+        queue_message(session_id, chat_id, user_id, content)
+    else:
         print("[SleepQueue] WARNING: sleeping but no session — message kept in chunks/buffer, not in sleep queue")
-        return
-
-    queue_message(_current_session_id, chat_id, user_id, content)
-    print(f"[SleepQueue] Message queued from {user_id[:8]}... in {chat_id[:8]}...")
 
 
 def take_unprocessed_sleep_queue(session_id: str | None = None) -> list[dict]:

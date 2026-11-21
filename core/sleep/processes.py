@@ -27,7 +27,7 @@ from core.llm.summary_guard import (
     SUMMARY_LANGUAGE_RULES, SUMMARY_STYLE_RULES, add_period_prefix, contains_cjk
 )
 from core.sleep.state import (
-    SleepState, SleepStage, set_stage, stage_operation, get_current_state,
+    SleepState, set_process_status, stage_operation, get_current_state,
     get_active_dialogs_detail, log_dialog_summary, get_state,
     update_staged_payload,
 )
@@ -707,8 +707,6 @@ async def process_diary_analysis(session_id: str) -> Tuple[bool, str]:
     print("  PROCESS 1: Diary Analysis")
     print("="*60)
 
-    set_stage(SleepStage.DIARY_ANALYSIS, progress_pct=10.0)
-
     llm = _create_night_llm()
     verifier = _create_verifier_llm()
     executor = StagingExecutor(session_id, "diary_analysis")
@@ -815,7 +813,7 @@ Your task is to analyze today's diary entries and decide what should be added to
     if not generation_success:
         return False, "Generation phase failed"
 
-    set_stage(SleepStage.VERIFICATION, progress_pct=50.0)
+    set_process_status(session_id, "diary_analysis", "verifying")
 
     gen_tool_calls = tool_calls
 
@@ -882,6 +880,7 @@ If there are issues, call reject_changes with a detailed explanation.
 
 
 async def _retry_generation(llm, messages, system_prompt, tools, executor, max_iter, session_id, process_type):
+    set_process_status(session_id, process_type, "running")
     for gen_iter in range(max_iter):
         print(f"  [Re-gen] Iteration {gen_iter + 1}/{max_iter}")
 
@@ -915,8 +914,6 @@ async def process_dialog_summarization(session_id: str) -> Tuple[bool, str]:
     print("  PROCESS 2: Dialog Summarization")
     print("="*60)
 
-    set_stage(SleepStage.DIALOG_SUMMARIZATION, progress_pct=30.0)
-
     active_dialogs = get_active_dialogs_detail()
 
     if not active_dialogs:
@@ -934,8 +931,7 @@ async def process_dialog_summarization(session_id: str) -> Tuple[bool, str]:
         chat_id = dialog["chat_id"]
         message_count = dialog["message_count"]
 
-        progress = 30.0 + (idx / len(active_dialogs)) * 40.0
-        set_stage(SleepStage.DIALOG_SUMMARIZATION, progress_pct=progress)
+        set_process_status(session_id, "dialog_summarization", "running")
 
         print(f"\n  ── Dialog {idx + 1}/{len(active_dialogs)}: {chat_id[:12]}... ({message_count} msgs)")
 
@@ -1050,6 +1046,7 @@ Your task is to analyze dialog messages and create a concise summary.
             results.append({"chat_id": chat_id, "action": "skipped", "reason": "LLM decided to skip"})
             continue
 
+        set_process_status(session_id, "dialog_summarization", "verifying")
         for verify_iter in range(MAX_VERIFICATION_RETRIES):
             verify_prompt = f"""Verify the dialog summary for chat {chat_id}.
 
@@ -1104,8 +1101,6 @@ async def process_user_fact_extraction(session_id: str) -> Tuple[bool, str]:
     print("  PROCESS 3: User Fact Extraction")
     print("="*60)
 
-    set_stage(SleepStage.USER_FACT_EXTRACTION, progress_pct=70.0)
-
     active_dialogs = get_active_dialogs_detail()
 
     if not active_dialogs:
@@ -1123,8 +1118,7 @@ async def process_user_fact_extraction(session_id: str) -> Tuple[bool, str]:
         chat_id = dialog["chat_id"]
         message_count = dialog["message_count"]
 
-        progress = 70.0 + (idx / len(active_dialogs)) * 20.0
-        set_stage(SleepStage.USER_FACT_EXTRACTION, progress_pct=progress)
+        set_process_status(session_id, "user_fact_extraction", "running")
 
         print(f"\n  ── Dialog {idx + 1}/{len(active_dialogs)}: {chat_id[:12]}... ({message_count} msgs)")
 
@@ -1225,6 +1219,7 @@ Your task is to extract long-term facts about users from dialog messages.
         total_facts += facts_added
 
         verified_facts = 0
+        set_process_status(session_id, "user_fact_extraction", "verifying")
         for verify_iter in range(MAX_VERIFICATION_RETRIES):
             verify_prompt = f"""Verify the user facts extracted from chat {chat_id}.
 
@@ -1267,6 +1262,7 @@ Call approve_changes if good, reject_changes if issues found.
                             "content": f"Verification rejected. Reason: {result.get('_reason', '')}. "
                                        f"Hint: {result.get('_hint', '')}. Please re-extract facts."
                         })
+                        set_process_status(session_id, "user_fact_extraction", "running")
                         for gen_iter in range(MAX_GENERATION_ITERATIONS):
                             try:
                                 response = await llm.generate(
@@ -1299,25 +1295,41 @@ Call approve_changes if good, reject_changes if issues found.
     return True, f"Extracted {total_facts} user facts"
 
 
+async def _run_process(session_id: str, process, name: str) -> Tuple[bool, str]:
+    set_process_status(session_id, name, "running")
+    try:
+        success, message = await process(session_id)
+    except asyncio.CancelledError:
+        set_process_status(session_id, name, "cancelled")
+        raise
+    except Exception:
+        set_process_status(session_id, name, "failed")
+        raise
+
+    set_process_status(session_id, name, "completed" if success else "failed")
+    return success, message
+
+
 async def run_all_processes(session_id: str) -> Tuple[bool, str, List[str]]:
     print(f"\n{'='*60}")
     print(f"  Running Sleep Processes (session: {session_id[:8]}...)")
     print(f"{'='*60}\n")
 
-    tasks = [
-        process_diary_analysis(session_id),
-        process_dialog_summarization(session_id),
-        process_user_fact_extraction(session_id),
+    workers = [
+        ("diary_analysis", process_diary_analysis),
+        ("dialog_summarization", process_dialog_summarization),
+        ("user_fact_extraction", process_user_fact_extraction),
     ]
+    results = await asyncio.gather(
+        *(_run_process(session_id, process, name) for name, process in workers),
+        return_exceptions=True,
+    )
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    process_names = ["Diary Analysis", "Dialog Summarization", "User Fact Extraction"]
     process_results = []
     all_success = True
 
-    for i, (name, result) in enumerate(zip(process_names, results)):
-        if isinstance(result, Exception):
+    for (name, _), result in zip(workers, results):
+        if isinstance(result, (Exception, asyncio.CancelledError)):
             print(f"  ❌ {name}: Error - {result}")
             process_results.append(f"{name}: ERROR - {result}")
             all_success = False

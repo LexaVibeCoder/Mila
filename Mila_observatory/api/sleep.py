@@ -4,8 +4,7 @@ Sleep API — control Mila's sleep/reflection cycle.
 
 import sys
 import os
-from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -15,8 +14,7 @@ from pydantic import BaseModel, Field
 from Mila_observatory.runtime import runtime_config
 from Mila_observatory.api.dashboard import add_event
 from core.sleep.manager import (
-    start_sleep, wake_up, get_sleep_status, is_sleeping, 
-    recover_from_crash, get_pending_messages_count
+    start_sleep, wake_up, get_sleep_status, is_sleeping, get_pending_messages_count
 )
 from core.diary.manager import get_diary_entry_count
 from core.sleep.state import get_active_dialogs_detail
@@ -38,6 +36,11 @@ class SleepResponse(BaseModel):
     duration_minutes: Optional[int] = None
 
 
+class SleepWakeRequest(BaseModel):
+    session_id: str
+    mode: Literal["keep", "rollback"]
+
+
 class SleepStatusResponse(BaseModel):
     state: str
     session_id: Optional[str] = None
@@ -52,6 +55,8 @@ class SleepStatusResponse(BaseModel):
     elapsed_seconds: Optional[float] = None
     remaining_seconds: Optional[float] = None
     in_progress: bool = False
+    processes: dict[str, str] = Field(default_factory=dict)
+    wake_requested: bool = False
 
 
 class SleepEstimateResponse(BaseModel):
@@ -77,7 +82,6 @@ async def api_start_sleep(request: SleepStartRequest):
     """Start a sleep session."""
     if is_sleeping():
         raise HTTPException(status_code=409, detail="Mila is already sleeping")
-    
     result = await start_sleep(
         duration_minutes=request.duration_minutes,
         triggered_by=request.triggered_by
@@ -96,12 +100,12 @@ async def api_start_sleep(request: SleepStartRequest):
 
 
 @router.post("/api/sleep/wake", response_model=SleepResponse)
-async def api_wake_up():
-    """Wake Mila up."""
-    result = await wake_up()
+async def api_wake_up(request: SleepWakeRequest | None = None):
+    """Request wake in the process that owns the sleep session."""
+    result = await wake_up(request.session_id, request.mode) if request else await wake_up()
     
     if result["success"]:
-        add_event("wake", "Mila woken up")
+        add_event("wake", result["message"])
     
     return SleepResponse(
         success=result["success"],
@@ -112,22 +116,7 @@ async def api_wake_up():
 @router.get("/api/sleep/status", response_model=SleepStatusResponse)
 async def api_sleep_status():
     """Get current sleep status."""
-    status = get_sleep_status()
-    return SleepStatusResponse(
-        state=status.get("state", "awake"),
-        session_id=status.get("session_id"),
-        current_stage=status.get("current_stage", "idle"),
-        progress_pct=status.get("progress_pct", 0.0),
-        started_at=status.get("started_at"),
-        scheduled_end_at=status.get("scheduled_end_at"),
-        completed_at=status.get("completed_at"),
-        triggered_by=status.get("triggered_by", "manual"),
-        error_message=status.get("error_message"),
-        queue_count=status.get("queue_count", 0),
-        elapsed_seconds=status.get("elapsed_seconds"),
-        remaining_seconds=status.get("remaining_seconds"),
-        in_progress=status.get("in_progress", False)
-    )
+    return SleepStatusResponse(**get_sleep_status())
 
 
 @router.get("/api/sleep/estimate", response_model=SleepEstimateResponse)

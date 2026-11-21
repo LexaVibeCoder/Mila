@@ -191,8 +191,8 @@ main-пайплайна. Ночные процессы читают `night_llm.t
 | Метод | Путь | Описание |
 |-------|------|----------|
 | POST | `/api/sleep/start` | `duration_minutes?`, `triggered_by` |
-| POST | `/api/sleep/wake` | Пробуждение = rollback; запрещено в `committing` |
-| GET | `/api/sleep/status` | state/stage/progress/elapsed/remaining/queue |
+| POST | `/api/sleep/wake` | Запрос пробуждения для указанного сеанса. `keep` сохраняет результаты после рефлексии, `rollback` прерывает рефлексию с откатом |
+| GET | `/api/sleep/status` | Состояние, фаза, статусы задач рефлексии, время и очередь |
 | GET | `/api/sleep/estimate` | Оценка по объёму данных |
 | GET | `/api/sleep/config` | `start_hour/end_hour/forced_awake/save_processed` |
 | POST | `/api/sleep/config` | Обновление конфигурации |
@@ -266,7 +266,7 @@ React SPA на TypeScript + Vite. В dev-режиме проксирует API �
 | `/users` | UsersList | Список пользователей, поиск, сортировка, sentiment |
 | `/users/:user_id` | UserDetail | Отношение, профиль, портрет, память, история, логи |
 | `/model` | ModelControl | main/night формы, `tool_choice`, `reasoning_effort`, `extra_body`, playground |
-| `/sleep` | SleepControl | Старт/вейк, прогресс, estimate, конфиг, очередь |
+| `/sleep` | SleepControl | Запуск, фаза сна, статусы задач рефлексии, пробуждение с сохранением результатов, настройки и очередь |
 | `/memory` | MemoryEditor | CRUD, поиск, FAISS rebuild |
 | `/config` | ConfigPage | Runtime State JSON + reload |
 | `/tools` | ToolsControl | 7 тумблеров |

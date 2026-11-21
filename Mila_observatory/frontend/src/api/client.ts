@@ -413,6 +413,8 @@ export interface SleepStatus {
   elapsed_seconds: number | null;
   remaining_seconds: number | null;
   in_progress: boolean;
+  processes: Record<string, string>;
+  wake_requested: boolean;
 }
 
 export interface SleepResponse {
@@ -428,8 +430,11 @@ export const startSleep = (duration_minutes?: number) =>
     method: 'POST',
     body: JSON.stringify({ duration_minutes, triggered_by: 'manual' }),
   });
-export const wakeUp = () =>
-  request<SleepResponse>('/sleep/wake', { method: 'POST' });
+export const wakeUp = (session_id: string, mode: 'keep' | 'rollback') =>
+  request<SleepResponse>('/sleep/wake', {
+    method: 'POST',
+    body: JSON.stringify({ session_id, mode }),
+  });
 export const getQueueCount = () => request<{ count: number }>('/sleep/queue-count');
 export const updateSleepConfig = (data: Record<string, unknown>) =>
   request<{ success: boolean; message: string }>('/sleep/config', {

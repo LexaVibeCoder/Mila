@@ -26,15 +26,22 @@ awake ──→ sleeping ──→ committing ──→ awake
 
 Одна строка `sleep_state WHERE id=1` в `mila.db`:
 `state / session_id / current_stage / progress_pct / started_at /
-scheduled_end_at / completed_at / triggered_by / error_message / version`.
+scheduled_end_at / completed_at / triggered_by / error_message / version /
+wake_requested / processes_json`.
 
-Стадии `SleepStage`: `diary_analysis / dialog_summarization /
-user_fact_extraction / verification / committing / completed / idle`.
+В Observatory фазы сна берутся из этой строки. Пока идёт `reflection`,
+у анализа дневника, суммаризации диалогов и извлечения фактов свои статусы.
+`dormant` означает, что рефлексия завершена и Мила ждёт пробуждения.
+`committing` и `rolling_back` показывают сохранение результатов и откат
+соответственно. `scheduled_end_at` — плановое время пробуждения, которое
+сохраняется при перезапуске.
 
-- ручное пробуждение во время `sleeping` = rollback;
-- во время `committing` пробуждение запрещено;
-- `scheduled_end_at` — wall-clock дедлайн, переживает рестарт;
-- «спящая» фаза после обработки помечается `stage=idle`, `progress≈90`.
+На странице `/sleep` кнопка **Разбудить и сохранить результаты** появляется в
+фазе `dormant`. Процесс-владелец читает запрос из SQLite, фиксирует результаты
+рефлексии и переводит Милу в `awake`. Пока идёт рефлексия, доступно отдельное
+действие **Прервать рефлексию и откатить изменения**. Оно останавливает ночные
+задачи перед откатом. Запрос привязан к сеансу и фазе, поэтому устаревшая кнопка
+не может отменить уже завершённую обработку.
 
 ## Запуск и длительность
 
@@ -45,11 +52,11 @@ user_fact_extraction / verification / committing / completed / idle`.
   потребностей;
 - пишет в глобальный журнал старт сна: время, планируемая длительность,
   предыдущее состояние (`core/action_journal.py`);
-- запускает `_run_sleep_with_timeout`:
-  - с длительностью — таймаут `duration*60 + 300с`; по таймауту принудительный
-    wake (если не идёт commit);
-  - без длительности — сон до ручного пробуждения;
-- manual sleep отменяет ожидающую auto-sleep задачу.
+- запускает параллельную рефлексию. Для сна с длительностью обработка может
+  продолжаться до пяти минут после планового окончания. По таймауту задачи
+  останавливаются и цикл откатывает незавершённые изменения;
+- после успешной рефлексии ждёт дедлайна либо ручного пробуждения. Если
+  длительность не задана, ждёт ручного пробуждения.
 
 ## Процессы
 
@@ -199,12 +206,12 @@ id. Так падение между staging и insert оставляет без
 
 `MilaUserbot.start()` → `recover_from_crash()`:
 
-- `awake` → ничего;
+- `awake` → синхронизировать устаревший presence после завершения сна;
+- `rolling_back` → повторить прерванный откат;
 - `sleeping`:
-  - если стадия `idle` и прогресс ≥ 89 — процессы уже завершены, сон
-    «дремлет»; при живом дедлайне — возобновить ожидание
-    (`_resume_sleep_until_deadline`), при истёкшем — commit;
-  - иначе — `rollback_all()` (сон прервался во время обработки);
+  - `dormant` (или `idle` с прогрессом ≥ 89 в старой БД) → продолжить
+    ожидание. Если дедлайн истёк или уже запрошено пробуждение, выполнить commit;
+  - прерванная рефлексия → `rollback_all()`;
 - `committing`:
   - staging пуст → всё применено → `awake` (+ событие пробуждения в журнал);
   - иначе → rollback (+ событие пробуждения в журнал) — в том числе когда крах
@@ -231,10 +238,8 @@ forced_awake = runtime_config.get("sleep.forced_awake", False)
 - `start_hour is None or end_hour is None` → автосон выключен (дефолт);
 - диапазон поддерживает переход через полночь;
 - при попадании в окно и `state == awake` → `start_sleep(triggered_by="automatic")`
-  без длительности (до ручного пробуждения).
-
-Длительность из конфига не читается: она передаётся параметром
-`start_sleep(duration_minutes)` / API и влияет только на таймаут.
+  с длительностью до конца окна. После завершения сна или ручного пробуждения
+  планировщик ждёт следующего окна.
 
 ## Очередь сообщений
 
@@ -256,8 +261,8 @@ hot path их не вызывает.
 | Эндпоинт | Описание |
 |----------|----------|
 | `POST /api/sleep/start` | Ручной запуск (`duration_minutes?`, `triggered_by`) |
-| `POST /api/sleep/wake` | Пробуждение = rollback; запрещено в `committing` |
-| `GET /api/sleep/status` | state/stage/progress/elapsed/remaining/queue_count |
+| `POST /api/sleep/wake` | Запрос пробуждения (`session_id`, `mode`). `keep` фиксирует результаты после рефлексии, `rollback` останавливает незавершённую рефлексию и откатывает изменения |
+| `GET /api/sleep/status` | Состояние, фаза, статусы параллельных задач (`processes`), запрос на пробуждение (`wake_requested`), время и очередь |
 | `GET /api/sleep/estimate` | Оценка по числу записей дневника и диалогов |
 | `GET /api/sleep/config` | `start_hour/end_hour/forced_awake/save_processed` |
 | `POST /api/sleep/config` | Изменение конфигурации |

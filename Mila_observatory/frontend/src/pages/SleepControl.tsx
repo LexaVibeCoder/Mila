@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   getSleepStatus,
   startSleep,
@@ -8,7 +8,6 @@ import {
   getSleepConfig,
   SleepStatus,
   SleepEstimate,
-  SleepConfigData,
 } from '../api/client';
 
 // ─── Styles ───────────────────────────────────────────────────
@@ -26,7 +25,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
   },
   btnPrimary: { background: 'var(--accent)', color: '#fff' },
-  btnWarning: { background: 'var(--warning)', color: '#fff' },
   btnDanger: { background: 'var(--error)', color: '#fff' },
   btnOutline: { background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)' },
   btnDisabled: { background: 'var(--border)', color: 'var(--text-secondary)', cursor: 'not-allowed' },
@@ -45,14 +43,6 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)',
     background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '14px',
     marginBottom: '12px',
-  },
-  progressBar: {
-    width: '100%', height: '8px', background: 'var(--border)', borderRadius: '4px',
-    overflow: 'hidden', marginTop: '8px',
-  },
-  progressFill: {
-    height: '100%', background: 'var(--accent)', borderRadius: '4px',
-    transition: 'width 0.5s ease',
   },
   inputRow: { display: 'flex', gap: '12px', alignItems: 'flex-end', marginBottom: '12px' },
   hint: { fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', fontStyle: 'italic' },
@@ -88,14 +78,19 @@ const styles: Record<string, React.CSSProperties> = {
 
 // ─── Constants ─────────────────────────────────────────────────
 
-const STAGE_LABELS: Record<string, string> = {
-  idle: '—',
-  diary_analysis: '📖 Diary Analysis',
-  dialog_summarization: '💬 Dialog Summarization',
-  user_fact_extraction: '👤 User Fact Extraction',
-  verification: '✅ Verification',
-  committing: '💾 Committing',
-  completed: '✓ Completed',
+const PROCESS_LABELS: Record<string, string> = {
+  diary_analysis: 'Анализ дневника',
+  dialog_summarization: 'Суммаризация диалогов',
+  user_fact_extraction: 'Извлечение фактов',
+};
+
+const PROCESS_STATUS: Record<string, string> = {
+  pending: 'Ожидает запуска',
+  running: 'Обрабатывается',
+  verifying: 'Проверка результата',
+  completed: 'Завершено',
+  failed: 'Ошибка',
+  cancelled: 'Прервано',
 };
 
 const DURATION_PRESETS = [
@@ -112,8 +107,9 @@ const DURATION_PRESETS = [
 
 export default function SleepControl() {
   const [status, setStatus] = useState<SleepStatus | null>(null);
+  const [statusError, setStatusError] = useState(false);
+  const statusRequest = useRef(0);
   const [estimate, setEstimate] = useState<SleepEstimate | null>(null);
-  const [config, setConfig] = useState<SleepConfigData | null>(null);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [loading, setLoading] = useState(false);
@@ -129,11 +125,15 @@ export default function SleepControl() {
   // ─── Data Fetching ───────────────────────────────────────
 
   const fetchStatus = useCallback(async () => {
+    const requestId = ++statusRequest.current;
     try {
-      const s = await getSleepStatus();
-      setStatus(s);
+      const nextStatus = await getSleepStatus();
+      if (requestId === statusRequest.current) {
+        setStatus(nextStatus);
+        setStatusError(false);
+      }
     } catch {
-      // silent — polling
+      if (requestId === statusRequest.current) setStatusError(true);
     }
   }, []);
 
@@ -149,7 +149,6 @@ export default function SleepControl() {
   const fetchConfig = useCallback(async () => {
     try {
       const c = await getSleepConfig();
-      setConfig(c);
       setSaveDiary(c.save_processed);
       setStartHour(c.start_hour?.toString() ?? '');
       setEndHour(c.end_hour?.toString() ?? '');
@@ -164,7 +163,10 @@ export default function SleepControl() {
     fetchEstimate();
     fetchConfig();
     const interval = setInterval(fetchStatus, 3000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      statusRequest.current += 1;
+    };
   }, [fetchStatus, fetchEstimate, fetchConfig]);
 
   // ─── Handlers ────────────────────────────────────────────
@@ -207,13 +209,13 @@ export default function SleepControl() {
     await handleStartSleep(dur || undefined);
   };
 
-  const handleWakeUp = async () => {
+  const handleWakeUp = async (sessionId: string, mode: 'keep' | 'rollback') => {
     try {
       setError('');
       setLoading(true);
-      const result = await wakeUp();
+      const result = await wakeUp(sessionId, mode);
       if (!result.success) setError(result.message);
-      else showSuccess('Mila woke up');
+      else showSuccess(result.message);
       await fetchStatus();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to wake up');
@@ -241,32 +243,40 @@ export default function SleepControl() {
 
   // ─── Derived State ───────────────────────────────────────
 
-  if (!status) return <div style={{ color: 'var(--text-secondary)', padding: '40px', textAlign: 'center' }}>Loading...</div>;
+  if (statusError) return <div role="status">Не удалось обновить состояние сна. Повторяем запрос…</div>;
+  if (!status) return <div role="status">Загрузка состояния сна…</div>;
 
-  const isSleeping = status.state === 'sleeping';
   const isAwake = status.state === 'awake';
-  const isCommitting = status.state === 'committing';
   const isError = status.state === 'sleep_error';
+  const isReflecting = status.current_stage === 'reflection';
+  const isDormant = status.current_stage === 'dormant';
+  const isCommitting = status.current_stage === 'committing';
+  const isRollingBack = status.current_stage === 'rolling_back';
   const canStartSleep = isAwake && !loading;
-  const canWakeUp = (isSleeping || isCommitting) && !loading;
+  const canWakeUp = !loading && !status.wake_requested;
+  const sessionId = status.session_id;
 
-  const stageLabel = STAGE_LABELS[status.current_stage] || status.current_stage;
-
-  const elapsedStr = status.elapsed_seconds
-    ? `${Math.floor(status.elapsed_seconds / 60)}m ${Math.floor(status.elapsed_seconds % 60)}s`
+  const elapsedStr = status.elapsed_seconds != null
+    ? `${Math.floor(status.elapsed_seconds / 60)} мин ${Math.floor(status.elapsed_seconds % 60)} с`
     : '—';
+  const remaining = status.remaining_seconds;
+  const endLabel = remaining == null
+    ? 'До ручного пробуждения'
+    : remaining === 0
+    ? 'Плановое время сна истекло'
+    : `До планового пробуждения ${Math.floor(remaining / 60)} мин ${Math.floor(remaining % 60)} с`;
 
-  const remainingStr = status.remaining_seconds
-    ? `${Math.floor(status.remaining_seconds / 60)}m ${Math.floor(status.remaining_seconds % 60)}s`
-    : isSleeping ? 'indefinite' : '—';
-
-  const stateBadge = isSleeping
-    ? { style: styles.badgeActive, text: '💤 Sleeping' }
+  const stateBadge = isReflecting
+    ? { style: styles.badgeActive, text: 'Рефлексия' }
+    : isDormant
+    ? { style: styles.badgeActive, text: 'Спит' }
     : isCommitting
-    ? { style: styles.badgeWarning, text: '💾 Committing' }
+    ? { style: styles.badgeWarning, text: 'Сохраняет результаты' }
+    : isRollingBack
+    ? { style: styles.badgeWarning, text: 'Откатывает изменения' }
     : isError
-    ? { style: styles.badgeDanger, text: '⚠️ Error' }
-    : { style: styles.badgeActive, text: '✨ Awake' };
+    ? { style: styles.badgeDanger, text: 'Ошибка сна' }
+    : { style: styles.badgeActive, text: 'Бодрствует' };
 
   // ─── Render ──────────────────────────────────────────────
 
@@ -289,37 +299,44 @@ export default function SleepControl() {
       {/* ── Status Cards ─────────────────────────────────── */}
       <div style={styles.grid}>
         <div style={styles.card}>
-          <div style={styles.cardTitle}>State</div>
-          <div style={{ ...styles.cardValue, fontSize: '20px' }}>
-            <span style={{ ...styles.badge, ...stateBadge.style }}>{stateBadge.text}</span>
-          </div>
-          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px' }}>
-            Stage: <strong>{stageLabel}</strong>
-          </div>
+          <div style={styles.cardTitle}>Состояние</div>
+          <span style={{ ...styles.badge, ...stateBadge.style }}>{stateBadge.text}</span>
+          {isDormant && <div style={styles.hint}>Рефлексия завершена</div>}
+          {status.wake_requested && <div style={styles.hint}>Пробуждение запрошено</div>}
+          {isError && <div style={styles.hint}>{status.error_message}</div>}
         </div>
 
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Progress</div>
-          <div style={{ ...styles.cardValue, fontSize: '20px' }}>
-            {status.progress_pct.toFixed(0)}%
+        {isReflecting && (
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Задачи рефлексии</div>
+            {Object.entries(status.processes).map(([name, phase]) => (
+              <div key={name} style={{ ...styles.row, justifyContent: 'space-between', marginBottom: '6px' }}>
+                <span>{PROCESS_LABELS[name] ?? name}</span>
+                <strong>{PROCESS_STATUS[phase] ?? phase}</strong>
+              </div>
+            ))}
+            {Object.keys(status.processes).length === 0 && (
+              <div style={styles.hint}>Детали задач недоступны для этого сеанса</div>
+            )}
           </div>
-          <div style={styles.progressBar}>
-            <div style={{ ...styles.progressFill, width: `${status.progress_pct}%` }} />
-          </div>
-        </div>
+        )}
 
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Elapsed / Remaining</div>
-          <div style={{ ...styles.cardValue, fontSize: '20px' }}>{elapsedStr}</div>
-          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-            Remaining: {remainingStr}
+        {status.elapsed_seconds != null && (
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Время с начала сна</div>
+            <div style={{ ...styles.cardValue, fontSize: '20px' }}>{elapsedStr}</div>
+            {(isReflecting || isDormant) && (
+              <div style={styles.hint}>
+                {endLabel}
+              </div>
+            )}
           </div>
-        </div>
+        )}
       </div>
 
       {/* ── Sleep Controls ────────────────────────────────── */}
-      <div style={styles.section}>
-        <h2 style={styles.sectionTitle}>🚀 Sleep Controls</h2>
+      {(isAwake || isReflecting || isDormant) && <div style={styles.section}>
+        <h2 style={styles.sectionTitle}>Управление сном</h2>
 
         {isAwake && (
           <>
@@ -442,40 +459,25 @@ export default function SleepControl() {
           </>
         )}
 
-        {/* Wake up button — visible when sleeping or committing */}
-        {(isSleeping || isCommitting) && (
+        {(isReflecting || isDormant) && sessionId && (
           <div style={styles.row}>
             <button
-              style={{ ...styles.btn, ...styles.btnDanger, ...(!canWakeUp ? styles.btnDisabled : {}) }}
+              style={{
+                ...styles.btn,
+                ...(isDormant ? styles.btnPrimary : styles.btnDanger),
+                ...(!canWakeUp ? styles.btnDisabled : {}),
+              }}
               disabled={!canWakeUp}
-              onClick={handleWakeUp}
+              onClick={() => handleWakeUp(sessionId, isDormant ? 'keep' : 'rollback')}
             >
-              {loading ? '⏳ Waking...' : '⏰ Wake Up Now'}
-            </button>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              {isCommitting ? 'Commit in progress — will wake after completion' : 'Force wake & rollback changes'}
-            </span>
-          </div>
-        )}
-
-        {/* Error state */}
-        {isError && (
-          <div style={{ marginTop: '12px' }}>
-            <div style={{ fontSize: '13px', color: 'var(--error)', marginBottom: '8px' }}>
-              Error: {status.error_message || 'Unknown error'}
-            </div>
-            <button
-              style={{ ...styles.btn, ...styles.btnWarning }}
-              onClick={handleWakeUp}
-            >
-              🔄 Recover & Wake
+              {isDormant ? 'Разбудить и сохранить результаты' : 'Прервать рефлексию и откатить изменения'}
             </button>
           </div>
         )}
-      </div>
+      </div>}
 
-      {/* ── Session Info (when sleeping) ──────────────────── */}
-      {(isSleeping || isCommitting) && status.session_id && (
+      {/* ── Session Info ──────────────────────────────────── */}
+      {status.session_id && (
         <div style={styles.section}>
           <h2 style={styles.sectionTitle}>📋 Session Info</h2>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '13px' }}>

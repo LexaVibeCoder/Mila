@@ -159,9 +159,7 @@ class MessageCoordinate:
                     pass
 
         # If Mila is sleeping — save first (so sleep summarizers see it),
-        # then queue for replay after wake. Previously this returned before
-        # add_chunk/push_message and dropped the session when
-        # _current_session_id was None after restart.
+        # then link the message to the active sleep session.
         from core.sleep.manager import is_sleeping, queue_incoming_message
         if is_sleeping():
             chunk_id = self._add_chunk(chat_id, user_id, placeholder, token_count=0,

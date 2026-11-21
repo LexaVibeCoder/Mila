@@ -4,13 +4,11 @@ core/sleep/state.py — Mila's sleep state machine.
 
 import json
 import sqlite3
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Optional, Any, Callable
+from typing import List, Dict, Any
 
-from config import settings
 from core.db import get_conn
 
 
@@ -22,13 +20,14 @@ class SleepState(str, Enum):
 
 
 class SleepStage(str, Enum):
-    DIARY_ANALYSIS = "diary_analysis"
-    DIALOG_SUMMARIZATION = "dialog_summarization"
-    USER_FACT_EXTRACTION = "user_fact_extraction"
-    VERIFICATION = "verification"
+    REFLECTION = "reflection"
+    DORMANT = "dormant"
     COMMITTING = "committing"
-    COMPLETED = "completed"
+    ROLLING_BACK = "rolling_back"
     IDLE = "idle"
+
+
+REFLECTION_PROCESSES = ("diary_analysis", "dialog_summarization", "user_fact_extraction")
 
 
 def _ensure_sleep_tables():
@@ -46,7 +45,9 @@ def _ensure_sleep_tables():
                 completed_at TEXT,
                 triggered_by TEXT DEFAULT 'manual',
                 error_message TEXT,
-                version INTEGER DEFAULT 1
+                version INTEGER DEFAULT 1,
+                wake_requested INTEGER NOT NULL DEFAULT 0,
+                processes_json TEXT NOT NULL DEFAULT '{}'
             );
             INSERT OR IGNORE INTO sleep_state (id, state) VALUES (1, 'awake');
             CREATE TABLE IF NOT EXISTS sleep_message_queue (
@@ -85,6 +86,17 @@ def _ensure_sleep_tables():
                 "ADD COLUMN rolled_back INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sleep_state)")}
+        for name, definition in (
+            ("wake_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ("processes_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if name not in columns:
+                try:
+                    conn.execute(f"ALTER TABLE sleep_state ADD COLUMN {name} {definition}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc):
+                        raise
         conn.commit()
     finally:
         conn.close()
@@ -107,7 +119,7 @@ def get_state() -> SleepState:
 
 
 def set_state(state: SleepState, session_id: str = None, triggered_by: str = "manual",
-              duration_minutes: int = None, error_message: str = None):
+              duration_minutes: int = None, error_message: str = None) -> bool:
     _ensure_sleep_tables()
     conn = get_conn()
     try:
@@ -120,57 +132,122 @@ def set_state(state: SleepState, session_id: str = None, triggered_by: str = "ma
             if duration_minutes:
                 scheduled_end = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
 
-            conn.execute(
+            cur = conn.execute(
                 """UPDATE sleep_state SET 
-                   state=?, session_id=?, current_stage='diary_analysis', 
+                   state=?, session_id=?, current_stage='reflection',
                    progress_pct=0.0, started_at=?, scheduled_end_at=?,
+                   wake_requested=0, processes_json=?,
                    triggered_by=?, error_message=NULL, version=version+1
-                   WHERE id=1""",
-                (state.value, session_id, now, scheduled_end, triggered_by)
+                   WHERE id=1 AND state='awake'""",
+                (state.value, session_id, now, scheduled_end,
+                 json.dumps(dict.fromkeys(REFLECTION_PROCESSES, "pending")), triggered_by)
             )
+            if cur.rowcount == 0:
+                return False
         elif state == SleepState.COMMITTING:
-            conn.execute(
+            cur = conn.execute(
                 """UPDATE sleep_state SET 
-                   state=?, current_stage='committing', progress_pct=95.0,
-                   version=version+1 WHERE id=1""",
-                (state.value,)
+                   state=?, current_stage='committing', wake_requested=0,
+                   version=version+1 WHERE id=1 AND session_id=?
+                   AND state='sleeping' AND current_stage<>'rolling_back'""",
+                (state.value, session_id)
             )
+            if cur.rowcount == 0:
+                return False
         elif state == SleepState.AWAKE:
             conn.execute(
                 """UPDATE sleep_state SET 
                    state=?, current_stage='idle', progress_pct=0.0,
                    completed_at=?, session_id=NULL, triggered_by='manual',
+                   wake_requested=0, processes_json='{}', started_at=NULL, scheduled_end_at=NULL,
                    error_message=NULL, version=version+1 WHERE id=1""",
                 (state.value, now)
             )
         elif state == SleepState.SLEEP_ERROR:
             conn.execute(
                 """UPDATE sleep_state SET 
-                   state=?, current_stage='idle', progress_pct=0.0,
+                   state=?, current_stage='idle', progress_pct=0.0, wake_requested=0,
                    error_message=?, version=version+1 WHERE id=1""",
                 (state.value, error_message)
             )
 
         conn.commit()
         print(f"[SleepState] → {state.value}")
+        return True
     finally:
         conn.close()
 
 
-def set_stage(stage: SleepStage, progress_pct: float = None):
+def get_sleep_stage(state: Dict) -> str:
+    """Normalize phases written by previous versions of the sleep worker."""
+    stage = state.get("current_stage")
+    if stage == SleepStage.ROLLING_BACK:
+        return SleepStage.ROLLING_BACK.value
+    if state.get("state") == SleepState.COMMITTING:
+        return SleepStage.COMMITTING.value
+    if state.get("state") == SleepState.SLEEPING:
+        legacy_dormant = stage == SleepStage.IDLE and (state.get("progress_pct") or 0) >= 89
+        if stage == SleepStage.DORMANT or legacy_dormant:
+            return SleepStage.DORMANT.value
+        return SleepStage.REFLECTION.value
+    return SleepStage.IDLE.value
+
+
+def set_process_status(session_id: str, process: str, status: str):
+    """Update one worker's phase without overwriting its parallel peers."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            """UPDATE sleep_state SET processes_json=json_set(processes_json, ?, ?)
+               WHERE id=1 AND session_id=? AND state='sleeping' AND current_stage='reflection'""",
+            (f"$.{process}", status, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def finish_reflection(session_id: str) -> bool:
+    """Enter dormant sleep only if the session has no pending rollback request."""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            """UPDATE sleep_state SET current_stage='dormant', progress_pct=100.0
+               WHERE id=1 AND session_id=? AND state='sleeping'
+                 AND current_stage='reflection' AND wake_requested=0""",
+            (session_id,),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def request_wake(session_id: str, stage: str) -> bool:
+    """Hand off wake to the session owner, guarded against a phase change."""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            """UPDATE sleep_state SET wake_requested=1
+               WHERE id=1 AND session_id=? AND state='sleeping' AND current_stage=?""",
+            (session_id, stage),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def begin_rollback(session_id: str):
+    """Publish rollback before starting undo operations."""
     _ensure_sleep_tables()
     conn = get_conn()
     try:
-        if progress_pct is not None:
-            conn.execute(
-                "UPDATE sleep_state SET current_stage=?, progress_pct=? WHERE id=1",
-                (stage.value, progress_pct)
-            )
-        else:
-            conn.execute(
-                "UPDATE sleep_state SET current_stage=? WHERE id=1",
-                (stage.value,)
-            )
+        conn.execute(
+            """UPDATE sleep_state SET current_stage='rolling_back', wake_requested=0
+               WHERE id=1 AND session_id=?""",
+            (session_id,),
+        )
         conn.commit()
     finally:
         conn.close()

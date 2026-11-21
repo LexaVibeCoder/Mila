@@ -1,6 +1,7 @@
 """Replies follow the global dialog focus, not the notification sender."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -262,6 +263,55 @@ async def test_proactive_iteration_limit_alert_survives_focus_change(monkeypatch
         chat_id=42, text=f"Ошибка пайплайна Mila\n{error}",
         disable_web_page_preview=True,
     )
+
+
+async def test_proactive_log_includes_llm_iterations_and_delivery(monkeypatch, tmp_path):
+    bot = _FakeBot()
+    bot.app = None
+    bot.pipeline = ThinkPipeline(None, None, "system", "system")
+    fake = _FakeLLM([_reply("alpha reply")])
+    monkeypatch.setattr(ThinkPipeline, "main_llm", property(lambda self: fake))
+    monkeypatch.setattr(pipeline_module, "build_main_llm_system_prompt", lambda *a, **k: "alpha system")
+    monkeypatch.setattr(pipeline_module, "get_needs_tracker",
+                        lambda: SimpleNamespace(apply_action_effect=lambda _: None))
+    monkeypatch.setattr(pipeline_module.settings, "LOG_DIR", str(tmp_path))
+    monkeypatch.setattr("core.db.get_chats_by_last_activity", lambda **kwargs: [{"chat_id": "10001"}])
+    monkeypatch.setattr("core.presence.get_presence", lambda: dict(DIALOG_A))
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+    monkeypatch.setattr(proactive, "build_proactive_block", lambda _: "alpha trigger")
+    monkeypatch.setattr(proactive, "_record_last_run", lambda _: None)
+    monkeypatch.setattr(proactive, "deliver_messages", AsyncMock(
+        return_value=delivery.DeliveryResult(False, "10001", 1, "interrupted"),
+    ))
+
+    await proactive._handle_action(bot, "write_to_user", {"write_to_user": 0.8}, 1300,
+                                   {"fatigue": 0.25})
+
+    path, = tmp_path.glob("pipeline_*.json")
+    log = json.loads(path.read_text())
+    assert log["chat_id"] == "proactive"
+    assert log["trigger"] == {"kind": "proactive", "text": "alpha trigger"}
+    assert log["llm_iterations"][0]["response"]["thoughts"] == "alpha reply"
+    assert log["proactive"]["idle_seconds"] == 1300
+    assert log["proactive"]["probabilities"] == {"write_to_user": 0.8}
+    assert log["proactive"]["delivery"] == {
+        "target": "10001", "sent": 1, "ok": False, "error": "interrupted",
+    }
+    assert log["success"] is False
+
+
+async def test_proactive_wait_is_logged_without_llm(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline_module.settings, "LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(proactive, "_record_last_run", lambda _: None)
+
+    await proactive._handle_action(None, "wait", {"wait": 1.0}, 1300, {"fatigue": 0.25})
+
+    path, = tmp_path.glob("pipeline_*.json")
+    log = json.loads(path.read_text())
+    assert log["success"] is True
+    assert log["llm_iterations"] == []
+    assert log["proactive"]["action"] == "wait"
+    assert log["proactive"]["needs"] == {"fatigue": 0.25}
 
 
 async def test_error_alert_rejects_chat_of_another_user(caplog):

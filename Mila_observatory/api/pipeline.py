@@ -17,6 +17,7 @@ from Mila_observatory.models import (
     PipelineChatItem, PipelineChatsResponse
 )
 from config import settings
+from core.media import describe_message_content
 
 router = APIRouter(tags=["pipeline"])
 
@@ -203,53 +204,25 @@ async def get_pipeline_log(filename: str):
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
         _sanitize_multimodal_messages(data)
+        if "raw_llm_responses" not in data:
+            data["raw_llm_responses"] = [
+                iteration["response"] for iteration in data.get("llm_iterations", [])
+                if "response" in iteration
+            ]
         return PipelineLogDetailResponse(filename=filename, data=data)
     except (json.JSONDecodeError, IOError) as e:
         raise HTTPException(status_code=500, detail=f"Failed to read log: {str(e)}")
 
 
-def _sanitize_content(content):
-    """Render multimodal message content as plain text for the UI.
-
-    Native vision/audio parts are stored in logs as OpenAI content blocks
-    (lists with {type, ...}). The UI needs no preview — just short labels.
-    Base64 payloads are dropped (they can be megabytes).
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        content = [content]
-    if isinstance(content, list):
-        parts = []
-        for p in content:
-            if isinstance(p, str):
-                parts.append(p)
-                continue
-            if not isinstance(p, dict):
-                continue
-            t = p.get("type", "")
-            if t == "text":
-                parts.append(str(p.get("text", "")))
-            elif t == "image_url":
-                parts.append("[фото]")
-            elif t == "input_audio":
-                parts.append("[голосовое сообщение]")
-            elif t:
-                parts.append(f"[{t}]")
-        return "\n".join(x for x in parts if x)
-    return str(content)
-
-
 def _sanitize_multimodal_messages(data: dict) -> None:
-    """Replace multimodal llm_messages content with plain-text labels, in place."""
-    try:
-        messages = data.get("llm_messages")
-        if not isinstance(messages, list):
-            return
-        for m in messages:
-            if isinstance(m, dict) and "content" in m:
-                m["content"] = _sanitize_content(m.get("content"))
-    except Exception:
-        pass
+    """Normalize content in legacy logs and in iteration changes."""
+    requests = data.get("llm_iterations") or []
+    batches = [data.get("llm_messages")]
+    for request in requests:
+        delta = request.get("context_delta") or {}
+        batches.append(delta.get("added_messages"))
+    for messages in batches:
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict) and "content" in message:
+                    message["content"] = describe_message_content(message["content"])

@@ -180,3 +180,33 @@ def build_multimodal_parts(text: str, image_data_urls: list[str] | None = None,
     if len(parts) == 1 and parts[0].get("type") == "text":
         return text
     return parts
+
+
+def describe_message_content(content):
+    """Keep text and describe attachments with short labels for pipeline logs.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        content = [content]
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+                continue
+            if not isinstance(p, dict):
+                continue
+            t = p.get("type", "")
+            if t == "text":
+                parts.append(str(p.get("text", "")))
+            elif t == "image_url":
+                parts.append("[фото]")
+            elif t == "input_audio":
+                parts.append("[голосовое сообщение]")
+            elif t:
+                parts.append(f"[{t}]")
+        return "\n".join(x for x in parts if x)
+    return str(content)

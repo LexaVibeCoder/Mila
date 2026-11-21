@@ -683,11 +683,12 @@ class ToolExecutor:
 
         candidates = None
         review = None
+        decision_trace = {}
         if decision_configured():
             context = await asyncio.to_thread(diary_review_context, entry, category)
             if context is not None:
                 _, candidates = context
-                review = await review_draft(entry, candidates)
+                review = await review_draft(entry, candidates, diagnostics=decision_trace)
 
         result = await asyncio.to_thread(
             add_diary_entry, entry, category,
@@ -695,6 +696,8 @@ class ToolExecutor:
         )
         if review and review.grammar_issue and result["status"] in ("written", "updated"):
             result["grammar_issue"] = True
+        if decision_trace:
+            result["decision_review"] = decision_trace
         return {"type": "write_diary", **result}
 
     async def _handle_update_diary(self, params: Dict) -> Dict:
@@ -756,18 +759,22 @@ class ToolExecutor:
         target = None
         candidates = None
         review = None
+        decision_trace = {}
         if decision_configured():
             context = await asyncio.to_thread(diary_review_context, entry, category, entry_id=numeric_id)
             if context is not None:
                 target, candidates = context
                 category_changed = category is not None and normalize_category(category) != target["category"]
-                review = await review_draft(entry, candidates, target=target, category_changed=category_changed)
+                review = await review_draft(entry, candidates, target=target,
+                                            category_changed=category_changed, diagnostics=decision_trace)
         result = await asyncio.to_thread(
             update_diary_entry, numeric_id, entry, category, expected=target,
             match=review.match if review else None, candidates=candidates if review else None,
         )
         if review and review.grammar_issue and result["status"] == "updated":
             result["grammar_issue"] = True
+        if decision_trace:
+            result["decision_review"] = decision_trace
         return {"type": "update_diary", **result}
 
     # ------------------------------------------------------------------

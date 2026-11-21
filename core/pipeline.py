@@ -15,6 +15,7 @@ Scheme:
 Each turn produces a detailed JSON log saved to LOG_DIR.
 """
 
+import glob
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import time
 import traceback
 import uuid
 import asyncio
+from difflib import unified_diff
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 
@@ -32,6 +34,7 @@ from core.llm.client import LLMClient, LLMRequestError
 from core.tools.executor import ToolExecutor, get_tool_definitions
 from core.llm.persona import build_main_llm_system_prompt
 from core.llm.embeddings import EmbeddingClient
+from core.media import describe_message_content
 from core.memory.vector import VectorMemory
 from core.needs.tracker import get_tracker as get_needs_tracker
 
@@ -145,6 +148,78 @@ def split_reply_bubbles(raw: str) -> list[str]:
         if cleaned:
             bubbles.append(cleaned)
     return bubbles
+
+
+def _context_delta(previous: list[dict], current: list[dict]) -> dict:
+    """Keep the shared prefix and record the new tail in request order."""
+    keep = 0
+    for before, after in zip(previous, current):
+        if before != after:
+            break
+        keep += 1
+    return {
+        "removed_count": len(previous) - keep,
+        "added_messages": current[keep:],
+    }
+
+
+async def save_pipeline_log(result: dict, user_message: str, user_id: str, chat_id: str) -> None:
+    """Persist one Pipeline entry atomically and rotate old files."""
+    log_dir = settings.LOG_DIR
+    now = datetime.now()
+    log_entry = {
+        "timestamp": now.isoformat(),
+        "turn_id": result.get("turn_id"),
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "success": result.get("success", False),
+        "error": result.get("error"),
+        "error_code": result.get("error_code"),
+        "timing": result.get("timing", {}),
+        "system_prompt": result.get("system_prompt", ""),
+        "llm_messages": result.get("llm_messages", []),
+        "trigger": result.get("trigger"),
+        "user_message": user_message,
+        "llm_iterations": result.get("llm_iterations", []),
+        "actions": result.get("actions", []),
+        "thoughts": result.get("thoughts", ""),
+        "reply_text": result.get("reply_text", ""),
+        "reply_texts": result.get("reply_texts", []),
+        "reply_via": result.get("reply_via", ""),
+        "reply_chat_id": result.get("reply_chat_id", ""),
+        "silence_reason": result.get("silence_reason", ""),
+        "traceback": result.get("traceback", None),
+    }
+    if result.get("proactive") is not None:
+        log_entry["proactive"] = result["proactive"]
+    if not log_entry["llm_iterations"]:
+        log_entry["raw_llm_responses"] = result.get("raw_llm_responses", [])
+
+    filename = f"pipeline_{now.strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}.json"
+    filepath = os.path.join(log_dir, filename)
+    temp_path = filepath + ".tmp"
+
+    def write_log():
+        os.makedirs(log_dir, exist_ok=True)
+        try:
+            with open(temp_path, "x", encoding="utf-8") as f:
+                json.dump(log_entry, f, ensure_ascii=False, indent=2, default=str)
+            os.replace(temp_path, filepath)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        files = sorted(glob.glob(os.path.join(log_dir, "pipeline_*.json")))
+        for old in files[:-200]:
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
+
+    try:
+        await asyncio.to_thread(write_log)
+        print(f"[Log] Saved to {filepath}")
+    except Exception as e:
+        print(f"[Log Error] Failed to save log: {e}")
 
 
 class ThinkPipeline:
@@ -456,6 +531,7 @@ class ThinkPipeline:
         refreshed by this turn's own switches; callers reject stale snapshots.
 
         Yields internal dicts:
+          {"kind": "iteration", "request": {...}, ...}
           {"kind": "llm", "content": str, "tool_calls": [...], "finish_reason": str}
           {"kind": "action", "action": executed_dict}
           {"kind": "reply_bubbles", "texts": [...]}
@@ -494,6 +570,7 @@ class ThinkPipeline:
         messages = list(agent_internal_history)
         if focus_chat and focus_chat != req_chat:
             messages = history_for(focus_chat)
+        notif_block = None
         if proactive_block:
             # Proactive turn: instructions + chat list on top, no fake notification.
             messages.append({"role": "system", "content": proactive_block})
@@ -530,6 +607,8 @@ class ThinkPipeline:
         max_iterations = _max_iterations()
         choice = _tool_choice()
         iteration = 0
+        previous_messages = []
+        previous_prompt = ""
         # Facts already injected by search_memory during this turn. Shared by
         # every search so overlapping queries can't duplicate the same fact.
         seen_memories: set[str] = set()
@@ -540,7 +619,8 @@ class ThinkPipeline:
             # `presence`/`state` are the turn snapshot, refreshed below only
             # when THIS turn switches state itself. Parallel turns must not
             # bleed their focus into this prompt/tools.
-            print(f"\n── Iteration {iteration}/{max_iterations} [{state}] ──")
+            turn_label = f" · turn {turn.turn_id}" if turn is not None else ""
+            print(f"\n── Iteration {iteration}/{max_iterations} [{state}]{turn_label} ──")
 
             active_chat = focus_chat or req_chat
             prompt_kwargs = dict(
@@ -564,16 +644,61 @@ class ThinkPipeline:
                 include_proactive=bool(enable_peek and proactive_block),
                 state=state)
 
-            yield {"kind": "iteration", "iteration": iteration,
-                   "system_prompt": main_system_prompt}
-            response = await self.main_llm.generate(
-                messages=messages,
-                system_prompt=main_system_prompt,
-                tools=tool_definitions if tool_definitions else None,
-                tool_choice=choice if tool_definitions else "none",
-                max_tokens=2048,
-                temperature=self.main_llm.default_temperature,
-            )
+            llm = self.main_llm
+            temperature = llm.default_temperature
+            max_tokens = 2048
+            tool_choice = choice if tool_definitions else "none"
+            request = {
+                "iteration": iteration,
+                "model": getattr(llm, "model", None),
+                "state": state,
+                "active_chat_id": active_chat,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "reasoning_effort": getattr(llm, "default_reasoning_effort", None),
+                "tool_choice": tool_choice,
+                "tools": [
+                    (tool.get("function") or {}).get("name") or tool.get("type", "unknown")
+                    for tool in tool_definitions
+                ],
+                "action_count": 0,
+            }
+            snapshot = [
+                {"role": msg.get("role", ""), "content": describe_message_content(msg.get("content"))}
+                for msg in messages
+            ]
+            if iteration > 1:
+                request["context_delta"] = _context_delta(previous_messages, snapshot)
+                if previous_prompt != main_system_prompt:
+                    request["system_prompt_diff"] = "\n".join(unified_diff(
+                        previous_prompt.split("\n"), main_system_prompt.split("\n"),
+                        fromfile=f"iteration {iteration - 1}", tofile=f"iteration {iteration}",
+                        lineterm="",
+                    ))
+            previous_messages, previous_prompt = snapshot, main_system_prompt
+            yield {
+                "kind": "iteration",
+                "request": request,
+                "max_iterations": max_iterations,
+                "system_prompt": main_system_prompt,
+                "llm_messages": snapshot,
+                "is_notification": bool(notif_block or (media or {}).get("event_line")),
+            }
+            request_start = time.monotonic()
+            try:
+                response = await llm.generate(
+                    messages=messages,
+                    system_prompt=main_system_prompt,
+                    tools=tool_definitions if tool_definitions else None,
+                    tool_choice=tool_choice,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except LLMRequestError as exc:
+                request["provider"] = exc.diagnostics
+                raise
+            finally:
+                request["duration_ms"] = round((time.monotonic() - request_start) * 1000)
 
             content = (response.get("thoughts", "") or "")
             tool_calls = response.get("tool_calls", None)
@@ -590,11 +715,12 @@ class ThinkPipeline:
                 "content": content,
                 "reasoning": response.get("reasoning", ""),
                 "tool_calls": [
-                    {"name": tc.function.name, "arguments": tc.function.arguments}
+                    {"id": getattr(tc, "id", None),
+                     "name": tc.function.name, "arguments": tc.function.arguments}
                     for tc in (tool_calls or [])
                 ],
                 "finish_reason": response.get("finish_reason"),
-                "system_prompt": main_system_prompt,
+                "provider": response.get("provider"),
             }
 
             actions = self._tool_calls_to_actions(tool_calls)
@@ -669,6 +795,8 @@ class ThinkPipeline:
                 status = executed.get("status")
                 diary_action = atype in ("write_diary", "update_diary")
                 existing_diary_text = executed.pop("existing_entry", None) if diary_action else None
+                if diary_action and "decision_review" in executed:
+                    executed["tool_call_id"] = action.get("_call_id")
                 action_succeeded = status in ("written", "updated") if diary_action else status != "error"
                 if action_succeeded and not sandbox:
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
@@ -872,53 +1000,9 @@ class ThinkPipeline:
                 return event["result"]
 
     async def _save_log(self, result: Dict, user_message: str, request_user_id: str | None = None, request_chat_id: str | None = None):
-        """Save a detailed JSON log of the pipeline run (rotated, max 200 files)."""
-        log_dir = settings.LOG_DIR
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-            # Best-effort rotation: keep newest 200 pipeline_*.json
-            import glob
-            files = sorted(glob.glob(os.path.join(log_dir, "pipeline_*.json")))
-            if len(files) > 200:
-                for old in files[:len(files) - 200]:
-                    try:
-                        os.unlink(old)
-                    except OSError:
-                        pass
-        except Exception:
-            pass
-
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "user_id": request_user_id or self.user_id,
-            "chat_id": request_chat_id or self.chat_id,
-            "user_message": user_message,
-            "system_prompt": result.get("system_prompt", ""),
-            "llm_messages": result.get("llm_messages", []),
-            "thoughts": result.get("thoughts", ""),
-            "reply_text": result.get("reply_text", ""),
-            "reply_texts": result.get("reply_texts", []),
-            "reply_via": result.get("reply_via", ""),
-            "reply_chat_id": result.get("reply_chat_id", ""),
-            "silence_reason": result.get("silence_reason", ""),
-            "actions": result.get("actions", []),
-            "raw_llm_responses": result.get("raw_llm_responses", []),
-            "success": result.get("success", False),
-            "error": result.get("error"),
-            "error_code": result.get("error_code"),
-            "timing": result.get("timing", {}),
-            "traceback": result.get("traceback", None),
-        }
-
-        filename = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.json"
-        filepath = os.path.join(log_dir, filename)
-
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(log_entry, f, ensure_ascii=False, indent=2, default=str)
-            print(f"[Log] Saved to {filepath}")
-        except Exception as e:
-            print(f"[Log Error] Failed to save log: {e}")
+        """Save an incoming turn using the shared Pipeline log format."""
+        await save_pipeline_log(result, user_message, request_user_id or self.user_id,
+                                request_chat_id or self.chat_id)
 
     async def process_message_stream(
         self,
@@ -936,6 +1020,7 @@ class ThinkPipeline:
         sandbox: bool = False,
         sandbox_context=None,
         sandbox_diary_context: str | None = None,
+        deferred_log: dict | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Streaming version consumed by core/queue.py and core/proactive.py.
 
@@ -950,12 +1035,15 @@ class ThinkPipeline:
 
         The reply event intentionally has no destination: the consumer sends
         via the turn context (dialog focus or explicit note target).
+        The proactive caller can defer writing the trace until delivery ends.
         """
         total_start = time.monotonic()
         req_user = request_user_id or self.user_id
         req_chat = request_chat_id or self.chat_id
         all_actions: List[Dict] = []
         raw_llm_responses: List[Dict] = []
+        llm_iterations: List[Dict] = []
+        initial_messages: List[Dict] = []
         reply_texts: List[str] = []
         reply_text = ""
         reply_via = ""
@@ -963,7 +1051,11 @@ class ThinkPipeline:
         silence_reason = ""
         system_prompt = ""
         iteration = 0
+        max_iterations = None
+        trigger = {"kind": "proactive" if proactive_block or (turn and turn.proactive) else "message",
+                   "text": proactive_block or user_message}
         error = error_code = failure_traceback = None
+        interruption = None
         try:
             async for step in self._run_stream(
                 user_message, agent_internal_history, media,
@@ -977,22 +1069,35 @@ class ThinkPipeline:
             ):
                 kind = step.get("kind")
                 if kind == "iteration":
-                    iteration = step["iteration"]
-                    system_prompt = step["system_prompt"]
+                    request = step["request"]
+                    iteration = request["iteration"]
+                    llm_iterations.append(request)
+                    if iteration == 1:
+                        system_prompt = step["system_prompt"]
+                        initial_messages = step["llm_messages"]
+                        max_iterations = step["max_iterations"]
+                        if trigger["kind"] == "message" and step["is_notification"]:
+                            trigger["kind"] = "notification"
                 elif kind == "llm":
                     iteration = step.get("iteration", iteration)
-                    system_prompt = step.get("system_prompt") or system_prompt
-                    raw_llm_responses.append({
+                    raw = {
                         "iteration": step.get("iteration"),
                         "thoughts": step.get("content", ""),
                         "reasoning": step.get("reasoning", ""),
                         "tool_calls": step.get("tool_calls", []),
                         "finish_reason": step.get("finish_reason"),
-                    })
+                    }
+                    raw_llm_responses.append(raw)
+                    if llm_iterations:
+                        llm_iterations[-1]["response"] = raw
+                        if step.get("provider"):
+                            llm_iterations[-1]["provider"] = step["provider"]
                     yield {"type": "thought", "thoughts": step.get("content", "")}
                 elif kind == "action":
                     action = step["action"]
                     all_actions.append(action)
+                    if llm_iterations:
+                        llm_iterations[-1]["action_count"] += 1
                     # Needs effect already applied inside _run_stream — do not double-count.
                     yield {"type": "action", "action": action}
                     if action.get("type") == "search_memory" and action.get("status") == "searched":
@@ -1033,6 +1138,10 @@ class ThinkPipeline:
                     yield {"type": "silence", "reason": silence_reason}
                     break
 
+        except (GeneratorExit, asyncio.CancelledError) as exc:
+            interruption = exc
+            error_code = "cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted"
+            error = f"Pipeline turn {error_code}"
         except Exception as e:
             error = str(e) or type(e).__name__
             if isinstance(e, IterationLimitError):
@@ -1046,6 +1155,8 @@ class ThinkPipeline:
 
         result = {
             "success": error is None,
+            "turn_id": turn.turn_id if turn is not None else uuid.uuid4().hex,
+            "trigger": trigger,
             "actions": all_actions,
             "thoughts": reply_text,
             "reply_text": reply_text,
@@ -1054,17 +1165,24 @@ class ThinkPipeline:
             "reply_chat_id": reply_chat_id,
             "silence_reason": silence_reason,
             "system_prompt": system_prompt,
-            "llm_messages": [],
+            "llm_messages": initial_messages,
+            "llm_iterations": llm_iterations,
             "error": error,
             "error_code": error_code,
             "raw_llm_responses": raw_llm_responses,
             "timing": {"total": f"{time.monotonic() - total_start:.2f}s",
-                       "iterations": iteration},
+                       "iterations": iteration, "max_iterations": max_iterations},
         }
         if not sandbox:
-            await self._save_log({**result, "traceback": failure_traceback},
-                                 proactive_block or user_message,
-                                 request_user_id=req_user, request_chat_id=req_chat)
+            log_result = {**result, "traceback": failure_traceback}
+            if deferred_log is not None:
+                # Proactive routing records delivery before saving the turn.
+                deferred_log.update(log_result)
+            else:
+                await self._save_log(log_result, proactive_block or user_message,
+                                     request_user_id=req_user, request_chat_id=req_chat)
+        if interruption is not None:
+            raise interruption
         if error is None:
             yield {"type": "done", "result": result}
         else:

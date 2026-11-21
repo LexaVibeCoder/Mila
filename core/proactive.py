@@ -18,10 +18,12 @@ import asyncio
 import re
 import time
 import uuid
+from contextlib import aclosing
 from datetime import datetime, timezone
 from typing import Any
 
 from core.delivery import TurnContext, deliver_messages
+from core.pipeline import save_pipeline_log
 from core.tg_adapter import notify_pipeline_error
 
 _LEADING_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*")
@@ -124,26 +126,60 @@ def build_proactive_block(chats: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def run_proactive_turn(bot) -> dict:
+async def _save_proactive_log(details: dict, outcome: dict, started: float,
+                              trace: dict | None = None) -> None:
+    result = dict(trace or {})
+    action = details["action"]
+    summary = outcome.get("error") or outcome.get("silence_reason") or outcome.get("message")
+    if not summary and outcome.get("reply_texts") == []:
+        summary = "no reply"
+    timing = {**result.get("timing", {}), "proactive_total_ms": round((time.monotonic() - started) * 1000)}
+    result.update(
+        turn_id=result.get("turn_id") or uuid.uuid4().hex,
+        trigger=result.get("trigger") or {"kind": "proactive", "text": action},
+        proactive={**details, "outcome": summary},
+        success=outcome.get("success", False),
+        error=outcome.get("error") or (summary if not outcome.get("success") else None),
+        error_code=outcome.get("error_code") or result.get("error_code"),
+        timing=timing,
+    )
+    await save_pipeline_log(result, f"Проактивность · {action}", "proactive", "proactive")
+
+
+async def run_proactive_turn(bot, *, decision: dict | None = None) -> dict:
     """One proactive LLM turn. Returns pipeline result dict (may be empty)."""
+    started = time.monotonic()
+    details = {"action": "write_to_user", **(decision or {})}
+    trace = {"turn_id": uuid.uuid4().hex}
+    outcome = {"success": False, "error": "interrupted", "error_code": "interrupted"}
     lock = getattr(getattr(bot, "messages", None), "turn_lock", None)
-    if lock is not None:
-        async with lock:
-            return await _run_proactive_turn_locked(bot)
-    return await _run_proactive_turn_locked(bot)
+    try:
+        if lock is not None:
+            async with lock:
+                outcome = await _run_proactive_turn_locked(bot, trace, details)
+        else:
+            outcome = await _run_proactive_turn_locked(bot, trace, details)
+        return outcome
+    except Exception as exc:
+        outcome = {"success": False, "error": type(exc).__name__, "error_code": "proactive_error"}
+        raise
+    finally:
+        await _save_proactive_log(details, outcome, started, trace)
 
 
-async def _run_proactive_turn_locked(bot) -> dict:
+async def _run_proactive_turn_locked(bot, trace: dict, details: dict) -> dict:
     from core.db import get_chats_by_last_activity
 
     max_chats = int(_cfg("max_chats", 20) or 20)
     chats = get_chats_by_last_activity(limit=max_chats)
+    details["chat_count"] = len(chats)
     if not chats:
         print("[Proactive] write_to_user but no chats — skip")
         return {"success": False, "error": "no chats"}
 
     revisions = dict(getattr(getattr(bot, "messages", None), "_revisions", {}))
     block = build_proactive_block(chats)
+    trace["trigger"] = {"kind": "proactive", "text": block}
     print(f"[Proactive] write_to_user: {len(chats)} чатов, запуск хода")
 
     # A proactive turn starts without an owner chat. Its delivery target is
@@ -154,7 +190,7 @@ async def _run_proactive_turn_locked(bot) -> dict:
     except Exception:
         presence_snapshot = {"state": "rest", "focus_chat_id": None}
     turn = TurnContext(
-        turn_id=uuid.uuid4().hex,
+        turn_id=trace["turn_id"],
         chat_id="proactive",
         user_id="proactive",
         presence=presence_snapshot,
@@ -182,7 +218,7 @@ async def _run_proactive_turn_locked(bot) -> dict:
         return bool(target and getattr(coordinator, "_revisions", {}).get(target, 0) > revisions.get(target, 0))
 
     try:
-        async for ev in bot.pipeline.process_message_stream(
+        async with aclosing(bot.pipeline.process_message_stream(
             user_message="",
             user_visible_history=[],
             agent_internal_history=[],
@@ -194,45 +230,43 @@ async def _run_proactive_turn_locked(bot) -> dict:
             enable_peek=True,
             proactive_block=block,
             history_loader=load_history,
-        ):
-            etype = ev.get("type")
-            if etype == "error":
-                await notify_pipeline_error(bot.app, bot.me.id, ev["error"])
-                return ev.get("result") or {"success": False, "error": ev["error"]}
-            if interrupted(str(turn.presence.get("focus_chat_id") or "")):
-                return {"success": False, "error": "interrupted"}
-            if etype == "thought":
-                preview = (ev.get("thoughts") or "")[:120].replace("\n", " ")
-                if preview.strip():
-                    print(f"  [Proactive] {preview}...")
-            elif etype == "action":
-                a = ev.get("action", {})
-                all_actions.append(a)
-                at = a.get("type")
-                if at == "peek_recent_chats":
-                    print(f"  [Proactive] peek: {len(a.get('chats') or [])} чатов")
-                elif at in ("enter_dialog", "enter_rest", "enter_working"):
-                    print(f"  [Proactive] {at} → {a.get('chat_id', a.get('state', ''))}")
-                elif at == "start_sleep":
-                    print(f"  [Proactive] sleep started for {a.get('duration_minutes')} мин")
-                elif at == "send_message":
-                    print(f"  [Proactive] send_message ready: {(a.get('text') or '')[:80]}")
-            elif etype == "reply":
-                reply_texts = list(ev.get("texts") or [])
-                reply_chat_id = turn.resolve_target() or ""
-                reply_via = ev.get("via", "")
-            elif etype == "silence":
-                silence_reason = ev.get("reason", "")
-                print(f"  [Proactive] silence: {silence_reason}")
-            elif etype == "done":
-                res = ev.get("result", {})
-                if not reply_texts and res.get("reply_texts"):
-                    reply_texts = list(res.get("reply_texts") or [])
+            deferred_log=trace,
+        )) as stream:
+            async for ev in stream:
+                etype = ev.get("type")
+                if etype == "error":
+                    await notify_pipeline_error(bot.app, bot.me.id, ev["error"])
+                    return ev.get("result") or {"success": False, "error": ev["error"]}
+                if interrupted(str(turn.presence.get("focus_chat_id") or "")):
+                    return {"success": False, "error": "interrupted"}
+                if etype == "action":
+                    a = ev.get("action", {})
+                    all_actions.append(a)
+                    at = a.get("type")
+                    if at == "peek_recent_chats":
+                        print(f"  [Proactive] peek: {len(a.get('chats') or [])} чатов")
+                    elif at in ("enter_dialog", "enter_rest", "enter_working"):
+                        print(f"  [Proactive] {at} → {a.get('chat_id', a.get('state', ''))}")
+                    elif at == "start_sleep":
+                        print(f"  [Proactive] sleep started for {a.get('duration_minutes')} мин")
+                    elif at == "send_message":
+                        print(f"  [Proactive] send_message ready: {(a.get('text') or '')[:80]}")
+                elif etype == "reply":
+                    reply_texts = list(ev.get("texts") or [])
                     reply_chat_id = turn.resolve_target() or ""
-                    reply_via = res.get("reply_via", "")
-                if not silence_reason:
-                    silence_reason = res.get("silence_reason", "")
-                break
+                    reply_via = ev.get("via", "")
+                elif etype == "silence":
+                    silence_reason = ev.get("reason", "")
+                    print(f"  [Proactive] silence: {silence_reason}")
+                elif etype == "done":
+                    res = ev.get("result", {})
+                    if not reply_texts and res.get("reply_texts"):
+                        reply_texts = list(res.get("reply_texts") or [])
+                        reply_chat_id = turn.resolve_target() or ""
+                        reply_via = res.get("reply_via", "")
+                    if not silence_reason:
+                        silence_reason = res.get("silence_reason", "")
+                    break
     except Exception as e:
         print(f"[Proactive] turn failed: {e}")
         return {"success": False, "error": str(e)}
@@ -288,6 +322,8 @@ async def _run_proactive_turn_locked(bot) -> dict:
         via=reply_via,
         before_bubble=guard,
     )
+    details["delivery"] = {"target": reply_chat_id, "sent": delivery.sent,
+                           "ok": delivery.ok, "error": delivery.error}
     if not delivery.ok or not delivery.sent:
         print(f"[Proactive] send failed: {delivery.error or 'no bubbles sent'}")
         return {"success": False, "error": delivery.error or "delivery failed"}
@@ -325,11 +361,21 @@ def _record_last_run(entry: dict) -> None:
 
 async def _handle_action(bot, action: str, probs: dict, idle: float,
                          needs: dict, dry_run: bool = False,
-                         forced: bool = False) -> dict:
+                         forced: bool = False, inference: dict | None = None) -> dict:
     """Single routing point for scheduled AND forced runs (real or dry-run).
 
     dry_run only describes what WOULD happen: no LLM turn, no send, no sleep.
     """
+    started = time.monotonic()
+    decision = {
+        "action": action, "probabilities": probs or {}, "needs": needs,
+        "forced": forced, "dry_run": dry_run, "idle_seconds": round(idle),
+    }
+    if inference is not None:
+        decision["inference"] = {
+            key: inference[key] for key in ("inference_time_ms", "model_loaded", "fallback")
+            if key in inference
+        }
     summary = ""
     if action == "write_to_user":
         if dry_run:
@@ -353,7 +399,7 @@ async def _handle_action(bot, action: str, probs: dict, idle: float,
                 add_event("proactive", f"state_agent → write_to_user (idle {idle:.0f}s)")
             except Exception:
                 pass
-            outcome = await run_proactive_turn(bot)
+            outcome = await run_proactive_turn(bot, decision=decision)
             if outcome.get("success") and outcome.get("reply_texts"):
                 summary = (f"sent {len(outcome['reply_texts'])} bubble(s) "
                            f"→ {outcome.get('reply_chat_id')}")
@@ -400,6 +446,9 @@ async def _handle_action(bot, action: str, probs: dict, idle: float,
             pass
         outcome = {"success": True, "stub": True}
 
+    if action != "write_to_user" or dry_run:
+        await _save_proactive_log({**decision, "summary": summary}, outcome, started)
+
     _record_last_run({
         "at": datetime.now(timezone.utc).isoformat(),
         "action": action,
@@ -445,6 +494,7 @@ async def _tick(bot) -> None:
         _last_run_ts = now
 
         # State agent inference (global needs, no chat).
+        started = time.monotonic()
         try:
             from core.needs.tracker import get_tracker
             tracker = get_tracker()
@@ -452,12 +502,17 @@ async def _tick(bot) -> None:
             result = tracker.run_inference(needs)
         except Exception as e:
             print(f"[Proactive] state_agent failed: {e}")
+            await _save_proactive_log(
+                {"action": "state_agent", "idle_seconds": round(idle)},
+                {"success": False, "error": type(e).__name__, "error_code": "state_agent_error"},
+                started,
+            )
             return
 
         action = (result or {}).get("action", "wait")
         probs = (result or {}).get("probabilities", {})
         print(f"[Proactive] idle {idle:.0f}s → state_agent: {action} {probs}")
-        await _handle_action(bot, action, probs, idle, needs)
+        await _handle_action(bot, action, probs, idle, needs, inference=result)
     except Exception as e:
         print(f"[Proactive] tick error: {e}")
 
@@ -494,9 +549,11 @@ async def _run_forced(bot, cmd: dict) -> None:
         print(f"[Proactive] forced: unknown action {force_action!r} — ignored")
         return
 
-    def _skip(reason: str) -> None:
+    started = time.monotonic()
+
+    async def _skip(reason: str) -> None:
         print(f"[Proactive] forced run skipped: {reason}")
-        _record_last_run({
+        entry = {
             "at": datetime.now(timezone.utc).isoformat(),
             "action": force_action or "unknown",
             "probabilities": {},
@@ -504,12 +561,14 @@ async def _run_forced(bot, cmd: dict) -> None:
             "dry_run": dry_run,
             "idle_seconds": round(get_global_idle_seconds()),
             "result": f"skipped: {reason}",
-        })
+        }
+        _record_last_run(entry)
+        await _save_proactive_log({**entry, "summary": entry["result"]}, {"success": True}, started)
 
     try:
         from core.sleep.manager import is_sleeping, is_committing
         if is_sleeping() or is_committing():
-            _skip("Mila is sleeping")
+            await _skip("Mila is sleeping")
             return
     except Exception:
         pass
@@ -519,7 +578,7 @@ async def _run_forced(bot, cmd: dict) -> None:
     except Exception:
         st = "rest"
     if st not in ("rest", "working"):
-        _skip(f"presence is {st} (needs rest/working)")
+        await _skip(f"presence is {st} (needs rest/working)")
         return
 
     try:
@@ -527,6 +586,7 @@ async def _run_forced(bot, cmd: dict) -> None:
         tracker = get_tracker()
         needs = _apply_needs_override(tracker.get_needs(force=True),
                                       cmd.get("needs_override"))
+        result = None
         if force_action:
             action = force_action
             probs = {a: 1.0 if a == force_action else 0.0 for a in VALID_ACTIONS}
@@ -536,12 +596,17 @@ async def _run_forced(bot, cmd: dict) -> None:
             probs = (result or {}).get("probabilities", {})
     except Exception as e:
         print(f"[Proactive] forced run failed: {e}")
+        await _save_proactive_log(
+            {"action": force_action or "state_agent", "forced": True, "dry_run": dry_run},
+            {"success": False, "error": type(e).__name__, "error_code": "state_agent_error"},
+            started,
+        )
         return
 
     idle = get_global_idle_seconds()
     print(f"[Proactive] forced run (dry={dry_run}): {action} {probs}")
     await _handle_action(bot, action, probs, idle, needs,
-                         dry_run=dry_run, forced=True)
+                         dry_run=dry_run, forced=True, inference=result)
     if not dry_run:
         _last_run_ts = time.monotonic()
 

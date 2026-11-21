@@ -11,6 +11,7 @@ import asyncio
 import re
 import time
 import uuid
+from contextlib import aclosing
 
 from pytdbot import types
 
@@ -556,7 +557,7 @@ class MessageCoordinate:
                     sent_any = True
                 return result.ok and result.sent > 0
 
-            async for gen_event in bot.pipeline.process_message_stream(
+            async with aclosing(bot.pipeline.process_message_stream(
                 user_message=batch_text,
                 user_visible_history=user_visible_history,
                 agent_internal_history=agent_internal_history,
@@ -566,70 +567,69 @@ class MessageCoordinate:
                 request_chat_id=request_chat_id,
                 turn=turn,
                 history_loader=load_history,
-            ):
-                etype = gen_event.get("type")
-                if etype == "error":
-                    # An operational alert belongs to the account itself,
-                    # regardless of whether the conversation was interrupted.
-                    await notify_pipeline_error(client, bot.me.id, gen_event["error"])
+            )) as stream:
+                async for gen_event in stream:
+                    etype = gen_event.get("type")
+                    if etype == "error":
+                        # An operational alert belongs to the account itself,
+                        # regardless of whether the conversation was interrupted.
+                        await notify_pipeline_error(client, bot.me.id, gen_event["error"])
 
-                # If a new message arrived or the peer started typing
-                # mid-generation → stop and wait for their message.
-                # The batch was already drained: put it back if nothing was
-                # delivered yet, otherwise this turn would be silently lost.
-                reason = interrupted()
-                if reason is not None:
-                    if not sent_any and not has_silence_action:
-                        self._restore_pending(chat_id, batch_text, media)
-                    print(f"[Batch] Interrupted during generation ({reason}) — batch restored")
-                    return True
-
-                if etype == "thought":
-                    preview = gen_event.get("thoughts", "")[:120].replace("\n", " ")
-                    print(f"  Content: {preview}...")
-                    if gen_event.get("thoughts"):
-                        full_response = gen_event.get("thoughts")
-                elif etype == "action":
-                    action = gen_event.get("action", {})
-                    atype = action.get("type")
-                    if atype == "send_message":
-                        print(f"[Tool] send_message ready (will send via reply): "
-                              f"{(action.get('text') or '')[:80]}")
-                    elif atype in ("enter_dialog", "enter_rest", "enter_working"):
-                        print(f"\n[Presence] {atype} → {action.get('chat_id', action.get('state', ''))}")
-                    elif atype == "start_sleep":
-                        has_silence_action = True
-                        print(f"\n[Sleep] Started for {action.get('duration_minutes')} min")
-                    elif atype == "search_memory":
-                        print(f"[Memory] Search: '{action.get('query', '')}'")
-                    elif atype == "write_diary":
-                        print("\n[Diary] Entry written")
-                    elif atype == "update_diary":
-                        print("\n[Diary] Entry updated")
-                elif etype == "reply":
-                    texts = gen_event.get("texts") or ([gen_event.get("text")] if gen_event.get("text") else [])
-                    via = gen_event.get("via", "bubbles")
-                    joined = "\n".join(t for t in texts if t)
-                    full_response = joined or full_response
-                    # Recipient comes from focus/grant, not the event.
-                    ok = await _send_bubbles(texts, turn, via)
-                    if not ok:
-                        # Interrupted before send → restart batch.
-                        post_check = interrupted()
-                        if post_check is not None and not sent_any:
+                    # If a new message arrived or the peer started typing
+                    # mid-generation → stop and wait for their message.
+                    # The batch was already drained: put it back if nothing was
+                    # delivered yet, otherwise this turn would be silently lost.
+                    reason = interrupted()
+                    if reason is not None:
+                        if not sent_any and not has_silence_action:
                             self._restore_pending(chat_id, batch_text, media)
-                            return True
-                elif etype == "silence":
-                    has_silence_action = True
-                    print(f"\n[Skip] {gen_event.get('reason', '')}")
-                elif etype == "search_result":
-                    print("  [Search results added to context]")
-                elif etype == "done":
-                    result = gen_event.get("result", {})
-                    if result.get("reply_text"):
-                        full_response = result.get("reply_text", full_response)
-                    if result.get("silence_reason") and not sent_any:
+                        print(f"[Batch] Interrupted during generation ({reason}) — batch restored")
+                        return True
+
+                    if etype == "thought":
+                        if gen_event.get("thoughts"):
+                            full_response = gen_event.get("thoughts")
+                    elif etype == "action":
+                        action = gen_event.get("action", {})
+                        atype = action.get("type")
+                        if atype == "send_message":
+                            print(f"[Tool] send_message ready (will send via reply): "
+                                  f"{(action.get('text') or '')[:80]}")
+                        elif atype in ("enter_dialog", "enter_rest", "enter_working"):
+                            print(f"\n[Presence] {atype} → {action.get('chat_id', action.get('state', ''))}")
+                        elif atype == "start_sleep":
+                            has_silence_action = True
+                            print(f"\n[Sleep] Started for {action.get('duration_minutes')} min")
+                        elif atype == "search_memory":
+                            print(f"[Memory] Search: '{action.get('query', '')}'")
+                        elif atype == "write_diary":
+                            print("\n[Diary] Entry written")
+                        elif atype == "update_diary":
+                            print("\n[Diary] Entry updated")
+                    elif etype == "reply":
+                        texts = gen_event.get("texts") or ([gen_event.get("text")] if gen_event.get("text") else [])
+                        via = gen_event.get("via", "bubbles")
+                        joined = "\n".join(t for t in texts if t)
+                        full_response = joined or full_response
+                        # Recipient comes from focus/grant, not the event.
+                        ok = await _send_bubbles(texts, turn, via)
+                        if not ok:
+                            # Interrupted before send → restart batch.
+                            post_check = interrupted()
+                            if post_check is not None and not sent_any:
+                                self._restore_pending(chat_id, batch_text, media)
+                                return True
+                    elif etype == "silence":
                         has_silence_action = True
+                        print(f"\n[Skip] {gen_event.get('reason', '')}")
+                    elif etype == "search_result":
+                        print("  [Search results added to context]")
+                    elif etype == "done":
+                        result = gen_event.get("result", {})
+                        if result.get("reply_text"):
+                            full_response = result.get("reply_text", full_response)
+                        if result.get("silence_reason") and not sent_any:
+                            has_silence_action = True
 
             # ── Post-processing (no-answer save) ──
             # No fallback sends: dialog answers arrive via `reply` bubbles,

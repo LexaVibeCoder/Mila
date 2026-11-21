@@ -10,16 +10,18 @@ from config import settings, normalize_api_base
 class LLMRequestError(RuntimeError):
     """A terminal provider failure with a safe diagnostic message."""
 
-    def __init__(self, status_code: int | None):
+    def __init__(self, status_code: int | None, diagnostics: dict | None = None,
+                 *, message: str | None = None):
         self.status_code = status_code
+        self.diagnostics = diagnostics or {"attempts": [{"http_status": status_code}]}
         self.authentication_failed = status_code in (401, 403)
         if self.authentication_failed:
-            message = f"LLM authorization failed (HTTP {status_code})"
+            default_message = f"LLM authorization failed (HTTP {status_code})"
         elif status_code is not None:
-            message = f"LLM request failed (HTTP {status_code})"
+            default_message = f"LLM request failed (HTTP {status_code})"
         else:
-            message = "LLM request failed"
-        super().__init__(message)
+            default_message = "LLM request failed"
+        super().__init__(message or default_message)
 
 
 def _is_openrouter(api_base: Optional[str]) -> bool:
@@ -173,17 +175,23 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
-        last_error = None
+        attempts: list[dict] = []
         audio_stripped = False
         for attempt in range(1, max_retries + 1):
+            start_time = time.monotonic()
             try:
-                start_time = time.time()
                 response = await self.client.chat.completions.create(**kwargs)
-                elapsed = time.time() - start_time
-                print(f"  [LLM] Response in {elapsed:.2f}s")
             except Exception as e:
                 status = getattr(e, "status_code", None)
-                failure = LLMRequestError(status)
+                attempt_log = {
+                    "duration_ms": round((time.monotonic() - start_time) * 1000),
+                    "http_status": status,
+                    "request_id": getattr(e, "request_id", None),
+                    "outcome": type(e).__name__,
+                    "audio_stripped": audio_stripped,
+                }
+                attempts.append(attempt_log)
+                failure = LLMRequestError(status, {"attempts": attempts})
                 if failure.authentication_failed:
                     logging.getLogger(__name__).error("%s", failure)
                     raise failure from None
@@ -196,6 +204,7 @@ class LLMClient:
                     print(f"  [LLM] Audio rejected (HTTP {status}), retrying text-only...")
                     audio_stripped = True
                     kwargs["messages"] = _strip_audio_parts(kwargs.get("messages"))
+                    attempt_log["retry_delay_ms"] = 1000
                     await asyncio.sleep(1.0)
                     continue
                 print(f"  [LLM] API Error (attempt {attempt}): {failure}")
@@ -206,19 +215,29 @@ class LLMClient:
                 )
                 if can_retry and retryable:
                     wait = _retry_wait(e, attempt, retry_delay)
+                    attempt_log["retry_delay_ms"] = round(wait * 1000)
                     print(f"  [LLM] Retry in {wait:.1f}s...")
                     await asyncio.sleep(wait)
                     continue
                 raise failure from None
 
+            elapsed = time.monotonic() - start_time
+            print(f"  [LLM] Response in {elapsed:.2f}s")
+            attempt_log = {
+                "duration_ms": round(elapsed * 1000),
+                "request_id": getattr(response, "_request_id", None),
+                "outcome": "ok" if response.choices else "empty_choices",
+                "audio_stripped": audio_stripped,
+            }
+            attempts.append(attempt_log)
             if not response.choices:
                 print(f"  [LLM] Empty response choices (attempt {attempt}), retrying...")
-                last_error = Exception("Empty response from LLM API")
                 if attempt < max_retries:
-                    await asyncio.sleep(retry_delay * (2 ** (attempt - 1)))
+                    wait = retry_delay * (2 ** (attempt - 1))
+                    attempt_log["retry_delay_ms"] = round(wait * 1000)
+                    await asyncio.sleep(wait)
                     continue
-                else:
-                    raise Exception("Empty response from LLM API after all retries")
+                break
 
             choice = response.choices[0]
             message = choice.message
@@ -232,6 +251,7 @@ class LLMClient:
             if has_tool_calls:
                 tool_calls = message.tool_calls
 
+            usage = getattr(response, "usage", None)
             return {
                 "role": message.role,
                 "thoughts": message.content or "",
@@ -239,9 +259,19 @@ class LLMClient:
                 "finish_reason": choice.finish_reason,
                 # OpenRouter returns `reasoning`, local servers `reasoning_content`.
                 "reasoning": _extract_reasoning(message),
+                "provider": {
+                    "attempts": attempts,
+                    "response_id": getattr(response, "id", None),
+                    "model": getattr(response, "model", None),
+                    "usage": {
+                        key: getattr(usage, key, None)
+                        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    } if usage is not None else None,
+                },
             }
 
-        raise last_error or Exception("Empty response from LLM API")
+        raise LLMRequestError(None, {"attempts": attempts},
+                              message="Empty response from LLM API after all retries")
 
 
 def _extract_reasoning(message) -> Any:

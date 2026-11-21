@@ -99,6 +99,7 @@ async def test_authorization_error_never_retries_even_with_audio(
 
     create.assert_awaited_once()
     assert exc.value.authentication_failed
+    assert exc.value.diagnostics["attempts"][0]["http_status"] == status
     assert "provider-private-detail" not in caplog.text + capsys.readouterr().out
     assert any(record.levelname == "ERROR" for record in caplog.records)
 
@@ -125,7 +126,38 @@ async def test_transient_provider_failure_retries_with_delay(status, monkeypatch
         result = await client.generate([])
 
     assert result["thoughts"] == "alpha reply"
+    attempts = result["provider"]["attempts"]
+    assert len(attempts) == 2
+    assert attempts[0]["http_status"] == status
+    assert attempts[1]["outcome"] == "ok"
     assert create.await_count == 2
     sleep.assert_awaited_once()
     minimum = 2 if status is None else 4
     assert minimum <= sleep.await_args.args[0] <= minimum + 0.5
+
+
+async def test_audio_fallback_is_recorded_in_attempts(monkeypatch):
+    request = httpx.Request("POST", "http://127.0.0.1:9/v1/chat/completions")
+    failure = openai.APIStatusError(
+        "audio rejected", body=None, response=httpx.Response(415, request=request),
+    )
+    message = SimpleNamespace(role="assistant", content="alpha reply")
+    response = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+    create = AsyncMock(side_effect=[failure, response])
+    client = LLMClient()
+    monkeypatch.setattr(client.client.chat.completions, "create", create)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "alpha"},
+        {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+    ]}]
+
+    async with client.client:
+        result = await client.generate(messages)
+
+    attempts = result["provider"]["attempts"]
+    assert attempts[0]["http_status"] == 415
+    assert attempts[0]["audio_stripped"] is False
+    assert attempts[1]["audio_stripped"] is True
+    fallback = create.await_args_list[1].kwargs["messages"]
+    assert fallback[0]["content"] == [{"type": "text", "text": "alpha"}]

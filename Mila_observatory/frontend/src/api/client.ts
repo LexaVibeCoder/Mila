@@ -206,23 +206,62 @@ export interface PipelineMessage {
 export interface PipelineRawResponse {
   iteration: number;
   thoughts: string;
-  reasoning?: string;
-  tool_calls: { name: string; arguments: string }[];
+  reasoning?: unknown;
+  tool_calls: { id?: string | null; name: string; arguments: string }[];
   finish_reason?: string;
+}
+
+export interface PipelineIteration {
+  iteration: number;
+  model?: string | null;
+  state: string;
+  active_chat_id: string;
+  duration_ms?: number;
+  max_tokens: number;
+  temperature: number;
+  reasoning_effort?: string | null;
+  tool_choice: string;
+  tools: string[];
+  action_count: number;
+  provider?: Record<string, unknown>;
+  response?: PipelineRawResponse;
+  system_prompt_diff?: string;
+  context_delta?: { removed_count: number; added_messages: PipelineMessage[] };
 }
 
 export interface PipelineLogDetail {
   timestamp: string;
+  turn_id?: string | null;
   user_id: string;
   chat_id: string;
   user_message: string;
+  trigger?: { kind: 'message' | 'notification' | 'proactive'; text: string } | null;
+  proactive?: {
+    action: string;
+    idle_seconds?: number;
+    forced?: boolean;
+    dry_run?: boolean;
+    probabilities?: Record<string, number>;
+    needs?: Record<string, unknown>;
+    chat_count?: number;
+    summary?: string;
+    outcome?: string | null;
+    delivery?: { target: string; sent: number; ok: boolean; error?: string | null };
+  };
   system_prompt: string;
   llm_messages: PipelineMessage[];
   thoughts: string;
+  reply_text?: string;
+  reply_texts?: string[];
+  reply_via?: string;
+  reply_chat_id?: string;
+  silence_reason?: string;
   actions: Record<string, unknown>[];
   raw_llm_responses: PipelineRawResponse[];
+  llm_iterations?: PipelineIteration[];
   success: boolean;
   error?: string | null;
+  error_code?: string | null;
   timing?: Record<string, unknown>;
   traceback?: string | null;
 }

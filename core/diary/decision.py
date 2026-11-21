@@ -1,6 +1,7 @@
 """Review drafts of diary entries using the OpenRouter Decisions API."""
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -77,6 +78,7 @@ def _match_question(candidates: list[dict], target: dict | None, category_change
 
 async def review_draft(
     text: str, candidates: list[dict], *, target: dict | None = None, category_changed: bool = False,
+    diagnostics: dict | None = None,
 ) -> DraftReview | None:
     """Return a confident semantic match and flag clear grammatical errors."""
     if not decision_configured():
@@ -103,6 +105,10 @@ async def review_draft(
         "state": state,
         "questions": questions,
     }
+    started = time.monotonic()
+    trace = diagnostics if diagnostics is not None else {}
+    trace.update(model=payload["model"], candidate_ids=[entry["id"] for entry in candidates],
+                 target_id=target["id"] if target is not None else None, status="invalid_response")
     url = f"{decision_api_base(settings.DECISION_API_BASE)}/decisions"
     try:
         async with asyncio.timeout(8), httpx.AsyncClient() as client:
@@ -113,6 +119,8 @@ async def review_draft(
         answers = response.json()["answers"]
         grammar = answers.get("grammar", {})
         probability = grammar.get("noul") if grammar.get("type") == "noul" else None
+        if type(probability) in (int, float) and 0 <= probability <= 1:
+            trace["grammar_probability"] = probability
         grammar_issue = type(probability) in (int, float) and _GRAMMAR_THRESHOLD <= probability <= 1
 
         match = None
@@ -124,16 +132,23 @@ async def review_draft(
             probability = relation["probabilities"][choice]
             if type(probability) not in (int, float) or not 0 <= probability <= 1:
                 return None
+            trace["relation"] = {"choice": choice, "probability": probability}
             if probability >= _MATCH_THRESHOLD:
                 match = matches.get(choice)
                 if match and match[0] == "replace" and probability < _REPLACE_THRESHOLD:
                     match = ("update_suggested", match[1])
+        trace.update(status="reviewed", grammar_issue=grammar_issue,
+                     accepted_match={"kind": match[0], "entry_id": match[1]["id"]} if match else None)
         return DraftReview(match, grammar_issue)
     except httpx.HTTPStatusError as exc:
+        trace.update(status="request_failed", http_status=exc.response.status_code)
         print(f"[Diary] Decision model request failed: HTTP {exc.response.status_code}")
-    except (
-        TimeoutError, httpx.HTTPError, httpx.InvalidURL, ValueError,
-        KeyError, TypeError, AttributeError,
-    ) as exc:
+    except (TimeoutError, httpx.HTTPError, httpx.InvalidURL) as exc:
+        trace.update(status="request_failed", error_type=type(exc).__name__)
         print(f"[Diary] Decision model review unavailable: {type(exc).__name__}")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        trace["error_type"] = type(exc).__name__
+        print(f"[Diary] Decision model review unavailable: {type(exc).__name__}")
+    finally:
+        trace["duration_ms"] = round((time.monotonic() - started) * 1000)
     return None

@@ -37,6 +37,7 @@ def test_exact_duplicates_and_update(monkeypatch):
     second = diary.add_diary_entry("beta")
     repeat = diary.add_diary_entry(" alpha ", "reflection_entries")
     assert repeat["status"] == "duplicate"
+    assert "decision_review" not in repeat
     assert repeat["entry_id"] == first["entry_id"]
     assert "update_entry_id" not in repeat
 
@@ -238,6 +239,25 @@ async def test_executor_decision_request(monkeypatch, model_decision, expected_s
         "action_type": "write_diary", "params": {"entry": "beta draft", "category": category},
     })
     assert result["status"] == expected_status
+    trace = result["decision_review"]
+    assert trace["model"] == "provider/model"
+    assert trace["candidate_ids"] == [entry_id]
+    assert trace["duration_ms"] >= 0
+    assert "synthetic-key" not in json.dumps(trace)
+    if model_decision == "failed-request":
+        assert trace["status"] == "request_failed"
+        assert trace["http_status"] == 503
+    elif model_decision == "invalid-id":
+        assert trace["status"] == "invalid_response"
+    else:
+        assert trace["status"] == "reviewed"
+        assert trace["grammar_probability"] == 0.95
+        if model_decision == "low-confidence":
+            assert trace["relation"]["probability"] == 0.5
+            assert trace["accepted_match"] is None
+        if model_decision == "uncertain-replace":
+            assert trace["relation"]["choice"] == f"replace_{entry_id}"
+            assert trace["accepted_match"] == {"kind": "update_suggested", "entry_id": entry_id}
     assert observed == [{"draft": "beta draft", "candidates": [{"id": entry_id, "content_md": "alpha entry"}]}]
     rows = diary.get_all_diary_entries(category)
     if expected_status in ("written", "updated"):
@@ -293,6 +313,8 @@ async def test_executor_reviews_explicit_update(monkeypatch, model_decision):
         params.update(entry="alpha entry", category="reflection_entries")
     result = await executor.execute_action({"action_type": "update_diary", "params": params})
     assert len(calls) == 1
+    assert result["decision_review"]["target_id"] == entry_id
+    assert result["decision_review"]["status"] == "reviewed"
     target = next(row for row in diary.get_all_diary_entries() if row["id"] == entry_id)
     if model_decision in ("unchanged", "duplicate"):
         assert result["status"] == model_decision

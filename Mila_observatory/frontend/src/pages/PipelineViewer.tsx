@@ -7,6 +7,8 @@ import {
   PipelineLogItem,
   PipelineChatItem,
   PipelineLogDetail,
+  PipelineMessage,
+  PipelineRawResponse,
 } from '../api/client';
 
 const styles: Record<string, React.CSSProperties> = {
@@ -32,6 +34,8 @@ const styles: Record<string, React.CSSProperties> = {
   modalContent: { background: 'var(--bg-card)', borderRadius: '12px', padding: '24px', width: '900px', maxWidth: '92vw', maxHeight: '85vh', overflow: 'auto' },
   sectionTitle: { fontSize: '13px', fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '1px', margin: '20px 0 8px' },
   pre: { background: 'var(--bg-secondary)', borderRadius: '8px', padding: '12px', fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflow: 'auto', maxHeight: '300px', color: 'var(--text-primary)', margin: 0 },
+  meta: { fontSize: '12px', color: 'var(--text-secondary)' },
+  details: { margin: '8px 0', fontSize: '13px' },
   msgCard: { background: 'var(--bg-secondary)', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px', border: '1px solid var(--border)' },
   msgBody: { fontSize: '13px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-primary)', marginTop: '6px' },
   roleBadge: { display: 'inline-block', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px' },
@@ -60,15 +64,6 @@ function shortChat(chatId: string): string {
   if (!chatId) return '—';
   if (chatId === '(unknown)') return '(unknown)';
   return chatId.length > 18 ? `${chatId.slice(0, 8)}…${chatId.slice(-6)}` : chatId;
-}
-
-function formatJsonArg(raw: string): string {
-  if (!raw) return '—';
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
-  }
 }
 
 function chatLabel(displayName: string | undefined, chatId: string): string {
@@ -107,6 +102,58 @@ function renderMessageContent(content: unknown): string {
   }
   const s = out.filter(Boolean).join('\n');
   return s || '—';
+}
+
+function MessageCards({ messages, offset = 0 }: { messages: PipelineMessage[]; offset?: number }) {
+  return <>{messages.map((message, i) => (
+    <div key={i} style={styles.msgCard}>
+      <span style={{ ...styles.roleBadge, ...roleStyle(message.role) }}>{message.role}</span>
+      <span style={{ ...styles.meta, marginLeft: '8px' }}>#{offset + i + 1}</span>
+      <div style={styles.msgBody}>{renderMessageContent(message.content)}</div>
+    </div>
+  ))}</>;
+}
+
+function RawResponse({ response }: { response?: PipelineRawResponse }) {
+  if (!response) return <p style={styles.meta}>Ответ LLM отсутствует.</p>;
+  const reasoning = renderReasoning(response.reasoning);
+  return (
+    <>
+      <p style={styles.meta}>Ответ LLM · {response.finish_reason || 'причина завершения не указана'}</p>
+      <pre style={styles.pre}>{response.thoughts || 'Пустой текст ответа'}</pre>
+      {reasoning && (
+        <details style={styles.details}>
+          <summary>Reasoning</summary>
+          <pre style={styles.pre}>{reasoning}</pre>
+        </details>
+      )}
+      {(response.tool_calls || []).map((call, i) => (
+        <div key={i} style={styles.details}>
+          <div style={{ ...styles.roleBadge, ...roleStyle('tool') }}>
+            {call.name}{call.id && ` · ${call.id}`}
+          </div>
+          <pre style={styles.pre}>{call.arguments || '—'}</pre>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function ActionResults({ actions }: { actions: PipelineLogDetail['actions'] }) {
+  return <>{actions.map(({ decision_review, ...action }, i) => (
+    <div key={i}>
+      <details style={styles.details}>
+        <summary>{String(action.type ?? action.action_type ?? 'Действие')} · {String(action.status ?? '—')}</summary>
+        <pre style={styles.pre}>{JSON.stringify(action, null, 2)}</pre>
+      </details>
+      {!!decision_review && (
+        <details style={{ ...styles.details, marginLeft: '16px' }}>
+          <summary>Проверка дневника decision-моделью</summary>
+          <pre style={styles.pre}>{JSON.stringify(decision_review, null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  ))}</>;
 }
 
 export default function PipelineViewer() {
@@ -168,9 +215,14 @@ export default function PipelineViewer() {
     const messages = Array.isArray(d.llm_messages) ? d.llm_messages : [];
     const actions = Array.isArray(d.actions) ? d.actions : [];
     const rawResponses = Array.isArray(d.raw_llm_responses) ? d.raw_llm_responses : [];
-    const reasoningEntries = rawResponses
-      .map((r, i) => ({ iteration: r.iteration ?? i + 1, text: renderReasoning(r.reasoning) }))
-      .filter(r => r.text.trim());
+    const requests = d.llm_iterations || [];
+    const initialRequest = requests[0];
+    const legacyLog = !d.turn_id && !initialRequest && rawResponses.length > 0;
+    const hasModelTurn = !d.proactive || !!initialRequest || rawResponses.length > 0;
+    const recentStart = Math.max(0, messages.length - 5);
+    const triggerLabels = { message: 'Сообщение', notification: 'Уведомление', proactive: 'Проактивность' };
+    let actionOffset = 0;
+    let contextSize = messages.length;
     const detailName =
       logs.find(l => l.filename === selected.filename)?.display_name ||
       chats.find(c => c.chat_id === d.chat_id)?.display_name ||
@@ -179,98 +231,148 @@ export default function PipelineViewer() {
       <div style={styles.modal} onClick={() => setSelected(null)}>
         <div style={styles.modalContent} onClick={e => e.stopPropagation()}>
           <h2 style={{ margin: 0, fontSize: '15px', color: 'var(--text-primary)' }}>{selected.filename}</h2>
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+          <div style={{ ...styles.meta, marginTop: '4px' }}>
             {d.timestamp || ''} · {chatLabel(detailName, d.chat_id)} · user <code>{d.user_id || '—'}</code>
             {' · '}<span style={{ ...styles.badge, ...(d.success ? styles.badgeSuccess : styles.badgeError) }}>{d.success ? 'OK' : 'ERR'}</span>
           </div>
-
-          <div style={styles.sectionTitle}>User message</div>
-          <pre style={styles.pre}>{d.user_message || '—'}</pre>
-
+          <p style={styles.meta}>
+            {d.turn_id && <>Ход <code>{d.turn_id}</code> · </>}
+            {String(d.timing?.total ?? '—')} · Итерации {String(d.timing?.iterations ?? rawResponses.length)}
+            {d.timing?.max_iterations != null && ` / ${d.timing.max_iterations}`}
+          </p>
+          {initialRequest && (
+            <p style={styles.meta}>
+              {initialRequest.model || '—'} · {initialRequest.state} · контекст чата <code>{initialRequest.active_chat_id}</code>
+            </p>
+          )}
           {d.error && (
+            <pre style={{ ...styles.pre, color: 'var(--error)' }}>
+              {d.error_code && `${d.error_code} · `}{d.error}
+            </pre>
+          )}
+          {legacyLog && <p style={styles.meta}>Этот лог записан в старом формате. Изменения контекста по итерациям в нём отсутствуют.</p>}
+
+          {d.proactive && (
             <>
-              <div style={styles.sectionTitle}>Error</div>
-              <pre style={{ ...styles.pre, color: 'var(--error)' }}>{d.error}</pre>
+              <div style={styles.sectionTitle}>Проактивное решение</div>
+              <p style={styles.meta}>
+                {d.proactive.action}
+                {d.proactive.forced && ' · запуск из Observatory'}
+                {d.proactive.dry_run && ' · симуляция'}
+                {d.proactive.idle_seconds != null && ` · тишина ${d.proactive.idle_seconds} с`}
+                {d.timing?.proactive_total_ms != null && ` · ${d.timing.proactive_total_ms} мс`}
+              </p>
+              {(d.proactive.outcome || d.proactive.summary) && (
+                <p style={styles.meta}>{d.proactive.outcome || d.proactive.summary}</p>
+              )}
+              {d.proactive.delivery && (
+                <p style={styles.meta}>
+                  Доставка в чат <code>{d.proactive.delivery.target}</code> · отправлено {d.proactive.delivery.sent}
+                  {d.proactive.delivery.error && ` · ${d.proactive.delivery.error}`}
+                </p>
+              )}
+              <details style={styles.details}>
+                <summary>Сведения о проактивном ходе</summary>
+                <pre style={styles.pre}>{JSON.stringify(d.proactive, null, 2)}</pre>
+              </details>
             </>
           )}
 
-          <div style={styles.sectionTitle}>Model context · {messages.length} messages</div>
-          {messages.length === 0 && (
-            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No context messages in this log.</div>
-          )}
-          {messages.map((m, i) => (
-            <div key={i} style={styles.msgCard}>
-              <span style={{ ...styles.roleBadge, ...roleStyle(m.role) }}>{m.role || 'unknown'}</span>
-              <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '8px' }}>#{i + 1}</span>
-              <div style={styles.msgBody}>{renderMessageContent(m.content)}</div>
-            </div>
-          ))}
-
-          <div style={styles.sectionTitle}>System prompt</div>
-          <details>
-            <summary style={{ cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-              Show system prompt ({(d.system_prompt || '').length} chars)
-            </summary>
-            <pre style={styles.pre}>{d.system_prompt || '—'}</pre>
-          </details>
-
-          <div style={styles.sectionTitle}>Mila's reasoning · {reasoningEntries.length}</div>
-          {reasoningEntries.length === 0 && (
-            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              Нет reasoning: reasoning_effort=none, старый лог или провайдер не вернул мысли.
-            </div>
-          )}
-          {reasoningEntries.map(r => (
-            <div key={r.iteration} style={styles.msgCard}>
-              <span style={{ ...styles.roleBadge, ...roleStyle('assistant') }}>
-                iteration {r.iteration}
-              </span>
-              <pre style={{ ...styles.pre, marginTop: '8px' }}>{r.text}</pre>
-            </div>
-          ))}
-
-          <div style={styles.sectionTitle}>Thoughts</div>
-          <pre style={styles.pre}>{d.thoughts || '—'}</pre>
-
-          <div style={styles.sectionTitle}>Actions · {actions.length}</div>
-          {actions.length === 0 && (
-            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No actions.</div>
-          )}
-          {actions.map((a, i) => {
-            const obj = a as Record<string, unknown>;
-            const t = String(obj.type ?? obj.action_type ?? `action ${i + 1}`);
-            return (
-              <div key={i} style={styles.msgCard}>
-                <span style={{ ...styles.roleBadge, ...roleStyle('tool') }}>#{i + 1} {t}</span>
-                <pre style={{ ...styles.pre, marginTop: '8px', maxHeight: '200px' }}>{JSON.stringify(a, null, 2)}</pre>
+          {hasModelTurn && (
+            <>
+              <div style={styles.sectionTitle}>
+                Системный промпт{initialRequest ? ' · итерация 1' : legacyLog ? ' · последняя итерация' : ''}
               </div>
-            );
-          })}
+              <details style={styles.details}>
+                <summary>Полный промпт ({(d.system_prompt || '').length} симв.)</summary>
+                <pre style={styles.pre}>{d.system_prompt || '—'}</pre>
+              </details>
 
-          <div style={styles.sectionTitle}>Raw LLM responses · {rawResponses.length}</div>
-          {rawResponses.map((r, i) => (
-            <details key={i} style={{ marginBottom: '8px' }}>
-              <summary style={{ cursor: 'pointer', fontSize: '13px', color: 'var(--text-primary)' }}>
-                Iteration {r.iteration ?? i + 1} · {(r.tool_calls || []).length} tool calls · {r.finish_reason || ''}
-              </summary>
-              <pre style={{ ...styles.pre, marginTop: '8px' }}>{r.thoughts || '—'}</pre>
-              {(r.tool_calls || []).map((tc, j) => (
-                <pre key={j} style={{ ...styles.pre, marginTop: '8px', maxHeight: '200px' }}>
-                  {`[${tc.name}]\n${formatJsonArg(tc.arguments)}`}
-                </pre>
+              <div style={styles.sectionTitle}>Последние сообщения в контексте</div>
+              {recentStart > 0 && (
+                <details style={styles.details}>
+                  <summary>Более ранний контекст ({recentStart})</summary>
+                  <MessageCards messages={messages.slice(0, recentStart)} />
+                </details>
+              )}
+              {messages.length ? <MessageCards messages={messages.slice(recentStart)} offset={recentStart} />
+                : <p style={styles.meta}>В логе нет сообщений контекста.</p>}
+
+              <div style={styles.sectionTitle}>
+                Инициатор запроса{d.trigger && ` · ${triggerLabels[d.trigger.kind]}`}
+              </div>
+              <pre style={styles.pre}>{d.trigger?.text || d.user_message || '—'}</pre>
+
+              <div style={styles.sectionTitle}>Итерации LLM</div>
+              {requests.map(request => {
+                const actionsForRequest = actions.slice(actionOffset, actionOffset + request.action_count);
+                actionOffset += request.action_count;
+                const delta = request.context_delta;
+                const addedAt = contextSize - (delta?.removed_count ?? 0);
+                if (delta) contextSize = addedAt + delta.added_messages.length;
+                return (
+                  <div key={request.iteration} style={styles.msgCard}>
+                    <strong>Итерация {request.iteration}</strong>
+                    <div style={styles.meta}>
+                      {request.iteration > 1 && <>
+                        {request.model || '—'} · {request.state} · чат <code>{request.active_chat_id}</code>{' · '}
+                      </>}
+                      {request.duration_ms != null && `${request.duration_ms} мс`}
+                    </div>
+                    {delta && (
+                      <>
+                        <p style={styles.meta}>
+                          Контекст к этой итерации · добавлено {delta.added_messages.length} · удалено {delta.removed_count}
+                        </p>
+                        <MessageCards messages={delta.added_messages} offset={addedAt} />
+                      </>
+                    )}
+                    {request.system_prompt_diff && (
+                      <details style={styles.details}>
+                        <summary>Изменения системного промпта</summary>
+                        <pre style={styles.pre}>{request.system_prompt_diff}</pre>
+                      </details>
+                    )}
+                    <details style={styles.details}>
+                      <summary>Параметры запроса и сведения провайдера</summary>
+                      <pre style={styles.pre}>{JSON.stringify({
+                        max_tokens: request.max_tokens,
+                        temperature: request.temperature,
+                        reasoning_effort: request.reasoning_effort,
+                        tool_choice: request.tool_choice,
+                        tools: request.tools,
+                        provider: request.provider,
+                      }, null, 2)}</pre>
+                    </details>
+                    <RawResponse response={request.response} />
+                    <ActionResults actions={actionsForRequest} />
+                  </div>
+                );
+              })}
+              {!requests.length && rawResponses.map((response, i) => (
+                <div key={i} style={styles.msgCard}>
+                  <strong>Итерация {response.iteration ?? i + 1}</strong>
+                  <RawResponse response={response} />
+                </div>
               ))}
-            </details>
-          ))}
+              {!requests.length && <ActionResults actions={actions} />}
+            </>
+          )}
+
+          {(d.reply_text || d.thoughts || d.silence_reason) && (
+            <>
+              <div style={styles.sectionTitle}>Решение Pipeline</div>
+              {d.reply_via && <p style={styles.meta}>{d.reply_via} · чат <code>{d.reply_chat_id || '—'}</code></p>}
+              <pre style={styles.pre}>{d.silence_reason || d.reply_text || d.thoughts}</pre>
+            </>
+          )}
 
           {d.traceback && (
-            <>
-              <div style={styles.sectionTitle}>Traceback</div>
+            <details style={styles.details}>
+              <summary>Traceback</summary>
               <pre style={{ ...styles.pre, color: 'var(--error)' }}>{d.traceback}</pre>
-            </>
+            </details>
           )}
-
-          <div style={styles.sectionTitle}>Timing</div>
-          <pre style={styles.pre}>{JSON.stringify(d.timing ?? {}, null, 2)}</pre>
 
           <button style={{ ...styles.btn, marginTop: '16px' }} onClick={() => setSelected(null)}>Close</button>
         </div>

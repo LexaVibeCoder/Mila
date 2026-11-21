@@ -794,9 +794,6 @@ class ThinkPipeline:
                 atype = executed.get("type")
                 status = executed.get("status")
                 diary_action = atype in ("write_diary", "update_diary")
-                existing_diary_text = executed.pop("existing_entry", None) if diary_action else None
-                if diary_action and "decision_review" in executed:
-                    executed["tool_call_id"] = action.get("_call_id")
                 action_succeeded = status in ("written", "updated") if diary_action else status != "error"
                 if action_succeeded and not sandbox:
                     get_needs_tracker().apply_action_effect(action.get("action_type"))
@@ -901,25 +898,6 @@ class ThinkPipeline:
                         feedback = f"Запись дневника сохранена (ID: {executed['entry_id']})."
                         if executed.get("daily_file_synced") is False:
                             feedback += " Не удалось обновить файл отчёта. Повтор записи сохранит тот же ID."
-                        if executed.get("grammar_issue"):
-                            feedback += (
-                                " Проверь грамматику записи и при явной ошибке исправь её "
-                                f"через update_diary с ID {executed['entry_id']}."
-                            )
-                    elif status == "update_suggested":
-                        feedback = (
-                            f"Черновик дополняет запись дневника. Вызови update_diary с ID {executed['update_entry_id']} "
-                            "и передай полный объединённый текст. Сохрани важные детали обеих версий и учти поправки. "
-                            f"Текст существующей записи в JSON: {json.dumps(existing_diary_text, ensure_ascii=False)}."
-                        )
-                    elif status == "review_uncertain":
-                        feedback = (
-                            f"Черновик пока не сохранён. Сравни его с записью ID {executed['entry_id']}. "
-                            "Если смысл уже есть, пропусти. Если это существенное дополнение к этой записи, "
-                            "вызови update_diary с этим ID и полным объединённым текстом. "
-                            "Если это самостоятельная запись, уточни в черновике, чем событие или мысль отличаются. "
-                            f"Текст возможного совпадения в JSON: {json.dumps(existing_diary_text, ensure_ascii=False)}."
-                        )
                     elif status in ("duplicate", "unchanged"):
                         feedback = f"{executed['message']} Пропусти этот черновик."
                         if executed.get("daily_file_synced") is False:

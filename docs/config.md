@@ -43,17 +43,12 @@ runtime_config.json (значение не null)  →  побеждает  →  
 | `MAIN_LLM_MAX_TOKENS` | `2048` |
 | `MAIN_LLM_TEMPERATURE` | `0.7` |
 
-### Decision-модель
+### LLM реорганизации дневника
 
-| Поле | Описание |
-|------|----------|
-| `DECISION_API_BASE` | Базовый URL без `/decisions`. По умолчанию `https://openrouter.ai/api/alpha` |
-| `DECISION_API_KEY` | Ключ выбранного API |
-| `DECISION_MODEL` | ID модели из каталога OpenRouter Decisions, например `typesafe/jev-1.14` |
-
-Запросы включаются при заполнении ключа и ID модели. Клиент добавляет
-`/decisions` к базовому URL. Ранее указанный `https://openrouter.ai/api/v1`
-автоматически направляется на Decisions API. Текущий сценарий описан в [дневнике](diary.md).
+`DIARY_LLM_MODEL` — необязательный ID модели Chat Completions на
+`LLM_API_BASE`. По умолчанию используется настроенная ночная LLM. Разбор
+выполняется отдельным запросом каждый час при наличии новых записей
+и перед ночным анализом. Подробности в [описании дневника](diary.md).
 
 ### Эмбеддинги
 

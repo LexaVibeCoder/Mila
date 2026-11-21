@@ -5,6 +5,7 @@ import signal
 from config import project_path, settings
 from core.db import init_db
 from core.diary.manager import init_diary
+from core.diary.reorganization import run_hourly_diary_reorganization
 from core.bot import MilaUserbot
 
 
@@ -48,9 +49,12 @@ async def main():
                 pass
 
     await bot.start()
+    diary_task = asyncio.create_task(run_hourly_diary_reorganization())
     try:
         await stop_event.wait()
     finally:
+        diary_task.cancel()
+        await asyncio.gather(diary_task, return_exceptions=True)
         await bot.stop()
 
 if __name__ == "__main__":

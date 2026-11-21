@@ -707,6 +707,9 @@ async def process_diary_analysis(session_id: str) -> Tuple[bool, str]:
     print("  PROCESS 1: Diary Analysis")
     print("="*60)
 
+    from core.diary.reorganization import reorganize_diary
+
+    await reorganize_diary(session_id)
     llm = _create_night_llm()
     verifier = _create_verifier_llm()
     executor = StagingExecutor(session_id, "diary_analysis")

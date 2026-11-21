@@ -1,18 +1,20 @@
-"""Local-day exports, diary limits, decision model requests and safe clearing."""
+"""Diary writes, reorganization, local-day reports and safe clearing."""
 
 import asyncio
 import json
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
-import httpx
 import pytest
 from fastapi import HTTPException
 
 from config import settings
 from core.context import buffer
-from core.diary import decision, manager as diary
+from core.diary import manager as diary, reorganization
+from core.sleep import state
 from core.tools.executor import ToolExecutor
 from Mila_observatory.api import diary as api
 
@@ -23,8 +25,7 @@ def diary_env(tmp_path, monkeypatch):
     monkeypatch.setattr(diary, "DAILY_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(settings, "LOCAL_TIMEZONE", "Asia/Yekaterinburg")
-    monkeypatch.setattr(settings, "DECISION_API_KEY", "")
-    monkeypatch.setattr(settings, "DECISION_MODEL", "")
+    monkeypatch.setattr("core.db.DB_PATH", str(tmp_path / "mila.db"))
 
 
 def freeze(monkeypatch, timestamp):
@@ -185,197 +186,152 @@ def test_backup_path_uses_project_root(tmp_path, monkeypatch):
     assert not (tmp_path / "test-logs").exists()
 
 
-@pytest.mark.parametrize(("model_decision", "expected_status"), [
-    ("duplicate", "duplicate"), ("update", "update_suggested"),
-    ("replace", "updated"), ("uncertain-replace", "update_suggested"),
-    ("new", "written"), ("weak-relation", "review_uncertain"),
-    ("weak-change", "review_uncertain"), ("missing-change", "review_uncertain"),
-    ("invalid-relation", "written"), ("failed-request", "written"),
-])
-@pytest.mark.parametrize(("api_base", "expected_url"), [
-    ("", "https://openrouter.ai/api/alpha/decisions"),
-    ("https://openrouter.ai/api/v1/", "https://openrouter.ai/api/alpha/decisions"),
-    ("https://provider.example/api/alpha/ ", "https://provider.example/api/alpha/decisions"),
-])
-@pytest.mark.parametrize("category", diary.DIARY_CATEGORIES)
-async def test_executor_decision_request(monkeypatch, model_decision, expected_status, api_base, expected_url, category):
-    existing = diary.add_diary_entry("alpha entry", category)
-    other_category = next(value for value in diary.DIARY_CATEGORIES if value != category)
-    diary.add_diary_entry("gamma entry", other_category)
-    entry_id = existing["entry_id"]
-    monkeypatch.setattr(settings, "DECISION_API_BASE", api_base)
-    monkeypatch.setattr(settings, "DECISION_API_KEY", "synthetic-key")
-    monkeypatch.setattr(settings, "DECISION_MODEL", "provider/model")
-    observed = []
-
-    def handler(request):
-        assert str(request.url) == expected_url
-        assert request.headers["Authorization"] == "Bearer synthetic-key"
-        body = json.loads(request.content)
-        assert body["model"] == "provider/model"
-        questions = body["questions"]
-        assert set(questions) == {"grammar", f"related_{entry_id}", f"change_{entry_id}"}
-        assert questions[f"related_{entry_id}"]["type"] == "noul"
-        assert questions[f"change_{entry_id}"]["type"] == "choice"
-        assert set(questions[f"change_{entry_id}"]["criteria"]) == {
-            "duplicate", "extend", "replace", "unclear",
-        }
-        assert questions["grammar"]["type"] == "noul"
-        observed.append(body["state"])
-        if model_decision == "failed-request":
-            return httpx.Response(503, text="unavailable")
-        relation = {"new": 0.15, "weak-relation": 0.36, "uncertain-replace": 0.75,
-                    "invalid-relation": 2}.get(model_decision, 0.95)
-        answers = {
-            f"related_{entry_id}": {"type": "noul", "noul": relation},
-            "grammar": {"type": "noul", "noul": 0.95},
-        }
-        if model_decision != "missing-change":
-            choice = "replace" if model_decision in ("replace", "uncertain-replace", "weak-change") else {
-                "update": "extend", "duplicate": "duplicate",
-            }.get(model_decision, "unclear")
-            probability = 0.5 if model_decision == "weak-change" else 0.95
-            answers[f"change_{entry_id}"] = {"type": "choice", "choice": choice, "probabilities": {choice: probability}}
-        return httpx.Response(200, json={"answers": answers})
-
-    original = httpx.AsyncClient
-    monkeypatch.setattr(decision.httpx, "AsyncClient",
-                        lambda: original(transport=httpx.MockTransport(handler)))
+async def test_tools_save_rephrasing_and_explicit_edit_before_reorganization(monkeypatch):
+    propose = AsyncMock(side_effect=AssertionError("Tools must save without waiting for the organizer"))
+    monkeypatch.setattr(reorganization, "_propose_merges", propose)
     executor = ToolExecutor(None, None, "user-1", "chat-1")
-    repeat = await executor.execute_action({
-        "action_type": "write_diary", "params": {"entry": "alpha entry", "category": category},
-    })
-    assert repeat["status"] == "duplicate"
-    assert not observed
-    result = await executor.execute_action({
-        "action_type": "write_diary", "params": {"entry": "beta draft", "category": category},
-    })
-    assert result["status"] == expected_status
-    trace = result["decision_review"]
-    assert trace["model"] == "provider/model"
-    assert trace["candidate_ids"] == [entry_id]
-    assert trace["duration_ms"] >= 0
-    assert "synthetic-key" not in json.dumps(trace)
-    if model_decision == "failed-request":
-        assert trace["status"] == "request_failed"
-        assert trace["http_status"] == 503
-    elif model_decision == "invalid-relation":
-        assert trace["status"] == "invalid_response"
-    else:
-        assert trace["status"] == "reviewed"
-        assert trace["grammar_probability"] == 0.95
-        if model_decision == "weak-relation":
-            assert trace["relation"]["probability"] == 0.36
-            assert trace["accepted_match"] is None
-        if model_decision == "uncertain-replace":
-            assert trace["change"]["choice"] == "replace"
-            assert trace["accepted_match"] == {"kind": "update_suggested", "entry_id": entry_id}
-    assert observed == [{"draft": "beta draft", "candidates": [{"id": entry_id, "content_md": "alpha entry"}]}]
-    rows = diary.get_all_diary_entries(category)
-    if expected_status in ("written", "updated"):
-        assert result.get("grammar_issue", False) is (model_decision not in ("invalid-relation", "failed-request"))
-        assert result["daily_file_synced"]
-        assert [row["content_md"] for row in rows] == (
-            ["alpha entry", "beta draft"] if expected_status == "written" else ["beta draft"]
-        )
-        if expected_status == "updated":
-            assert result["entry_id"] == entry_id
-    else:
-        assert result["entry_id"] == entry_id
-        assert [row["content_md"] for row in rows] == ["alpha entry"]
-        if expected_status == "update_suggested":
-            assert result["update_entry_id"] == entry_id
-            assert result["existing_entry"] == "alpha entry"
-        else:
-            assert "update_entry_id" not in result
-        if expected_status == "review_uncertain":
-            assert result["existing_entry"] == "alpha entry"
-            assert trace["accepted_match"] is None
 
+    async def write(text):
+        return await executor.execute_action({"action_type": "write_diary", "params": {"entry": text}})
 
-def test_competing_matches_do_not_trigger_automatic_replacement():
-    candidates = [{"id": 1, "content_md": "alpha entry"}, {"id": 2, "content_md": "beta entry"}]
-    answers = {
-        "related_1": {"type": "noul", "noul": 0.92},
-        "related_2": {"type": "noul", "noul": 0.96},
-        "change_2": {"type": "choice", "choice": "replace", "probabilities": {"replace": 0.99}},
+    first = await write("Alpha test finished.")
+    second = await write("Completed the alpha test.")
+    assert first["status"] == second["status"] == "written"
+    assert (await write("Alpha test finished."))["status"] == "duplicate"
+    updated = await executor.execute_action({
+        "action_type": "update_diary",
+        "params": {"entry_id": first["entry_id"], "entry": "Alpha test finished. It took one minute."},
+    })
+    assert updated["status"] == "updated"
+    assert {row["id"] for row in diary.get_diary_reorganization_batch()} == {
+        first["entry_id"], second["entry_id"],
     }
-    assert decision._semantic_match(answers, candidates, editing=False, trace={}) == (
-        "review_uncertain", candidates[1],
-    )
+    propose.assert_not_awaited()
 
 
-@pytest.mark.parametrize("model_decision", ["exact-repeat", "duplicate", "append", "category-change"])
-async def test_executor_reviews_explicit_update(monkeypatch, model_decision):
-    entry_id = diary.add_diary_entry("alpha entry")["entry_id"]
-    other_id = diary.add_diary_entry("beta entry")["entry_id"]
-    reflection_id = diary.add_diary_entry("gamma entry", "reflection_entries")["entry_id"]
-    monkeypatch.setattr(settings, "DECISION_API_KEY", "synthetic-key")
-    monkeypatch.setattr(settings, "DECISION_MODEL", "provider/model")
-    switched_category = model_decision == "category-change"
-    calls = []
+async def test_reorganization_keeps_originals_and_exports_curated_diary(monkeypatch):
+    first = diary.add_diary_entry("Alpha test finished.")
+    second = diary.add_diary_entry("Completed the alpha test in one minute.")
+    older_id, newer_id = first["entry_id"], second["entry_id"]
+    merged = "Alpha test finished in one minute."
+    generate = AsyncMock(return_value={
+        "finish_reason": "stop",
+        "thoughts": json.dumps({"merges": [{"ids": [newer_id, older_id], "text": merged}]}),
+    })
+    monkeypatch.setattr(settings, "DIARY_LLM_MODEL", "diary-model")
+    client = Mock(return_value=SimpleNamespace(client=AsyncMock(), generate=generate))
+    monkeypatch.setattr(reorganization, "LLMClient", client)
 
-    def handler(request):
-        body = json.loads(request.content)
-        calls.append(body)
-        candidate_id = reflection_id if switched_category else other_id
-        assert [entry["id"] for entry in body["state"]["candidates"]] == [candidate_id]
-        question = f"related_{candidate_id}"
-        assert set(body["questions"]) == {"grammar", question}
-        return httpx.Response(200, json={"answers": {
-            question: {"type": "noul", "noul": 0.95 if model_decision == "duplicate" else 0.15},
-        }})
-
-    original = httpx.AsyncClient
-    monkeypatch.setattr(decision.httpx, "AsyncClient",
-                        lambda: original(transport=httpx.MockTransport(handler)))
-    executor = ToolExecutor(None, None, "user-1", "chat-1")
-    params = {"entry_id": str(entry_id), "entry": "alpha entry. Delta detail."}
-    if model_decision == "exact-repeat":
-        params["entry"] = "alpha entry"
-    if switched_category:
-        params.update(entry="alpha entry", category="reflection_entries")
-    result = await executor.execute_action({"action_type": "update_diary", "params": params})
-    if model_decision == "exact-repeat":
-        assert not calls
-        assert result["status"] == "unchanged"
-        return
-    assert len(calls) == 1
-    assert result["decision_review"]["target_id"] == entry_id
-    assert result["decision_review"]["status"] == "reviewed"
-    target = next(row for row in diary.get_all_diary_entries() if row["id"] == entry_id)
-    if model_decision == "duplicate":
-        assert result["status"] == "duplicate"
-        assert result["entry_id"] == other_id
-        assert target["content_md"] == "alpha entry"
-    else:
-        assert result["status"] == "updated"
-        assert target["content_md"] == params["entry"]
-        assert target["category"] == params.get("category", "day_entries")
-
-
-def test_semantic_replacement_uses_original_day_and_refuses_stale_target(monkeypatch):
-    freeze(monkeypatch, "2026-04-01T12:00:00+05:00")
-    entry_id = diary.add_diary_entry("alpha")["entry_id"]
-    freeze(monkeypatch, "2026-04-02T12:00:00+05:00")
-    for text in ("beta", "gamma", "delta"):
-        diary.add_diary_entry(text)
-    _, candidates = diary.diary_review_context("alpha revised", "day_entries")
-    original = next(row for row in candidates if row["id"] == entry_id)
-
-    result = diary.add_diary_entry("alpha revised", match=("replace", original))
-    assert result["status"] == "updated"
-    assert result["entry_id"] == entry_id
-    assert "alpha revised" in diary.load_daily_report("01.04.2026")
-    assert "alpha revised" not in diary.load_daily_report("02.04.2026")
-    assert diary.add_diary_entry("alpha stale", match=("replace", original))["status"] == "review_stale"
-    assert diary.get_diary_entry_count() == 4
-
-
-def test_new_draft_refuses_stale_comparison_after_concurrent_write():
-    _, candidates = diary.diary_review_context("alpha draft", "day_entries")
-    first = diary.add_diary_entry("beta draft", candidates=candidates)
-    second = diary.add_diary_entry("alpha draft", candidates=candidates)
-    assert first["status"] == "written"
-    assert second["status"] == "review_stale"
+    await reorganization.reorganize_diary()
+    client.assert_called_once_with(model="diary-model", timeout=25)
+    generate.assert_awaited_once()
+    payload = json.loads(generate.await_args.args[0][0]["content"])
+    assert [entry["id"] for entry in payload["entries"]] == [older_id, newer_id]
+    assert all(entry["pending"] for entry in payload["entries"])
+    row, = diary.get_all_diary_entries()
+    assert (row["id"], row["content_md"]) == (older_id, merged)
     assert diary.get_diary_entry_count() == 1
+    assert diary.count_report_entries(diary.load_daily_report()) == 1
+    assert merged in diary.load_daily_report()
+    assert diary.get_diary_reorganization_batch() == []
+    with sqlite3.connect(buffer.CONTEXT_DB_PATH) as conn:
+        original, sources = conn.execute(
+            "SELECT content_md, source_ids FROM diary_reorganization_history WHERE entry_id=?",
+            (older_id,),
+        ).fetchone()
+        assert original == "Alpha test finished."
+        assert json.loads(sources) == [newer_id]
+        assert conn.execute("SELECT content_md, merged_into FROM diary_entries WHERE id=?",
+                            (newer_id,)).fetchone() == ("Completed the alpha test in one minute.", older_id)
+    assert diary.add_diary_entry("Alpha test finished.")["status"] == "duplicate"
+    assert diary.add_diary_entry("Completed the alpha test in one minute.")["status"] == "duplicate"
+    await reorganization.reorganize_diary()
+    generate.assert_awaited_once()
+    assert diary.update_diary_entry(older_id, "Completed the alpha test in one minute.")["status"] == "updated"
+
+
+def test_reorganization_retains_pending_edit_when_snapshot_is_stale():
+    first = diary.add_diary_entry("alpha")
+    second = diary.add_diary_entry("beta")
+    batch = diary.get_diary_reorganization_batch()
+    target = first["entry_id"]
+    assert diary.update_diary_entry(target, "alpha revised")["status"] == "updated"
+    assert not diary.apply_diary_reorganization(batch, [([target, second["entry_id"]], "alpha merged")])
+    assert [row["content_md"] for row in diary.get_all_diary_entries()] == ["alpha revised", "beta"]
+    assert len(diary.get_diary_reorganization_batch()) == 2
+
+
+async def test_sleep_transition_defers_hourly_plan_and_allows_final_review(monkeypatch):
+    first = diary.add_diary_entry("alpha")
+    second = diary.add_diary_entry("beta")
+    plan = [([first["entry_id"], second["entry_id"]], "alpha and beta")]
+    session_id = "sleep-1"
+
+    async def start_sleep_during_review(_):
+        assert state.set_state(state.SleepState.SLEEPING, session_id=session_id)
+        return plan
+
+    monkeypatch.setattr(reorganization, "_propose_merges", start_sleep_during_review)
+    await reorganization.reorganize_diary()
+    assert diary.get_diary_entry_count() == 2
+    assert len(diary.get_diary_reorganization_batch()) == 2
+
+    propose = AsyncMock(return_value=plan)
+    monkeypatch.setattr(reorganization, "_propose_merges", propose)
+    await reorganization.reorganize_diary(session_id)
+    propose.assert_awaited_once()
+    assert diary.get_diary_entry_count() == 1
+
+
+def test_reorganization_retries_report_after_export_failure(monkeypatch):
+    first = diary.add_diary_entry("alpha")
+    second = diary.add_diary_entry("beta")
+    batch = diary.get_diary_reorganization_batch()
+    assert diary.apply_diary_reorganization(batch, [([first["entry_id"], second["entry_id"]], "alpha and beta")])
+
+    def fail_export(path, markdown):
+        raise OSError("disk unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(diary, "_atomic_write", fail_export)
+        diary.sync_reorganized_diary_reports()
+    assert diary.count_report_entries(diary.load_daily_report()) == 2
+    diary.sync_reorganized_diary_reports()
+    assert diary.count_report_entries(diary.load_daily_report()) == 1
+
+
+@pytest.mark.parametrize("groups", [
+    [{"ids": [1, 999], "text": "alpha"}],
+    [{"ids": [1, 1], "text": "alpha"}],
+    [{"ids": [2, 3], "text": "alpha"}],
+    [{"ids": [1, 2], "text": "alpha"}, {"ids": [1, 3], "text": "beta"}],
+    [{"ids": [1, 2], "text": "x" * (diary.MAX_ENTRY_LENGTH + 1)}],
+])
+def test_merge_plan_rejects_invalid_groups(groups):
+    originals = [{"id": 1, "review_pending": True}, {"id": 2, "review_pending": False},
+                 {"id": 3, "review_pending": False}]
+    with pytest.raises(ValueError):
+        reorganization._parse_merges(json.dumps({"merges": groups}), originals)
+
+
+def test_reorganization_batch_stays_within_local_day_and_category(monkeypatch):
+    freeze(monkeypatch, "2026-04-01T23:59:00+05:00")
+    target = diary.add_diary_entry("alpha")
+    diary.add_diary_entry("beta", "reflection_entries")
+    freeze(monkeypatch, "2026-04-02T00:01:00+05:00")
+    diary.add_diary_entry("gamma")
+    batch = diary.get_diary_reorganization_batch()
+    assert [row["id"] for row in batch] == [target["entry_id"]]
+
+
+async def test_hourly_reorganization_repeats_until_cancelled(monkeypatch):
+    sleep = AsyncMock(side_effect=[None, None, asyncio.CancelledError()])
+    review = AsyncMock()
+    monkeypatch.setattr(reorganization.asyncio, "sleep", sleep)
+    monkeypatch.setattr(reorganization, "reorganize_diary", review)
+
+    with pytest.raises(asyncio.CancelledError):
+        await reorganization.run_hourly_diary_reorganization()
+
+    assert [call.args for call in sleep.await_args_list] == [(3600,), (3600,), (3600,)]
+    assert review.await_count == 2

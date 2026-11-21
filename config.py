@@ -8,8 +8,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PROJECT_DIR = Path(__file__).resolve().parent
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-OPENROUTER_DECISION_API_BASE = "https://openrouter.ai/api/alpha"
 
 
 def project_path(path: str) -> str:
@@ -59,10 +57,8 @@ class Settings(BaseSettings):
     MAIN_LLM_MAX_TOKENS: int = 2048
     MAIN_LLM_TEMPERATURE: float = 0.7
 
-    # Optional model for decision requests.
-    DECISION_API_BASE: str = OPENROUTER_DECISION_API_BASE
-    DECISION_API_KEY: str = ""
-    DECISION_MODEL: str = ""
+    # Optional chat-completions model for hourly diary reorganization.
+    DIARY_LLM_MODEL: str = ""
 
     # Embeddings
     EMBED_API_BASE: str

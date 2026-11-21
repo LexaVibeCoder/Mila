@@ -672,32 +672,9 @@ class ToolExecutor:
             # No session context: never fall through to the real diary.
             return {"type": "write_diary", "status": "ignored"}
 
-        from core.diary.decision import decision_configured, review_draft
-        from core.diary.manager import (
-            add_diary_entry, diary_review_context, normalize_category, validate_entry_text,
-        )
+        from core.diary.manager import add_diary_entry
 
-        category = normalize_category(params.get("category", "day_entries"))
-        if error := validate_entry_text(entry):
-            return {"type": "write_diary", "status": "error", "error": error}
-
-        candidates = None
-        review = None
-        decision_trace = {}
-        if decision_configured():
-            context = await asyncio.to_thread(diary_review_context, entry, category)
-            if context is not None:
-                _, candidates = context
-                review = await review_draft(entry, candidates, diagnostics=decision_trace)
-
-        result = await asyncio.to_thread(
-            add_diary_entry, entry, category,
-            match=review.match if review else None, candidates=candidates if review else None,
-        )
-        if review and review.grammar_issue and result["status"] in ("written", "updated"):
-            result["grammar_issue"] = True
-        if decision_trace:
-            result["decision_review"] = decision_trace
+        result = await asyncio.to_thread(add_diary_entry, entry, params.get("category"))
         return {"type": "write_diary", **result}
 
     async def _handle_update_diary(self, params: Dict) -> Dict:
@@ -741,8 +718,7 @@ class ToolExecutor:
         if self.sandbox:
             return {"type": "update_diary", "status": "ignored"}
 
-        from core.diary.decision import decision_configured, review_draft
-        from core.diary.manager import diary_review_context, update_diary_entry, validate_entry_text
+        from core.diary.manager import update_diary_entry
 
         try:
             numeric_id = int(entry_id)
@@ -750,27 +726,7 @@ class ToolExecutor:
             numeric_id = 0
         if not 0 < numeric_id <= 2**63 - 1:
             return {"type": "update_diary", "status": "error", "error": "Invalid diary entry ID."}
-        if error := validate_entry_text(entry):
-            return {"type": "update_diary", "status": "error", "error": error}
-
-        category = params.get("category")
-        target = None
-        candidates = None
-        review = None
-        decision_trace = {}
-        if decision_configured():
-            context = await asyncio.to_thread(diary_review_context, entry, category, entry_id=numeric_id)
-            if context is not None:
-                target, candidates = context
-                review = await review_draft(entry, candidates, target=target, diagnostics=decision_trace)
-        result = await asyncio.to_thread(
-            update_diary_entry, numeric_id, entry, category, expected=target,
-            match=review.match if review else None, candidates=candidates if review else None,
-        )
-        if review and review.grammar_issue and result["status"] == "updated":
-            result["grammar_issue"] = True
-        if decision_trace:
-            result["decision_review"] = decision_trace
+        result = await asyncio.to_thread(update_diary_entry, numeric_id, entry, params.get("category"))
         return {"type": "update_diary", **result}
 
     # ------------------------------------------------------------------

@@ -216,32 +216,18 @@ async def test_invalid_tool_args_prompt_correction_without_delivering_draft(
                and "JSON-объектом" in m["content"] for m in fake.calls[1]["messages"])
 
 
-@pytest.mark.parametrize("status", ["update_suggested", "review_uncertain"])
-async def test_diary_match_suggests_updating_existing_id(make_pipeline, monkeypatch, status):
+async def test_diary_pipeline_uses_local_write_status(make_pipeline, monkeypatch):
     pipeline, fake = make_pipeline([
         _tool("write_diary", '{"entry":"alpha draft"}', "call-1"),
         _reply("alpha reply"),
     ])
-    outcome = {
-        "type": "write_diary", "status": status, "entry_id": 3,
-        "existing_entry": "alpha original", "decision_review": {"status": "reviewed"},
-    }
-    if status == "update_suggested":
-        outcome["update_entry_id"] = 3
-    execute = AsyncMock(return_value=outcome)
+    execute = AsyncMock(return_value={"type": "write_diary", "status": "written", "entry_id": 3})
     monkeypatch.setattr(pipeline, "_execute_single_action", execute)
 
     result = await pipeline.process_message("hi", [], [], sandbox=True)
 
-    assert result["reply_texts"] == ["alpha reply"]
-    feedback = next(m["content"] for m in fake.calls[1]["messages"] if '"alpha original"' in m["content"])
-    assert "update_diary" in feedback and "ID 3" in feedback
-    assert "объединённ" in feedback
-    if status == "review_uncertain":
-        assert "Черновик пока не сохранён" in feedback
-    assert "existing_entry" not in result["actions"][0]
-    assert result["actions"][0]["tool_call_id"] == "call-1"
-    assert result["actions"][0]["decision_review"]["status"] == "reviewed"
+    assert result["actions"][0]["status"] == "written"
+    assert any("Запись дневника сохранена (ID: 3)" in m["content"] for m in fake.calls[1]["messages"])
 
 
 async def test_duplicate_enter_dialog_switches_once_per_turn(make_pipeline, monkeypatch):

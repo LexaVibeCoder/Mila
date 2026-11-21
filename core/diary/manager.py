@@ -1,5 +1,6 @@
 """SQLite diary, local-day reports and sleep backups."""
 
+import json
 import os
 import re
 import sqlite3
@@ -87,7 +88,9 @@ def _init_diary(db_path: str) -> None:
                 category TEXT NOT NULL DEFAULT 'day_entries',
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now')),
-                archived INTEGER NOT NULL DEFAULT 0
+                archived INTEGER NOT NULL DEFAULT 0,
+                review_pending INTEGER NOT NULL DEFAULT 1,
+                merged_into INTEGER
             )
         """)
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({DIARY_TABLE})")}
@@ -98,7 +101,29 @@ def _init_diary(db_path: str) -> None:
             conn.execute(f"UPDATE {DIARY_TABLE} SET updated_at=created_at")
         if "archived" not in columns:
             conn.execute(f"ALTER TABLE {DIARY_TABLE} ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        if "review_pending" not in columns:
+            conn.execute(f"ALTER TABLE {DIARY_TABLE} ADD COLUMN review_pending INTEGER NOT NULL DEFAULT 1")
+        if "merged_into" not in columns:
+            conn.execute(f"ALTER TABLE {DIARY_TABLE} ADD COLUMN merged_into INTEGER")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS diary_reorganization_history (
+                id INTEGER PRIMARY KEY,
+                entry_id INTEGER NOT NULL,
+                source_ids TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content_md TEXT NOT NULL,
+                updated_at TEXT,
+                saved_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS diary_reorganization_exports (local_day TEXT PRIMARY KEY)
+        """)
         conn.execute(f"CREATE INDEX IF NOT EXISTS diary_by_date ON {DIARY_TABLE} (created_at)")
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS diary_pending_by_date ON {DIARY_TABLE} (created_at, id) "
+            "WHERE archived=0 AND merged_into IS NULL AND review_pending=1"
+        )
 
 
 def _connect():
@@ -107,7 +132,9 @@ def _connect():
 
 
 def _entries(conn, category=None, local_day=None, include_archived=False) -> list[dict]:
-    conditions = ["archived=0"] if not include_archived else []
+    conditions = ["merged_into IS NULL"]
+    if not include_archived:
+        conditions.append("archived=0")
     args = []
     if category is not None:
         conditions.append("category=?")
@@ -159,6 +186,7 @@ def _sync_to_daily_file(day: date) -> bool:
                     "", entry["content_md"], "", "---", "",
                 ])
             _atomic_write(daily_report_path(date_str), "\n".join(lines))
+            conn.execute("DELETE FROM diary_reorganization_exports WHERE local_day=?", (day.isoformat(),))
         return True
     except (OSError, ValueError, sqlite3.Error) as exc:
         print(f"[Diary] Failed to sync daily file: {type(exc).__name__}")
@@ -180,78 +208,33 @@ def _result(entry, status: str, **details) -> dict:
 
 
 def _duplicate(conn, text: str, day: date, exclude_id: int | None = None):
-    return conn.execute(
-        f"SELECT id, entry_number, category, archived, created_at FROM {DIARY_TABLE} "
+    bounds = _utc_day_bounds(day)
+    duplicate = conn.execute(
+        f"SELECT id, entry_number, category, created_at FROM {DIARY_TABLE} "
         "WHERE TRIM(content_md, ' ' || CHAR(9, 10, 13)) = ? AND id IS NOT ? "
-        "AND (archived=0 OR (created_at >= ? AND created_at < ?)) "
-        "ORDER BY archived, id LIMIT 1",
-        (text, exclude_id, *_utc_day_bounds(day)),
+        "AND (? IS NULL OR merged_into IS NULL) "
+        "AND ((archived=0 AND merged_into IS NULL) OR (created_at >= ? AND created_at < ?)) "
+        "ORDER BY merged_into IS NOT NULL, archived, id LIMIT 1",
+        (text, exclude_id, exclude_id, *bounds),
+    ).fetchone()
+    if duplicate is not None or exclude_id is not None:
+        return duplicate
+    return conn.execute(
+        f"SELECT e.id, e.entry_number, h.category, e.created_at FROM diary_reorganization_history h "
+        f"JOIN {DIARY_TABLE} e ON e.id=h.entry_id "
+        "WHERE TRIM(h.content_md, ' ' || CHAR(9, 10, 13)) = ? "
+        "AND ((e.archived=0 AND e.merged_into IS NULL) OR (e.created_at >= ? AND e.created_at < ?)) "
+        "ORDER BY e.archived, e.id LIMIT 1",
+        (text, *bounds),
     ).fetchone()
 
 
 def _duplicate_result(entry) -> dict:
-    return _result(entry, "duplicate", message=f"В записи дневника с ID {entry['id']} уже есть этот текст.")
+    return _result(entry, "duplicate", message=f"Текст уже сохранён в дневнике (ID {entry['id']}).")
 
 
-def _recent_candidates(conn, category: str, exclude_id: int | None) -> list[dict]:
-    rows = conn.execute(
-        f"SELECT id, content_md FROM {DIARY_TABLE} WHERE archived=0 AND category=? AND id IS NOT ? "
-        "ORDER BY created_at DESC, id DESC LIMIT 6", (category, exclude_id),
-    )
-    return [dict(row) for row in rows]
-
-
-def diary_review_context(
-    text: str, category: str | None, *, entry_id: int | None = None,
-) -> tuple[dict | None, list[dict]] | None:
-    """Read the edit target and recent active candidates, skipping locally resolved requests."""
-    with closing(_connect()) as conn:
-        conn.execute("BEGIN")
-        target = None
-        day = buffer.now_local().date()
-        if entry_id is not None:
-            row = conn.execute(
-                f"SELECT id, category, content_md, created_at FROM {DIARY_TABLE} WHERE id=? AND archived=0",
-                (entry_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            target = dict(row)
-            day = _entry_day(target)
-            if category is None:
-                category = target["category"]
-            if text == target["content_md"] and normalize_category(category) == target["category"]:
-                return None
-        if _duplicate(conn, text, day, exclude_id=entry_id) is not None:
-            return None
-        return target, _recent_candidates(conn, normalize_category(category), entry_id)
-
-
-def _current_candidate(conn, category: str, candidate: dict):
-    return conn.execute(
-        f"SELECT * FROM {DIARY_TABLE} WHERE id=? AND archived=0 AND category=? AND content_md=?",
-        (candidate["id"], category, candidate["content_md"]),
-    ).fetchone()
-
-
-def _review_stale() -> dict:
-    return {"status": "review_stale", "error": "Дневник изменился во время смысловой проверки."}
-
-
-def _replace_entry(conn, entry, text: str, category: str) -> dict:
-    if text == entry["content_md"] and category == entry["category"]:
-        return _result(entry, "unchanged", message="Текст записи уже сохранён.")
-    conn.execute(
-        f"UPDATE {DIARY_TABLE} SET content_md=?, category=?, updated_at=datetime('now') WHERE id=?",
-        (text, category, entry["id"]),
-    )
-    return _result(entry, "updated", category=category)
-
-
-def add_diary_entry(
-    content_md: str, category: str = "day_entries", *, match=None, candidates: list[dict] | None = None,
-) -> dict:
-    """Save a draft with its validated semantic decision, if available."""
+def add_diary_entry(content_md: str, category: str = "day_entries") -> dict:
+    """Save a new diary entry after local validation and exact deduplication."""
     category = normalize_category(category)
     text = content_md.strip()
     if error := validate_entry_text(text):
@@ -265,24 +248,7 @@ def add_diary_entry(
         if duplicate is not None:
             result = _duplicate_result(duplicate)
             day = _entry_day(duplicate)
-        elif match is not None:
-            status, candidate = match
-            current = _current_candidate(conn, category, candidate)
-            if current is None:
-                return _review_stale()
-            if status == "duplicate":
-                return _result(current, status, message="Смысл черновика уже есть в дневнике.")
-            if status == "review_uncertain":
-                return _result(current, status, existing_entry=current["content_md"])
-            if status == "update_suggested":
-                return _result(current, status, update_entry_id=current["id"],
-                               existing_entry=current["content_md"])
-            day = _entry_day(current)
-            result = _replace_entry(conn, current, text, category)
         else:
-            if candidates is not None and candidates != _recent_candidates(conn, category, None):
-                return _review_stale()
-
             number = conn.execute(
                 f"SELECT COALESCE(MAX(entry_number), 0) + 1 FROM {DIARY_TABLE}"
             ).fetchone()[0]
@@ -293,14 +259,10 @@ def add_diary_entry(
             )
             result = _result({"id": cur.lastrowid, "entry_number": number, "category": category}, "written")
 
-    # A repeat of a committed write can repair a failed Markdown export.
     return {**result, "daily_file_synced": _sync_to_daily_file(day)}
 
 
-def update_diary_entry(
-    entry_id: int, content_md: str, category: str | None = None, *,
-    expected: dict | None = None, match=None, candidates: list[dict] | None = None,
-) -> dict:
+def update_diary_entry(entry_id: int, content_md: str, category: str | None = None) -> dict:
     """Replace an active entry and regenerate the report for its original day."""
     text = content_md.strip()
     if error := validate_entry_text(text):
@@ -309,29 +271,105 @@ def update_diary_entry(
     with closing(_connect()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         entry = conn.execute(
-            f"SELECT * FROM {DIARY_TABLE} WHERE id=? AND archived=0", (entry_id,)
+            f"SELECT * FROM {DIARY_TABLE} WHERE id=? AND archived=0 AND merged_into IS NULL", (entry_id,)
         ).fetchone()
         if entry is None:
             return {"status": "not_found", "entry_id": entry_id, "error": f"Diary entry ID {entry_id} not found."}
-        if expected is not None and (entry["category"], entry["content_md"]) != (
-            expected["category"], expected["content_md"],
-        ):
-            return _review_stale()
         day = _entry_day(entry)
-        duplicate = _duplicate(conn, text, day, exclude_id=entry_id)
-        if duplicate is not None:
-            return _duplicate_result(duplicate)
         target_category = entry["category"] if category is None else normalize_category(category)
-        if match is not None:
-            _, candidate = match
-            current = _current_candidate(conn, target_category, candidate)
-            if current is None:
-                return _review_stale()
-            return _result(current, "duplicate", message="Смысл черновика уже есть в другой записи дневника.")
-        if candidates is not None and candidates != _recent_candidates(conn, target_category, entry_id):
-            return _review_stale()
-        result = _replace_entry(conn, entry, text, target_category)
+        if text == entry["content_md"] and target_category == entry["category"]:
+            result = _result(entry, "unchanged", message="Текст записи уже сохранён.")
+        else:
+            # Reusing an older version of this entry is a valid explicit edit.
+            duplicate = _duplicate(conn, text, day, exclude_id=entry_id)
+            if duplicate is not None:
+                return _duplicate_result(duplicate)
+            conn.execute(
+                f"UPDATE {DIARY_TABLE} SET content_md=?, category=?, updated_at=datetime('now'), review_pending=1 "
+                "WHERE id=?", (text, target_category, entry_id),
+            )
+            result = _result(entry, "updated", category=target_category)
+
     return {**result, "daily_file_synced": _sync_to_daily_file(day)}
+
+
+def get_diary_reorganization_batch() -> list[dict]:
+    """Take pending entries and recent reviewed context from one day and category."""
+    with closing(_connect()) as conn:
+        conn.execute("BEGIN")
+        first = conn.execute(
+            f"SELECT created_at, category FROM {DIARY_TABLE} "
+            "WHERE archived=0 AND merged_into IS NULL AND review_pending=1 "
+            "ORDER BY created_at, id LIMIT 1"
+        ).fetchone()
+        if first is None:
+            return []
+        scope = (first["category"], *_utc_day_bounds(_entry_day(first)))
+        eligible = (
+            f"SELECT id, category, content_md, created_at, updated_at, review_pending FROM {DIARY_TABLE} "
+            "WHERE archived=0 AND merged_into IS NULL AND category=? AND created_at>=? AND created_at<? "
+        )
+        pending = conn.execute(
+            eligible + "AND review_pending=1 ORDER BY created_at, id LIMIT 16", scope,
+        ).fetchall()
+        reviewed = conn.execute(
+            eligible + "AND review_pending=0 ORDER BY created_at DESC, id DESC LIMIT 8", scope,
+        ).fetchall()
+        return [dict(row) for row in pending + reviewed]
+
+
+def apply_diary_reorganization(batch: list[dict], merges: list[tuple[list[int], str]]) -> bool:
+    """Apply a validated merge plan only if the supplied active rows still match."""
+    entries = {row["id"]: row for row in batch}
+    with closing(_connect()) as conn, conn:
+        # The caller holds the sleep-state write lock during this commit.
+        conn.execute("PRAGMA busy_timeout=250")
+        conn.execute("BEGIN IMMEDIATE")
+        placeholders = ",".join("?" for _ in entries)
+        rows = conn.execute(
+            f"SELECT id, category, content_md, created_at, updated_at, review_pending FROM {DIARY_TABLE} "
+            f"WHERE archived=0 AND merged_into IS NULL AND id IN ({placeholders})",
+            tuple(entries),
+        )
+        if {row["id"]: dict(row) for row in rows} != entries:
+            return False
+
+        for ids, text in merges:
+            target_id = min(ids)
+            target = entries[target_id]
+            sources = sorted(source_id for source_id in ids if source_id != target_id)
+            conn.execute(
+                "INSERT INTO diary_reorganization_history (entry_id, source_ids, category, content_md, updated_at) "
+                "VALUES (:id, :source_ids, :category, :content_md, :updated_at)",
+                {**target, "source_ids": json.dumps(sources)},
+            )
+            if text != target["content_md"]:
+                conn.execute(
+                    f"UPDATE {DIARY_TABLE} SET content_md=?, updated_at=datetime('now') WHERE id=?",
+                    (text, target_id),
+                )
+            conn.executemany(
+                f"UPDATE {DIARY_TABLE} SET merged_into=?, review_pending=0 WHERE id=?",
+                ((target_id, source_id) for source_id in sources),
+            )
+
+        conn.execute(
+            f"UPDATE {DIARY_TABLE} SET review_pending=0 WHERE id IN ({placeholders})", tuple(entries),
+        )
+        if merges:
+            conn.execute(
+                "INSERT OR IGNORE INTO diary_reorganization_exports (local_day) VALUES (?)",
+                (_entry_day(batch[0]).isoformat(),),
+            )
+    return True
+
+
+def sync_reorganized_diary_reports() -> None:
+    """Retry reports queued transactionally by diary merges."""
+    with closing(_connect()) as conn:
+        days = conn.execute("SELECT local_day FROM diary_reorganization_exports ORDER BY local_day").fetchall()
+    for row in days:
+        _sync_to_daily_file(date.fromisoformat(row["local_day"]))
 
 
 def _diary_markdown(entries: list[dict]) -> str:
@@ -359,7 +397,7 @@ def get_diary_entries_markdown(category: str = None) -> str:
 def get_diary_entry_count() -> int:
     """Count active entries awaiting sleep analysis."""
     with closing(_connect()) as conn:
-        return conn.execute(f"SELECT COUNT(*) FROM {DIARY_TABLE} WHERE archived=0").fetchone()[0]
+        return conn.execute(f"SELECT COUNT(*) FROM {DIARY_TABLE} WHERE archived=0 AND merged_into IS NULL").fetchone()[0]
 
 
 def snapshot_diary_entries() -> list[dict]:
@@ -418,7 +456,7 @@ def clear_diary(expected_entries: list[dict] | None = None) -> None:
         conn.execute("BEGIN IMMEDIATE")
         if _entries(conn) != entries:
             raise RuntimeError("Diary changed while preparing the backup")
-        conn.execute(f"UPDATE {DIARY_TABLE} SET archived=1 WHERE archived=0")
+        conn.execute(f"UPDATE {DIARY_TABLE} SET archived=1 WHERE archived=0 AND merged_into IS NULL")
 
 
 def load_daily_report(date_str: str = None) -> str:

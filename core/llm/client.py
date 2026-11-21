@@ -1,7 +1,25 @@
 import copy
+import logging
+import math
+import random
 import openai
 from typing import List, Dict, Any, Optional
 from config import settings, normalize_api_base
+
+
+class LLMRequestError(RuntimeError):
+    """A terminal provider failure with a safe diagnostic message."""
+
+    def __init__(self, status_code: int | None):
+        self.status_code = status_code
+        self.authentication_failed = status_code in (401, 403)
+        if self.authentication_failed:
+            message = f"LLM authorization failed (HTTP {status_code})"
+        elif status_code is not None:
+            message = f"LLM request failed (HTTP {status_code})"
+        else:
+            message = "LLM request failed"
+        super().__init__(message)
 
 
 def _is_openrouter(api_base: Optional[str]) -> bool:
@@ -38,37 +56,17 @@ def _reasoning_kwargs(api_base: Optional[str], reasoning_effort: Optional[str],
 
 def _retry_wait(exc: Exception, attempt: int, base_delay: float) -> float:
     """Backoff with Retry-After support for 429/5xx/timeouts."""
-    import random
     default = base_delay * (2 ** (attempt - 1))
-    try:
-        status = getattr(exc, "status_code", None)
-        msg = str(exc).lower()
-        retryable = (
-            (isinstance(status, int) and (status == 429 or 500 <= status <= 599))
-            or "429" in msg or "rate limit" in msg or "retry" in msg
-            or "timeout" in msg or "temporar" in msg or "5xx" in msg
-            or "overloaded" in msg or "try again" in msg
-        )
-        if not retryable and attempt == 1:
-            # Unknown errors still get one fast retry; backoff grows anyway.
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if raw:
+        try:
+            seconds = float(raw)
+            if math.isfinite(seconds):
+                default = min(max(seconds, 1.0), 60.0)
+        except (TypeError, ValueError):
             pass
-        # Honor Retry-After header when the SDK exposes it.
-        retry_after = None
-        resp = getattr(exc, "response", None)
-        headers = getattr(resp, "headers", None) if resp is not None else None
-        if headers:
-            try:
-                ra = headers.get("retry-after") or headers.get("Retry-After")
-                if ra:
-                    retry_after = float(str(ra).split(",")[0].strip())
-            except (TypeError, ValueError):
-                retry_after = None
-        if retry_after is not None:
-            return min(max(retry_after, 1.0), 60.0) + random.uniform(0, 0.5)
-    except Exception:
-        pass
-    import random as _r
-    return default + _r.uniform(0, 0.5)
+    return default + random.uniform(0, 0.5)
 
 
 class LLMClient:
@@ -84,6 +82,7 @@ class LLMClient:
             base_url=normalize_api_base(base),
             api_key=api_key or settings.LLM_API_KEY,
             timeout=timeout,
+            max_retries=0,  # generate() owns the request retry budget.
         )
         self.model = model or settings.MAIN_LLM_MODEL
         self.default_max_tokens = max_tokens or settings.MAIN_LLM_MAX_TOKENS
@@ -112,6 +111,7 @@ class LLMClient:
                 base_url=normalize_api_base(api_base),
                 api_key=settings.LLM_API_KEY,
                 timeout=self.timeout,
+                max_retries=0,
             )
         if reasoning_effort is not None:
             self.default_reasoning_effort = reasoning_effort
@@ -182,24 +182,34 @@ class LLMClient:
                 elapsed = time.time() - start_time
                 print(f"  [LLM] Response in {elapsed:.2f}s")
             except Exception as e:
+                status = getattr(e, "status_code", None)
+                failure = LLMRequestError(status)
+                if failure.authentication_failed:
+                    logging.getLogger(__name__).error("%s", failure)
+                    raise failure from None
+
+                can_retry = attempt < max_retries
                 # Fallback: if the model/gateway rejects native audio, retry
                 # text-only (placeholder stays in history) instead of failing.
-                if not audio_stripped and _contains_audio_part(kwargs.get("messages")):
-                    print(f"  [LLM] Audio rejected ({e}), retrying text-only...")
+                if (can_retry and status in (400, 415, 422) and not audio_stripped
+                        and _contains_audio_part(kwargs.get("messages"))):
+                    print(f"  [LLM] Audio rejected (HTTP {status}), retrying text-only...")
                     audio_stripped = True
                     kwargs["messages"] = _strip_audio_parts(kwargs.get("messages"))
                     await asyncio.sleep(1.0)
                     continue
-                print(f"  [LLM] API Error (attempt {attempt}): {e}")
-                last_error = e
-
-                if attempt < max_retries:
+                print(f"  [LLM] API Error (attempt {attempt}): {failure}")
+                retryable = (
+                    isinstance(e, (openai.APIConnectionError, TimeoutError))
+                    or status in (408, 409, 429)
+                    or (isinstance(status, int) and 500 <= status <= 599)
+                )
+                if can_retry and retryable:
                     wait = _retry_wait(e, attempt, retry_delay)
                     print(f"  [LLM] Retry in {wait:.1f}s...")
                     await asyncio.sleep(wait)
                     continue
-                else:
-                    raise
+                raise failure from None
 
             if not response.choices:
                 print(f"  [LLM] Empty response choices (attempt {attempt}), retrying...")

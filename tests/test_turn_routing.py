@@ -2,15 +2,19 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from pytdbot import types
 
 import core.delivery as delivery
 import core.pipeline as pipeline_module
+import core.proactive as proactive
 import core.queue as queue_module
 from core.delivery import TurnContext, deliver_messages
 from core.pipeline import ThinkPipeline
 from core.queue import MessageCoordinate
+from core.tg_adapter import notify_pipeline_error
 
 
 DIALOG_A = {
@@ -198,6 +202,76 @@ class _FakeBot:
 
     async def _compress_context(self, chat_id):
         return None
+
+
+def _saved_messages_client():
+    return SimpleNamespace(
+        createPrivateChat=AsyncMock(return_value=SimpleNamespace(
+            id=42, type=types.ChatTypePrivate(user_id=42),
+        )),
+        sendTextMessage=AsyncMock(return_value=SimpleNamespace(id=1)),
+    )
+
+
+async def test_reactive_failure_alert_goes_only_to_saved_messages(monkeypatch):
+    bot = _FakeBot()
+    client = _saved_messages_client()
+    error = "LLM authorization failed (HTTP 403)"
+    monkeypatch.setattr(queue_module, "get_presence", lambda: dict(DIALOG_A))
+    monkeypatch.setattr(queue_module, "get_user_info", lambda user_id: {})
+    monkeypatch.setattr(queue_module, "get_needs_tracker", lambda: SimpleNamespace(
+        get_needs=lambda **kwargs: {"current_hour": 12, "fatigue": 0.0},
+    ))
+    monkeypatch.setattr("core.sleep.manager.is_sleeping", lambda: False)
+
+    async def stream(**kwargs):
+        yield {"type": "error", "error": error}
+
+    bot.pipeline.process_message_stream = stream
+    coordinator = MessageCoordinate(bot)
+    coordinator._events["20002"] = asyncio.Event()
+    coordinator._pending["20002"] = ["alpha message"]
+
+    await coordinator._generate_for_chat(client, "20002")
+
+    client.createPrivateChat.assert_awaited_once_with(user_id=bot.me.id, force=True)
+    client.sendTextMessage.assert_awaited_once_with(
+        chat_id=42, text=f"Ошибка пайплайна Mila\n{error}",
+        disable_web_page_preview=True,
+    )
+
+
+async def test_proactive_iteration_limit_alert_survives_focus_change(monkeypatch):
+    bot = _FakeBot()
+    bot.app = _saved_messages_client()
+    error = "Pipeline iteration limit reached (3)"
+    result = {"success": False, "error": error, "error_code": "iteration_limit"}
+    current = dict(DIALOG_A)
+    monkeypatch.setattr("core.db.get_chats_by_last_activity", lambda **kwargs: [{"chat_id": "10001"}])
+    monkeypatch.setattr("core.presence.get_presence", lambda: dict(current))
+    monkeypatch.setattr(proactive, "build_proactive_block", lambda _: "alpha prompt")
+
+    async def stream(**kwargs):
+        current["focus_chat_id"] = "30003"
+        yield {"type": "error", "error": error, "result": result}
+
+    bot.pipeline.process_message_stream = stream
+
+    assert await proactive.run_proactive_turn(bot) == result
+    bot.app.sendTextMessage.assert_awaited_once_with(
+        chat_id=42, text=f"Ошибка пайплайна Mila\n{error}",
+        disable_web_page_preview=True,
+    )
+
+
+async def test_error_alert_rejects_chat_of_another_user(caplog):
+    client = _saved_messages_client()
+    client.createPrivateChat.return_value.type = types.ChatTypePrivate(user_id=43)
+
+    await notify_pipeline_error(client, 42, "alpha failure")
+
+    client.sendTextMessage.assert_not_awaited()
+    assert "Pipeline alert to Saved Messages failed" in caplog.text
 
 
 @pytest.mark.asyncio

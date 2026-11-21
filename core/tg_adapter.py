@@ -7,6 +7,8 @@ Python 3.11 compatible.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -107,13 +109,16 @@ async def normalize_message(client, message: types.Message) -> NormalizedMessage
     )
 
 
-async def send_text(client, chat_id: int, text: str) -> None:
+async def send_text(
+    client, chat_id: int, text: str, *, disable_web_page_preview: bool = False,
+) -> None:
     """Send a text message with one retry on 429/flood, raising on failure."""
-    import asyncio
     import random
     last_error: Exception | None = None
     for attempt in range(3):
-        res = await client.sendTextMessage(chat_id=chat_id, text=text)
+        res = await client.sendTextMessage(
+            chat_id=chat_id, text=text, disable_web_page_preview=disable_web_page_preview,
+        )
         if not isinstance(res, types.Error):
             return
         msg = f"{res.code} {res.message}"
@@ -136,6 +141,29 @@ async def send_text(client, chat_id: int, text: str) -> None:
         raise last_error
     if last_error:
         raise last_error
+
+
+async def notify_pipeline_error(client, own_user_id: int, error: str) -> None:
+    """Send one turn diagnostic to the logged-in account's Saved Messages."""
+    try:
+        # The live turn holds the global lock, so a Telegram outage must not
+        # keep the queue waiting through backoff for an operational alert.
+        async with asyncio.timeout(10):
+            chat = await client.createPrivateChat(user_id=own_user_id, force=True)
+            if isinstance(chat, types.Error):
+                raise RuntimeError(f"createPrivateChat failed (TDLib {chat.code})")
+            if not isinstance(chat.type, types.ChatTypePrivate) or chat.type.user_id != own_user_id:
+                raise RuntimeError("TDLib returned a different chat for Saved Messages")
+            # Stay below Telegram's text limit even for non-BMP characters.
+            detail = error if len(error) <= 1900 else error[:1900] + "…"
+            await send_text(
+                client, chat.id, f"Ошибка пайплайна Mila\n{detail}",
+                disable_web_page_preview=True,
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Pipeline alert to Saved Messages failed (%s)", type(exc).__name__,
+        )
 
 
 async def send_typing(client, chat_id: int) -> None:

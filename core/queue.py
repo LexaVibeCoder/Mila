@@ -27,6 +27,7 @@ from core.presence import get_presence
 from core.tg_adapter import (
     normalize_event, download_notification_media,
     parse_chat_action_update, is_typing_like_action, is_cancel_action,
+    notify_pipeline_error,
 )
 
 
@@ -566,6 +567,12 @@ class MessageCoordinate:
                 turn=turn,
                 history_loader=load_history,
             ):
+                etype = gen_event.get("type")
+                if etype == "error":
+                    # An operational alert belongs to the account itself,
+                    # regardless of whether the conversation was interrupted.
+                    await notify_pipeline_error(client, bot.me.id, gen_event["error"])
+
                 # If a new message arrived or the peer started typing
                 # mid-generation → stop and wait for their message.
                 # The batch was already drained: put it back if nothing was
@@ -577,7 +584,6 @@ class MessageCoordinate:
                     print(f"[Batch] Interrupted during generation ({reason}) — batch restored")
                     return True
 
-                etype = gen_event.get("type")
                 if etype == "thought":
                     preview = gen_event.get("thoughts", "")[:120].replace("\n", " ")
                     print(f"  Content: {preview}...")
@@ -624,8 +630,6 @@ class MessageCoordinate:
                         full_response = result.get("reply_text", full_response)
                     if result.get("silence_reason") and not sent_any:
                         has_silence_action = True
-                elif etype == "error":
-                    print(f"\n[Pipeline Error] {gen_event.get('error')}")
 
             # ── Post-processing (no-answer save) ──
             # No fallback sends: dialog answers arrive via `reply` bubbles,

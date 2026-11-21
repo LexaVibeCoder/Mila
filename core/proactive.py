@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.delivery import TurnContext, deliver_messages
+from core.tg_adapter import notify_pipeline_error
 
 _LEADING_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]\s*")
 
@@ -194,9 +195,12 @@ async def _run_proactive_turn_locked(bot) -> dict:
             proactive_block=block,
             history_loader=load_history,
         ):
+            etype = ev.get("type")
+            if etype == "error":
+                await notify_pipeline_error(bot.app, bot.me.id, ev["error"])
+                return ev.get("result") or {"success": False, "error": ev["error"]}
             if interrupted(str(turn.presence.get("focus_chat_id") or "")):
                 return {"success": False, "error": "interrupted"}
-            etype = ev.get("type")
             if etype == "thought":
                 preview = (ev.get("thoughts") or "")[:120].replace("\n", " ")
                 if preview.strip():
@@ -217,14 +221,9 @@ async def _run_proactive_turn_locked(bot) -> dict:
                 reply_texts = list(ev.get("texts") or [])
                 reply_chat_id = turn.resolve_target() or ""
                 reply_via = ev.get("via", "")
-                break
             elif etype == "silence":
                 silence_reason = ev.get("reason", "")
                 print(f"  [Proactive] silence: {silence_reason}")
-                break
-            elif etype == "error":
-                print(f"  [Proactive] pipeline error: {ev.get('error')}")
-                break
             elif etype == "done":
                 res = ev.get("result", {})
                 if not reply_texts and res.get("reply_texts"):

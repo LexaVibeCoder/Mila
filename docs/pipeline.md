@@ -38,6 +38,8 @@ process_message_stream() / process_message()
     │   │
     │   └── есть tool_calls:
     │       ├── контент этого хода НЕ отправляется (это рассуждение)
+    │       ├── некорректные JSON-аргументы → ошибка в контексте модели
+    │       ├── одинаковые имя и аргументы → только первое выполнение за ход
     │       ├── для каждого action: execute_action → apply_action_effect
     │       ├── start_sleep(sleeping) → silence (старт журналируется в sleep manager)
     │       ├── enter_*/switched → system-сообщение с `[событие]` в конце → повтор
@@ -47,7 +49,7 @@ process_message_stream() / process_message()
     │       ├── write/update_diary → инъекция результата → повтор
     │       └── иначе → reminder и следующий круг
     │
-    └── yield "reply" / "silence" / "done" / "error"
+    └── исчерпание max_iterations без решения → error с кодом iteration_limit
 ```
 
 ## Состояния и протокол
@@ -56,7 +58,7 @@ process_message_stream() / process_message()
 
 | Состояние | Ответ | Инструменты |
 |-----------|-------|-------------|
-| `rest` | текстовый ответ здесь игнорируется | `enter_dialog`, `send_message` (одна отмашка), `enter_working`, `start_sleep` |
+| `rest` | текст без инструмента вызывает напоминание и повтор в рамках лимита | `enter_dialog`, `send_message` (одна отмашка), `enter_working`, `start_sleep` |
 | `working` | то же | `enter_dialog`, `send_message`, `enter_rest`, `start_sleep` |
 | `dialog` | обычный текст в текущий чат; пустой ответ = молчание | `send_message` (разовая отмашка), `search_memory`, `write_diary`, `update_diary`, presence-тулы, `start_sleep` |
 | `sleep` | пайплайн обычно не работает | `enter_dialog`, `start_sleep` |
@@ -105,7 +107,8 @@ Presence switched. Decide in the new state now.
   `[YYYY-MM-DD HH:MM(:SS)]`: модель иногда помечает желаемый разрыв
   собственным timestamp вместо пустой строки;
 - одиночный `\n` внутри абзаца сохраняется как есть;
-- пустой или whitespace-only ответ — валидное молчание, ретрая нет;
+- пустой ответ или ответ из пробельных символов без вызовов инструментов
+  сразу завершает ход молчанием в `dialog`, `rest` и `working`;
 - `[YYYY-MM-DD HH:MM(:SS)]` в начале пузыря (в т.ч. скопированный из
   истории) удаляется; timestamp в середине строки не трогается;
 - `response_format` больше не запрашивается: провайдер получает обычный
@@ -123,7 +126,7 @@ search_result → {"type": "search_result", "content": "..."}   (memory или p
 reply         → {"type": "reply", "texts": [...], "text": "...", "via": "bubbles"|"send_message_brush_off"}
 silence       → {"type": "silence", "reason": "..."}
 done          → {"type": "done", "result": {...}}
-error         → {"type": "error", "error": "..."}
+error         → {"type": "error", "error": "...", "result": {...}}
 ```
 
 Событие `reply` **не содержит получателя**: `TurnContext` хранит снимок
@@ -135,6 +138,28 @@ error         → {"type": "error", "error": "..."}
 `process_message()` выполняет тот же цикл и возвращает `result` целиком.
 `result["reply_chat_id"]` остаётся для логов/Observatory и вычисляется из
 `turn.resolve_target()`, а не из события.
+
+## Ошибки
+
+При HTTP 401/403 LLM-клиент сразу завершает запрос и пишет событие уровня
+ERROR с HTTP-статусом. Повторы HTTP 429, 5xx, таймаутов и ошибок соединения
+выполняются в рамках бюджета LLM-клиента с задержкой. Если провайдер вернул
+числовой `Retry-After`, он используется для расчёта задержки. В диагностику
+попадает безопасное описание сбоя без тела ответа провайдера.
+
+Исчерпание лимита итераций считается ошибкой хода. Намеренное молчание и
+переход в сон завершают ход успешно. При ошибке структура результата
+сохраняется, включая уже выполненные действия, завершённые ответы модели,
+последний system prompt и число начатых LLM-итераций. Код ошибки различает
+`iteration_limit`, `llm_authorization`, `llm_request` и `pipeline_error`.
+
+В живых входящих и проактивных ходах диагностика доступна на странице
+Pipeline в Observatory. Очередь и проактивный планировщик также отправляют
+текст ошибки в «Избранное» Telegram-аккаунта Милы. Уведомление адресуется
+этому аккаунту по ID из `getMe()` и проходит вне маршрута диалога. Если
+Telegram недоступен или текст превышает лимит уведомления, полная
+диагностика остаётся в журнале. В тестовом чате ошибка отображается в
+истории сессии.
 
 ## Результат
 
@@ -149,8 +174,10 @@ error         → {"type": "error", "error": "..."}
   "reply_chat_id": "...",
   "silence_reason": "...",
   "raw_llm_responses": [...],
-  "system_prompt": "",          # legacy-поле, не заполняется
+  "system_prompt": "...",
   "llm_messages": [],           # legacy-поле, не заполняется
+  "error": None,
+  "error_code": None,
   "timing": {"total": "3.21s", "iterations": 2}
 }
 ```
@@ -167,7 +194,8 @@ error         → {"type": "error", "error": "..."}
   приклеиваются к текущему ходу;
 - аудио конвертируется в wav/16kHz mono через ffmpeg; при отсутствии ffmpeg
   нативный звук пропускается (плейсхолдер остаётся);
-- при ошибке провайдера на аудио `LLMClient` делает один текстовый ретрай.
+- при HTTP 400, 415 или 422 в запросе с аудио `LLMClient` может сделать один
+  текстовый повтор в рамках бюджета.
 
 ## Sandbox (Observatory Test Chat)
 
@@ -213,6 +241,7 @@ error         → {"type": "error", "error": "..."}
   ],
   "success": true,
   "error": null,
+  "error_code": null,
   "timing": {"total": "3.21s", "iterations": 2}
 }
 ```
